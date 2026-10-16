@@ -111,6 +111,16 @@ _RULE_ACTION: Dict[str, str] = {
     "disclosure:suts_pointer_parameters": "설계서가 포인터 매개변수를 포인터 이름으로만 적어 가리키는 대상 표기(`p[0]` · 멤버)로 "
                                           "바꾸거나 뺐다 — SwUDS 입출력 표에 대상 표기(정본처럼 `p[0]` · `ctx[0].a`)로 적으면 "
                                           "설계서 이름 그대로 쓴다. 뺀 입력은 함수가 그 대상을 읽지 않는지 확인한다.",
+    # (R90) the derived expected value against the design's statement of that output — a fact, not a generation deficit
+    "disclosure:suts_design_check": "'설계 범위 밖'(입력이 모두 설계 안인 행에서 소스로 계산한 기대값이 설계서가 그 출력에 적은 "
+                                    "범위 밖)이면 설계와 코드 중 틀린 쪽을 고친다(Test Evidence 의 Design Basis 열이 표 · 행 · "
+                                    "칸 원문을 댄다). '설계 행 갈림'(같은 출력을 두 행이 다르게 적음)이면 설계서 한쪽을 고친다. "
+                                    "이 어긋남은 재생성으로 사라지지 않는다. 대조가 0칸이면 사유를 본다: SwUDS 출력 표를 못 읽었으면 "
+                                    "'SwUDS 판독' 공시의 사유대로 문서를 고쳐 다시 생성하고, 문서는 읽었는데 설계 진술이 있는 출력이 "
+                                    "없으면 SwUDS 출력 표에 Value Range 를 적는다. 단정할 수 있는 대조가 0칸(어긋날 수 없던 타입 "
+                                    "전폭 대조 · 약한 후보 · 설계 밖 입력 행뿐)이면 '밖 없음' 이 아니다 — 설계 범위를 타입보다 좁게 "
+                                    "적거나 입력 범위를 적어야 대조가 된다. 같은 이름의 정의가 여럿(APP · BOOT)인 함수의 '밖' 은 "
+                                    "단정하지 않았다 — 빌드마다 표를 두거나 표가 어느 빌드의 것인지 밝힌다.",
     "disclosure:suts_range_conflicts": "설계서의 값 범위가 선언 타입 폭을 벗어난다 — 설계서와 소스 중 틀린 쪽을 고친다(시험은 타입 폭으로 했다).",
     "disclosure:suts_asil_evidence": "근거 없는 ASIL 이 있다 — 등급을 지어내지 않았으니 SwUDS·SwDS 에서 정하거나 소스에 @asil 을 단다.",
     "disclosure:sts_mapping_basis": "약한 근거(부분 문자열·추측 매칭)로 요구에 붙은 함수가 있다 — 추적성 판정 때 따로 보고, SwDS Related "

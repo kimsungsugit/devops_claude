@@ -422,6 +422,21 @@ def parse_value_range(text: Any, type_text: Any = "") -> Optional[Tuple[int, int
     return (int(rng[0]), int(rng[1])) if rng else None
 
 
+def uds_param_key(name: str) -> str:
+    """(R65) 설계서 파라미터 이름과 unit 이름이 같은 객체인지 보는 열쇠 — `p->m` · `p[0].m` · `p.m` · `buf[3]` · `buf` 가 같고
+    대소문자를 가리지 않는다(`Return` = `return`). SUTS 범위 조회(`generators.suts._uds_param_key`)와 R90 기대값 설계 대조
+    (`generators.suts_design_check`)가 이 한 규칙을 쓴다."""
+    return re.sub(r"\[[^\]]*\]", "", name.replace("->", ".")).replace(" ", "").lower()
+
+
+def _statement_signature(rec: Dict[str, Any]) -> Tuple[Any, ...]:
+    """(R90) 출력 행이 **무엇을 말했나** — 읽은 범위 · 값 목록 · 못 읽은 사유, 못 읽었으면 공백 · 대소문자를 뺀 원문(`0x05` 와
+    `0x06` 은 둘 다 `single_value` 지만 다른 말이다). 표기만 다른 행(`0x00 ~ 0xFF` · `0x00~0xFF`)은 같은 서명이다."""
+    unread = rec.get("range_unread")
+    text = re.sub(r"\s+", "", str(rec.get("range_text") or "")).lower() if unread else None
+    return (tuple(rec.get("range") or ()), tuple(rec.get("values") or ()), unread, text)
+
+
 def _row_cells(tr) -> List[Tuple[str, bool]]:
     """(R65) 행의 칸을 **그리드 열**로 — `w:gridBefore` · `w:gridSpan` 을 펼친다(python-docx `row.cells` 와 같은 규칙).
     각 칸은 `(글, 세로 병합 이어짐)`. 칸 하나가 여러 열을 덮으면 같은 글이 그 열마다 온다."""
@@ -465,6 +480,7 @@ def _parse_table(tbl, function: str = "", stats: Optional[Dict[str, Any]] = None
     asil = ""
     description = ""
     param_info: Dict[str, Dict[str, Any]] = {}
+    out_info: Dict[str, Dict[str, Any]] = {}     # (R90) 출력 표 행만 — 아래 주석
     # 파라미터 표의 열은 **머리행으로 찾는다**(리뷰 C1) — `No | Name | Type | Value Range | …` 순서를 상수(2·3)로 박으면
     #   열 순서가 다른 양식에서 `Reset Value` 를 범위로 읽고도 "설계서가 말했다" 고 적는다(HSIS·SUTS 2템플릿과 같은 결함형).
     #   머리행을 못 만난 표는 옛 순서(2·3)로 읽고 그 사실을 `param_col_layout` 에 남긴다.
@@ -542,6 +558,10 @@ def _parse_table(tbl, function: str = "", stats: Optional[Dict[str, Any]] = None
         elif "values" in _read:
             _rec["values"] = list(_read["values"])
             st["values_read"] = st.get("values_read", 0) + 1
+            if "two_value_list" in (_read.get("notation") or ()):
+                # (R90) 값 둘(`0x00, 0xFF`)은 '값 둘' 인지 '쉼표로 쓴 범위' 인지 문서가 말하지 않는다 — 기대값 설계 대조는 두 값
+                #   사이의 값을 단정하지 않는다(입력 · 출력 행 모두 — 출력 행 기록 `out_info` 는 이 기록을 물려받는다)
+                _rec["two_value_list"] = True
         elif "unread" in _read:
             _rec["range_unread"] = _read["unread"]
             _by = st.setdefault("range_unread_by_reason", {})
@@ -558,8 +578,25 @@ def _parse_table(tbl, function: str = "", stats: Optional[Dict[str, Any]] = None
                 _nt[tag] = _nt.get(tag, 0) + 1
         if _rec and nm not in param_info:
             param_info[nm] = _rec
+        if mode == "out":
+            # (R90) 출력 표의 행은 **따로** 둔다 — `param_info` 는 이름마다 첫 행(입력 표가 먼저라 입력 행)이라 같은 이름이 입력 ·
+            #   출력 양쪽에 있으면 출력 행이 적은 범위가 가려진다. 기대값 대조(`generators.suts_design_check`)가 이 칸을 읽는다.
+            #   행이 있는데 범위 칸이 비었으면 그것도 싣는다(`range_text` "") — "출력 표에 없다" 와 "적었지만 범위가 없다" 가 다르다.
+            _orec: Dict[str, Any] = {k: v for k, v in _rec.items() if k != "range_text"}
+            _orec["range_text"] = " ".join(str(_raw).split())
+            _orec["no"] = head
+            if not 0 <= col_range < len(cells):
+                # 표에 Value Range 열이 없다(머리행에서 못 찾음) · 행이 그 열까지 오지 않는다 — "범위 칸이 비었다" 와 다르다
+                _orec["range_column_missing"] = True
+            _prev = out_info.get(nm)
+            if _prev is None:
+                out_info[nm] = _orec
+            elif _statement_signature(_prev) != _statement_signature(_orec):
+                # 같은 출력을 두 행이 다르게 적었다 — 고르지 않고 둘 다 남긴다(대조는 '상충' 으로 보인다). 표기만 다른 두 행
+                #   (`0x00 ~ 0xFF` · `0x00~0xFF`, `0XFFFFFFFF` · `0xFFFFFFFF`)은 같은 말이다 — 읽은 값으로 견준다(리뷰 W4)
+                _prev.setdefault("conflicting_rows", []).append(_orec)
     return {"inputs": inputs, "outputs": outputs, "asil": asil, "description": description, "param_info": param_info,
-            "param_col_layout": col_layout}
+            "param_col_layout": col_layout, "out_info": out_info, "heading": function}
 
 
 def load_uds_unit_io(uds_path: Any, source_functions: Any = None) -> Dict[str, Any]:

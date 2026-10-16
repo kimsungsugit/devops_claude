@@ -39,9 +39,10 @@ from generators.scenario_rows import MAX_PROPAGATE_CHECK_STEPS as _PROPAGATE_MAX
 from generators.scenario_rows import MAX_PROPAGATE_ROWS as _PROPAGATE_MAX_ROWS
 from generators.scenario_rows import MAX_ROWS as _SCENARIO_MAX_ROWS
 from generators.scenario_rows import SCENARIO_FI_PREFIX, SCENARIO_PREFIX, _at_home, find_scenarios
+from generators.suts_design_check import DesignChecker, summarize_design_check, uds_output_rows
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.test_evidence import VERIFY_PREFIX, apply_sequence_evidence, summarize_expected_evidence
-from generators.uds_unit_io import resolve_unit_io
+from generators.uds_unit_io import resolve_unit_io, uds_param_key
 from report_gen.c_return import returns_value
 from report_gen.function_analyzer import split_param_annotations
 from report_gen.requirements import (
@@ -750,6 +751,7 @@ def collect_unit_functions(
     sds_map: Optional[Dict[str, Dict[str, str]]] = None,
     uds_io_map: Optional[Dict[str, Any]] = None,
     struct_members: Optional[Dict[str, Dict[str, str]]] = None,
+    uds_doc_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Collect and structure unit functions from report_generator output.
 
@@ -760,6 +762,9 @@ def collect_unit_functions(
     Args:
         sds_map: ASIL 보강에 쓸 SDS 파티션 맵(`read_sds_input`). None 이면 빈 맵이다 — (R66) 저장소 `docs/` 의 다른
             프로젝트 SDS 로 대체하지 않는다. SwUDS · 소스 `@asil` · SDS 어디에도 근거가 없는 unit 의 ASIL 은 `TBD`.
+        uds_doc_name: (R90) 지정한 SwUDS 의 **원래 파일 이름** — 설계 대조 근거 칸이 이 이름을 적는다. 파일 접근기(Cloudium)
+            경유면 `uds_io_map["source"]` 는 임시 사본 이름이라(실행마다 다르다) 웹 생성 ≠ 스크립트 생성이 된다(리뷰 C1).
+            주면 "SwUDS 를 지정했다" 는 뜻도 된다 — 맵이 비었으면 '지정했지만 출력 표를 못 읽음' 으로 판정한다.
     """
     gim = globals_info_map or {}
     # 시험 범위 판정용. 실패해도 산출물은 그대로 나가야 하므로 빈 맵으로 떨어진다
@@ -1215,6 +1220,9 @@ def collect_unit_functions(
             # (R74) SwUDS 파라미터 표의 타입·Value Range — 설계서가 적은 범위가 타입 전폭보다 먼저다.
             "uds_param_info": _unit_uds_param_info(
                 _uds_rec, list(input_vars[:max_inp]) + list(output_vars[:max_out]) + list(indirect_vars)),
+            # (R90) SwUDS 출력 표의 행(문서 표기 이름 · 범위 · 원문 · 행 번호) — 기대값 설계 대조(`generators.suts_design_check`)
+            #   의 근거. 행을 만드는 데는 쓰지 않는다(값 · 행 불변). None = SwUDS 를 읽지 않았다
+            "uds_output_rows": uds_output_rows(_uds_rec, uds_io_map, doc_name=uds_doc_name, function=name),
             "asil": asil,
             # 그 등급이 **어디서 왔나**. `sds-fuzzy-conflict` 는 "모듈명 부분문자열
             # 매칭에서 후보 등급이 갈렸고 그중 하나를 집었다" 는 뜻이다.
@@ -2259,8 +2267,9 @@ def _source_function_names(function_details: Dict[str, Any]) -> List[str]:
 
 
 def _uds_param_key(name: str) -> str:
-    """(R65) 설계서 파라미터 이름과 unit 이름이 같은 객체인지 보는 열쇠 — `p->m` · `p[0].m` · `p.m` 이 같다."""
-    return re.sub(r"\[[^\]]*\]", "", name.replace("->", ".")).replace(" ", "").lower()
+    """(R65) 설계서 파라미터 이름과 unit 이름이 같은 객체인지 보는 열쇠 — `p->m` · `p[0].m` · `p.m` 이 같다.
+    규칙은 `generators.uds_unit_io.uds_param_key` 한 곳에 있다(R90 기대값 설계 대조가 같은 열쇠를 쓴다)."""
+    return uds_param_key(name)
 
 
 def summarize_source_read_failures(block: Any, units: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -7538,7 +7547,10 @@ def generate_suts_xlsm(
     evidence_ws = wb.create_sheet("Test Evidence")
     evidence_ws.append(["Function ID", "Function", "Sequence", "Observable", "Expected",
                         "Status", "Oracle", "Execution", "Source SHA256", "Source path", "Reason",
-                        "Test Case ID", "Source hash scope", "Inputs JSON", "Basis", "Assumptions"])
+                        "Test Case ID", "Source hash scope", "Inputs JSON", "Basis", "Assumptions",
+                        # (R90) 소스로 계산한 기대값이 설계(SwUDS 출력 표 · HSIS)가 그 출력에 적은 범위 안인가 — 정보다(값 불변)
+                        "Design Check", "Design Basis"])
+    _design = DesignChecker(units)
     for cell in evidence_ws[1]:
         cell.font, cell.fill, cell.border = hdr_font, hdr_fill, thin
     evidence_ws.freeze_panes = "A2"
@@ -7551,6 +7563,7 @@ def generate_suts_xlsm(
             for var in dict.fromkeys([*(seq.get("expected") or {}), *(seq.get("expected_evidence") or {})]):
                 value = (seq.get("expected") or {}).get(var, "")
                 ev = (seq.get("expected_evidence") or {}).get(var) or {}
+                _dc = _design.classify(unit, seq, var)
                 evidence_ws.append([unit["fid"], unit.get("name", ""), seq.get("seq_num"), var,
                                     value, ev.get("status", "unrecorded"), ev.get("oracle_kind", "none"),
                                     ev.get("execution_status", "not_run"), ev.get("source_hash", ""),
@@ -7558,7 +7571,8 @@ def generate_suts_xlsm(
                                     rendered_tc_ids.get(unit["fid"], ""), ev.get("source_hash_scope", ""),
                                     json.dumps(seq.get("inputs") or {}, ensure_ascii=False, sort_keys=True),
                                     # (R2b) assigned vs unchanged_input, and what a derived value rests on
-                                    ev.get("basis", ""), "; ".join(ev.get("assumptions") or ())])
+                                    ev.get("basis", ""), "; ".join(ev.get("assumptions") or ()),
+                                    _dc["check"], _dc["basis"]])
                 evidence_row += 1
                 for cell in (evidence_ws.cell(evidence_row, c) for c in range(1, evidence_cols + 1)):
                     cell.font = data_font
@@ -7567,8 +7581,8 @@ def generate_suts_xlsm(
                     if isinstance(cell.value, str):
                         cell.data_type = "s"
     evidence_ws.auto_filter.ref = evidence_ws.dimensions
-    for col in "ABCDEFGHIJKLMNOP":
-        evidence_ws.column_dimensions[col].width = 24 if col not in "IJKP" else 48
+    for col in "ABCDEFGHIJKLMNOPQR":
+        evidence_ws.column_dimensions[col].width = 24 if col not in "IJKPR" else 48
     _write_mcdc_design_sheet(wb, units, all_sequences, rendered_tc_ids, thin, hdr_fill, hdr_font, data_font)
     # (R10) 소스 소견 — oracle 이 기대값을 내다가 증명한 미정의 동작(함수·종류별, 예시 벡터, 재현 여부 공시)
     # (R19) + 입력 목록 밖 읽기(함수가 초기값을 읽는데 시험 입력 목록에 없는 객체) — unit 마다 한 행
@@ -8550,7 +8564,10 @@ def generate_suts(
                 _logger.warning("SwUDS 입출력 읽기 실패 — 소스 파싱 이름을 쓴다: %s", _e)
     units = collect_unit_functions(function_details, globals_info_map, sds_map=_sds_map,
                                    uds_io_map=_uds_io,
-                                   struct_members=report_data.get("struct_member_arrays") or {})
+                                   struct_members=report_data.get("struct_member_arrays") or {},
+                                   # (R90, 리뷰 C1) 설계 대조 근거 칸은 지정한 문서의 원래 이름 — 임시 사본 이름이 아니다
+                                   uds_doc_name=(str(_input_docs["UDS"].get("name") or "SwUDS")
+                                                 if _input_docs["UDS"].get("given") else None))
     attach_unit_sources(units, report_data.get("source_files"), report_data.get("project_context"))
     # (R81) 포인터 이름만 적힌 매개변수 → 가리키는 대상 표기(정본 표기) — 범위(대상 배치)가 붙은 뒤, 행을 만들기 전
     try:
@@ -8752,6 +8769,9 @@ def generate_suts(
                             _rng = _parse_value_range(_hsis_var_map[_vname].get("value_range", ""))
                             if _rng is not None:
                                 _hsis_bounds[_vname] = _rng
+                                # (R90) 원문도 — 기대값 설계 대조의 근거 칸이 읽은 수만 보이지 않게
+                                unit.setdefault("hsis_range_text", {})[_vname] = " ".join(
+                                    str(_hsis_var_map[_vname].get("value_range") or "").split())
                     if _hsis_bounds:
                         unit.setdefault("hsis_bounds", {}).update(_hsis_bounds)
 
@@ -8966,6 +8986,9 @@ def generate_suts(
         quality["reference_columns"] = summarize_reference_columns(units)
     # (R85) 정본 규모 문서의 코드 기준 행(두 프로파일 — 확장 문서의 정본 규모 블록에도 같은 행이 있다)
     quality["reference_code_rows"] = summarize_reference_code_rows(units)
+    # (R90) 소스로 계산한 기대값 ↔ 설계(SwUDS 출력 표 Value Range · HSIS SW 값 범위) 대조 — 칸 판정은 Test Evidence 의
+    #   Design Check · Design Basis 열(두 프로파일). 행 · 값은 바꾸지 않는다
+    quality["design_check"] = summarize_design_check(units, all_sequences, bool(_input_docs["UDS"].get("given")))
 
     _progress(85, "XLSM 파일 생성 중")
     out = generate_suts_xlsm(template_path, units, all_sequences, output_path, project_config)

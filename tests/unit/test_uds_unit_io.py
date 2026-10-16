@@ -68,7 +68,9 @@ class TestParseUnitIo:
         # (R74) 레코드에 `description`·`param_info` 가 더 실린다 — 이름·ASIL 축의 계약은 그대로다.
         assert {k: rec[k] for k in ("inputs", "outputs", "asil")} == {
             "inputs": ["u8g_SystemReset_F", "_PTT.Bits.PTT4"], "outputs": ["_PTT.Bits.PTT3"], "asil": ""}
-        assert set(rec) == {"inputs", "outputs", "asil", "description", "param_info", "param_col_layout"}
+        # (R90) 출력 표 행(`out_info` — 기대값 설계 대조의 근거)과 머리말 이름(`heading`)이 더 실린다
+        assert set(rec) == {"inputs", "outputs", "asil", "description", "param_info", "param_col_layout", "out_info",
+                            "heading"}
 
     def test_reads_asil_from_the_function_information_block(self, tmp_path):
         """ASIL 은 같은 표의 `ASIL` 행이다 — 안전 판정(O/X)의 근거가 된다."""

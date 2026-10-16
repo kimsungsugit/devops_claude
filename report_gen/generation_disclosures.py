@@ -1903,6 +1903,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     out.extend(_body_projection_item(qr.get("body_projection"), "suts_body_projection"))       # (R62)
     out.extend(_uds_reading_item(qr.get("uds_reading")))                                         # (R65)
     out.extend(_uds_const_inputs_item(qr.get("uds_const_inputs")))                               # (R67)
+    out.extend(_design_check_item(qr.get("design_check")))                                       # (R90)
     out.extend(_pointer_parameters_item(qr.get("pointer_parameters")))                          # (R81)
     out.extend(_source_reading_item(qr.get("source_reading"), "suts_source_reading"))          # (R63)
     out.extend(_source_read_failures_item(qr.get("source_read_failures"), "suts_source_read_failures"))   # (R68)
@@ -2396,6 +2397,134 @@ def _uds_const_inputs_item(block: Any) -> List[Dict[str, Any]]:
         "기대값은 oracle 이 선언의 초기값을 읽을 수 있으면 그 값으로 계산하고, 못 읽으면(2 차원 표 · 풀리지 않는 원소 · 정의가 "
         "다른 빌드에 있음 · 이 단위가 크기를 모르는 extern 표 등) 그 칸을 미상으로 비우고 사유를 적는다(`const_values_unread` · "
         "`array_length_unresolved` 등).")]
+
+
+#: (R90) 설계 대조를 하지 않은 칸의 사유 — 화면 글
+_DESIGN_CHECK_REASON_LABELS = {
+    "no_design_statement:no_design_document": "SwUDS 없음",
+    "no_design_statement:design_document_unread": "SwUDS 를 지정했지만 출력 표를 못 읽음",
+    "no_design_statement:no_design_table": "함수 표 없음",
+    "no_design_statement:ambiguous_design_table": "같은 이름의 함수 표가 둘(어느 표인지 못 정함)",
+    "no_design_statement:not_in_design_outputs": "출력 표에 없는 출력",
+    "no_design_statement:return_alias_unreadable": "Return 행 없음 · 본문을 못 읽어 반환 변수를 확인 못 함",
+    "no_design_statement:design_row_without_range": "출력 행에 범위 없음",
+    "no_design_statement:design_table_without_range_column": "표에 Value Range 열 없음",
+    "no_design_statement:pointer_row_address": "포인터 행(주소 범위)",
+    "not_checked:unchanged_input": "함수가 쓰지 않은 값(입력 그대로)",
+    "not_checked:value_not_integer": "정수가 아닌 값",
+}
+
+#: (R90, 리뷰 W1) 밖이지만 어긋남을 단정하지 않은 약한 후보 — (품질 보고서 열쇠 꼬리, 화면 글)
+_DESIGN_CHECK_WEAK = (("undesigned_input", "설계 진술 없이 넣은 입력에 기댄 것"),
+                      ("stub_value", "stub 한 피호출 반환값에 기댄 것"),
+                      ("type_differs", "설계와 소스의 부호 표기가 다른 것"),
+                      ("ambiguous_value_list", "설계 값 둘 목록의 두 값 사이(값 둘인지 쉼표로 쓴 범위인지 설계서가 말하지 않음)"),
+                      ("twin_definition", "같은 이름의 정의가 여럿(APP · BOOT)이라 이름으로 찾은 설계 표가 이 빌드의 것인지 "
+                                          "모르는 것"),
+                      ("design_cell_unread", "SwUDS 행의 범위 칸을 못 읽어 HSIS 범위로 대조한 것"))
+
+
+def _design_check_reason(key: str) -> str:
+    if key in _DESIGN_CHECK_REASON_LABELS:
+        return _DESIGN_CHECK_REASON_LABELS[key]
+    if key.startswith("no_design_statement:range_unread:"):
+        return f"출력 행 범위 칸을 못 읽음({key.rsplit(':', 1)[1]})"
+    return key
+
+
+def _design_check_item(block: Any) -> List[Dict[str, Any]]:
+    """(R90) 소스로 계산한 기대값 ↔ 설계(SwUDS 출력 표 Value Range · HSIS SW 값 범위) 대조. 구판 산출물(블록 없음)은 말하지
+    않는다. SwUDS 를 주지 않았으면 대조가 없었다는 사실을, 지정했는데 대조한 칸이 없으면 그 사실을 말한다(0 이 "밖 없음" 으로
+    보이지 않게 — 리뷰 W5). 머리 수는 어긋남을 단정할 수 있는 칸만(리뷰 W1), 어긋날 수 없던 대조는 '범위 안' 에 넣지 않는다
+    (리뷰 W2)."""
+    if not isinstance(block, dict):
+        return []
+    stated = _int(block, "outputs_with_statement")
+    if not block.get("uds_given") and not stated:
+        return [_item(
+            "suts_design_check", "기대값 설계 대조", "대조 안 함",
+            "SwUDS 를 주지 않아 기대값을 설계가 적은 출력 범위와 대조하지 않았다 — 확정 기대값은 소스 계산이라 코드와는 늘 "
+            "같지만, 코드가 설계와 어긋나는지는 이 문서가 말하지 않는다. SwUDS 를 지정하면 Test Evidence 의 Design Check 열이 "
+            "칸마다 판정한다.")]
+    why = block.get("not_compared_by_reason") if isinstance(block.get("not_compared_by_reason"), dict) else {}
+    reasons = (" 대조하지 않은 칸: " + " · ".join(
+        f"{_design_check_reason(k)} {v}" for k, v in sorted(why.items(), key=lambda kv: (-int(kv[1]), kv[0])))
+        + " — 설계가 그 출력의 값을 말하지 않았거나(빈칸으로 숨기지 않고 사유를 적는다) 대조할 값이 아니다. 출력 행 Description "
+        "의 값 설명(`0x00: Off`)은 값의 뜻풀이라 값 집합으로 쓰지 않았다.") if why else ""
+    derived = _int(block, "derived_slots")
+    if not stated:
+        # 지정했는데 설계 진술이 있는 출력이 0 — 대조 0 칸은 "밖 없음" 이 아니다(리뷰 W5)
+        unread = _int(why, "no_design_statement:design_document_unread")
+        return [_item(
+            "suts_design_check", "기대값 설계 대조",
+            "대조 0칸 — " + ("SwUDS 를 지정했지만 출력 표를 읽지 못했다" if unread else "설계 진술이 있는 출력 없음")
+            + f" / 소스 계산 {_show(derived)}칸",
+            "기대값을 설계가 적은 출력 범위와 대조한 칸이 없다 — '설계 범위 밖 없음' 이 아니다. "
+            + ("SwUDS 를 지정했지만 그 출력 표를 읽지 못했다(사유는 'SwUDS 판독' 공시) — 문서를 고치거나 다시 지정하면 Test "
+               "Evidence 의 Design Check 열이 칸마다 판정한다." if unread
+               else "SwUDS 출력 표 · HSIS 가 이 문서의 출력에 값 범위를 적지 않았다.") + reasons,
+            tone="warning")]
+    outside = _int(block, "outside_slots")
+    consistent = _int(block, "consistent_slots")
+    full = _int(block, "type_full_width_slots")
+    on_input = _int(block, "outside_on_input_slots")
+    conflict = _int(block, "conflicting_design_slots")
+    weak = [(label, _int(block, f"outside_{tag}_slots"), _int(block, f"outside_{tag}_outputs"))
+            for tag, label in _DESIGN_CHECK_WEAK]
+    weak_slots = None if any(s is None for _l, s, _o in weak) else sum(s for _l, s, _o in weak)
+    # (2차 W-B) 단정할 수 있던 대조 = 범위 안(타입 전폭 아님) + 단정 밖. 약한 후보 · 설계 밖 입력 행 · 행 갈림 · 타입 전폭은 어긋남을
+    #   단정하지 않은 칸이라 "밖 없음" 의 분모가 아니다 — 0 이면 그 사실을 경고로 말한다
+    asserted = None if consistent is None or outside is None else consistent + outside
+    no_assertion = asserted == 0
+    unasserted = [f"{label} {_show(n)}칸" for label, n in (("약한 후보", weak_slots), ("설계 밖 입력 행", on_input),
+                                                          ("설계 행 갈림", conflict), ("어긋날 수 없던 대조(타입 전폭)", full)) if n]
+    samples = [str(x) for x in (block.get("outside_samples") or [])]
+    total = _int(block, "outside_samples_total")
+    total = len(samples) if total is None else total
+    return [_item(
+        "suts_design_check", "기대값 설계 대조",
+        f"설계 범위 밖 {_show(outside)}칸(출력 {_show(_int(block, 'outside_outputs'))} · 함수 "
+        f"{_show(_int(block, 'outside_functions'))}) · 범위 안 {_show(consistent)}칸 · 어긋날 수 없던 대조 {_show(full)}칸"
+        + (f" · 약한 후보 {_show(weak_slots)}칸" if weak_slots != 0 else "")
+        + (f" · 설계 행 갈림 {_show(conflict)}칸" if conflict else "")
+        + f" · 설계 밖 입력 행에서 밖 {_show(on_input)}칸 / 소스 계산 {_show(derived)}칸",
+        "소스로 계산한 기대값(코드와 늘 같다)을 설계가 그 출력에 적은 값 범위와 대조했다 — SwUDS 출력 표의 Value Range(값 목록이면 "
+        "그 값 중 하나), SwUDS 가 그 출력의 범위를 주지 않을 때(출력 행 · 함수 표가 없음, 같은 이름의 표가 둘, 지정한 문서를 못 읽음, "
+        "SwUDS 를 주지 않음, 행에 범위가 없음 · 범위 칸을 못 읽음)만 HSIS SW 값 범위 — 범위 칸을 못 읽은 행 위의 HSIS 대조는 밖이어도 "
+        "단정하지 않는다. 기대값과 행은 바꾸지 않았다(정보다). 칸마다 판정과 근거"
+        "(문서 · 표 · 행 번호 · 칸 원문 · 읽은 범위)는 Test Evidence 의 Design Check · Design Basis 열에 있다. "
+        f"설계 진술이 있는 출력 {_show(stated)}/{_show(_int(block, 'outputs'))}"
+        f"(함수 {_show(_int(block, 'functions_with_statement'))}/{_show(_int(block, 'functions'))})"
+        + (f" · 출처 {_dist(block.get('stated_slots_by_source'))}칸" if block.get("stated_slots_by_source") else "") + "."
+        + (" '설계 범위 밖' 은 그 행이 넣은 입력이 모두 설계서가 적은 범위 · 값 목록 안이고(stub 한 피호출 반환값은 같은 빌드의 그 "
+           "함수의 설계 Return 안 · 수가 아닌 입력은 대조하지 못해 여기 들지 않는다) 기대값이 stub 값에 기대지 않으며 설계와 소스의 "
+           "부호 표기가 어긋나지 않고 그 이름의 정의가 하나이며(같은 이름이 여럿이면 이름으로 찾은 표가 어느 빌드의 것인지 모른다) "
+           "HSIS 로 대조했다면 SwUDS 행이 못 읽은 범위를 적지 않았는데, 함수가 낸 값이 출력의 설계 범위 밖이라는 뜻이다(설계가 값 둘 "
+           "목록이면 두 값 밖일 때만 — "
+           "두 값 사이는 '값 둘' · '범위' 두 읽기가 갈려 약한 후보로 센다) — 코드와 설계가 어긋난 후보이며 설계를 "
+           "고칠지 코드를 고칠지는 이 대조가 정하지 않는다(예: " + "; ".join(samples[:_HEAD_N])
+           + (f" 외 {total - _HEAD_N} — 전량은 시트" if total > _HEAD_N else "") + ")."
+           if outside else
+           (" 단정할 수 있는 대조가 0칸이다 — '설계 범위 밖 없음' 이 아니다("
+            + ("대조한 칸이 모두 " + " · ".join(unasserted) + "이다" if unasserted else "대조한 칸이 없다") + ")."
+            if no_assertion
+            else f" 어긋남을 단정할 수 있는 칸에서 설계 범위 밖 기대값은 없었다(범위 안 {_show(consistent)}칸"
+                 + (f" · 설계 행 갈림 {_show(conflict)}칸" if conflict else "") + ")."))
+        + (" 밖이지만 어긋남을 단정하지 않은 약한 후보(머리 수에 넣지 않았다): " + " · ".join(
+            f"{label} {_show(s)}칸(출력 {_show(o)})" for label, s, o in weak if s)
+           + " — 설계서가 그 입력 · 피호출 Return 의 범위를 적거나 표기를 맞추면(값 둘 목록이면 값 둘인지 범위인지 밝히면, 같은 "
+           "이름의 정의가 여럿이면 표가 어느 빌드의 것인지 밝히면, 못 읽은 범위 칸을 고치면) 판정이 갈린다(근거 열이 입력 · stub · "
+           "값 둘 · 같은 이름의 정의를 적는다)."
+           if weak_slots else "")
+        + (f" 설계 범위가 값의 타입 전폭이라 어긋날 수 없던 대조 {_show(full)}칸(출력 {_show(_int(block, 'type_full_width_outputs'))})"
+           "은 '범위 안' 에 넣지 않았다(가리키는 타입 전폭인 포인터 행 — 주소 범위와 가를 수 없다 — 포함)." if full else "")
+        + (f" 설계 밖 입력(강건성 · 오류 경로 행)에서 밖으로 나간 칸은 결함 주장이 아니라 따로 센다(출력 "
+           f"{_show(_int(block, 'outside_on_input_outputs'))})." if on_input else "")
+        + (f" 같은 출력을 설계 행 둘이 다르게 적은 출력 {_show(_int(block, 'conflicting_design_rows'))} — 행마다 대조했고, 값이 한 행 "
+           f"안 · 다른 행 밖인 {_show(conflict)}칸(출력 {_show(_int(block, 'conflicting_design_outputs'))})은 '설계 행 갈림' 으로 "
+           "따로 셌다(설계서 한쪽을 고칠 것 — 근거 열이 그 행들을 적는다)." if _int(block, "conflicting_design_rows") else "")
+        + reasons,
+        tone=_tone(bool(outside) or bool(conflict) or bool(_int(block, "conflicting_design_rows")) or no_assertion))]
 
 
 def _pointer_parameters_item(block: Any) -> List[Dict[str, Any]]:
