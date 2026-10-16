@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 import zipfile
@@ -31,7 +32,7 @@ from generators.safety_marks import resolve_safety_related
 from generators.tc_profile import TC_PROFILE_EXTENDED, normalize_tc_profile
 from generators.test_evidence import apply_sequence_evidence, summarize_expected_evidence
 from generators.uds_design_ids import checked_aliases, load_uds_design_ids, resolve_design_id
-from report_gen.source_roots import first_source_root
+from report_gen.source_roots import first_source_root, split_source_roots
 
 _logger = logging.getLogger(__name__)
 
@@ -941,7 +942,7 @@ _FLOW_COV_KEYS: Tuple[str, ...] = (
     "transitive_entries", "transitive_entries_emitted", "cross_reach_hops",
     "chain_truncated_flows", "chain_max_nodes",
     # TC ID 축 — 설계 ID(SwUDS) 유래인지 파싱 순번인지
-    "design_id_hits", "design_id_lookups", "design_id_map_entries",
+    "design_id_hits", "design_id_lookups", "design_id_map_entries", "design_id_ambiguous_builds",
     # Related ID 축 — 진입 함수 자신인지 호출 트리 아래인지, 칸 상한에 잘렸는지
     "related_chain_flows", "related_chain_ids", "related_chain_depth",
     "related_truncated_ids",
@@ -1101,6 +1102,9 @@ def collect_integration_flows(
     # ⚠ 신규 인자는 **맨 끝**에 붙인다(위치 인자 호출부가 조용히 다른 값에 바인딩된다).
     globals_info_map: Optional[Dict[str, Dict[str, str]]] = None,
     struct_members: Optional[Dict[str, Dict[str, str]]] = None,
+    # (R89) 소스 루트 목록 — 둘 이상이면 루트마다 **별개 빌드**다(HDPDM01: APP `PDS64_RD` · BOOT `PDS64_FBL`). 함수 이름 ·
+    #   호출 그래프 · 모듈은 진입 함수가 속한 빌드 안에서만 본다(`_build_views`).
+    source_roots: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Identify cross-module integration flows from function call graph.
 
@@ -1188,21 +1192,24 @@ def collect_integration_flows(
     #   '없음' 둘이다(예전 '없음' 은 `repo_docs_glob` 이었다).
     _sds_source = "argument" if sds_map is not None else "none"
     sds_map = sds_map or {}
-    # Build name → info lookup
-    name_to_info: Dict[str, Dict[str, Any]] = {}
-    for fid, info in function_details.items():
-        if isinstance(info, dict):
-            name_to_info[str(info.get("name") or "")] = info
-
-    # Set of all project function names (lower-case) for ISR-artefact filtering
-    _fn_name_set: set = {n.lower() for n in name_to_info if n}
-
-    # 전이 판정·체인 전개용 호출 그래프. **프로젝트 함수끼리의 호출만** 남긴다
-    # (memset/printf 같은 외부 심볼은 파싱 그래프에 없고 통합 경로도 아니다).
-    _module_of: Dict[str, str] = {n: _get_module_name(i) for n, i in name_to_info.items() if n}
-    # ⚠ 전략 시트도 같은 그래프를 쓴다 — 필터가 갈라지면 규격 시트의 체인과 전략 시트의
-    #   트리가 서로 다른 그래프가 되므로 **단일 빌더**를 공유한다(`_build_calls_map`).
-    _calls_map: Dict[str, List[str]] = _build_calls_map(function_details)
+    # (R89) 이름 → info · 함수 이름 집합(ISR 부산물 거르기) · 모듈 · 호출 그래프(**프로젝트 함수끼리의 호출만** — memset/printf
+    #   같은 외부 심볼은 통합 경로가 아니다)는 **빌드마다** 한 벌이다. 루트가 둘인데 이름으로 한 벌을 만들면 두 빌드가 함께 정의한
+    #   함수(HDPDM01 11 개: `main` · `EEPROM_SetByte` …)가 한쪽으로 덮여, BOOT 진입점이 APP 의 `REG_FSTAT` 를 관측 대상으로 받았다
+    #   (생성 문서의 기대값 칸 3,800 이 그 빌드에 없는 객체였다).
+    # ⚠ 전략 시트도 같은 그래프를 쓴다 — 필터가 갈라지면 규격 시트의 체인과 전략 시트의 트리가 서로 다른 그래프가 되므로
+    #   **단일 빌더**를 공유한다(`_build_calls_map`).
+    _views = _build_views(function_details, source_roots)
+    _build_of = _views["build_of"]
+    # (R89 리뷰 W3) 진입 이름을 정의한 빌드 수 — **함수 전체** 기준(선별된 흐름 기준이면 상한 · 프로파일에 따라 한쪽 빌드의 흐름만
+    #   남을 때 설계 ID 가 되살아나, 같은 흐름의 TC ID 가 프로파일마다 뒤집힌다 — R75 C3)
+    _builds_of_name: Dict[str, int] = {}
+    for _bk, _bv in _views.items():
+        if _bk != "build_of" and _bk:
+            for _nm in _bv[0]:
+                if _nm:
+                    _builds_of_name[_nm] = _builds_of_name.get(_nm, 0) + 1
+    name_to_info, _fn_name_set, _module_of, _calls_map = _views[""] if "" in _views else next(
+        v for k, v in _views.items() if k != "build_of")
     _transitive_entries = 0       # 직접 경계 없이 전이로만 자격을 얻은 진입점 수
     _chain_truncated_total = 0    # 체인이 상한에 걸려 잘린 흐름 수(침묵 금지)
 
@@ -1224,8 +1231,10 @@ def collect_integration_flows(
     candidates: List[Dict[str, Any]] = []
     for fid, info in sorted_items:
         fn_name = str(info.get("name") or "")
-        if not fn_name or fn_name in seen_entries:
+        _build = _build_of(info)
+        if not fn_name or (_build, fn_name) in seen_entries:
             continue
+        name_to_info, _fn_name_set, _module_of, _calls_map = _views[_build]
 
         calls_list = list(info.get("calls_list") or [])
         if not calls_list:
@@ -1257,7 +1266,7 @@ def collect_integration_flows(
             _cross_via = "transitive"
             _transitive_entries += 1
 
-        seen_entries.add(fn_name)
+        seen_entries.add((_build, fn_name))
 
         # ⚠ 예전엔 `str(info.get("asil") or "QM")` + `TBD → QM` 이었다. 소스 주석만 보고,
         #   근거가 없으면 **비안전으로 단정**한 것이다(실측 260건). 입력문서를 본다.
@@ -1273,6 +1282,7 @@ def collect_integration_flows(
             "fid": fid,
             "info": info,
             "fn_name": fn_name,
+            "build": _build,
             "my_module": my_module,
             "cross_calls": cross_calls,
             # 경계를 **직접** 넘는지, 몇 홉 아래에서 넘는지. 같은 `cross_calls` 라도
@@ -1298,6 +1308,7 @@ def collect_integration_flows(
         fn_name = _cand["fn_name"]
         my_module = _cand["my_module"]
         cross_calls = _cand["cross_calls"]
+        name_to_info, _fn_name_set, _module_of, _calls_map = _views[_cand.get("build", "")]
 
         # ── Call chain — 정본은 **경로 전체**를 적는다 ────────────────────────
         # 정본 실측(KJPDS02_PV_SwITS v1.02): `Interface : main -> s_System_InitSequence
@@ -1624,6 +1635,12 @@ def collect_integration_flows(
         flows.append({
             "flow_id": fid,
             "entry_fn": fn_name,
+            # (R89) 진입 함수가 속한 빌드(소스 루트, 정규화) — 루트가 하나면 "". 함수 간 oracle 이 진입 정의를 이 빌드에서 찾고,
+            #   전략 · Related 시트가 이 빌드의 그래프로 트리를 편다. 두 빌드가 같은 이름을 정의하면 흐름이 빌드마다 하나씩이다.
+            "build": _cand.get("build", ""),
+            "entry_source_path": str(info.get("source_path") or ""),
+            # (R89 리뷰 W3) 이 이름을 정의한 빌드 수 — 2 이상이면 이름으로 찾는 설계 ID 를 정할 수 없다(`generate_itc_list`)
+            "entry_builds": _builds_of_name.get(fn_name, 1),
             "call_chain": call_chain,
             # 경계를 직접 넘는지(`direct`) 몇 홉 아래에서 넘는지(`transitive`).
             "cross_via": _cand.get("cross_via", "direct"),
@@ -2069,8 +2086,18 @@ def generate_itc_list(
     """
     itcs: List[Dict[str, Any]] = []
     _design_hits = 0
+    # (R89) 두 빌드가 같은 이름의 진입 함수를 가지면(HDPDM01 `main` · `lin_lld_sci_init`) 흐름이 빌드마다 하나다. 설계 ID 는 **이름**
+    #   으로 찾으므로 어느 빌드의 것인지 정할 수 없다 — 둘 다 순번 ID(한쪽에 붙이면 다른 빌드의 함수가 그 설계 요소를 시험한다고 적힌다)
+    #   (리뷰 W3) 판정은 흐름이 실은 `entry_builds`(함수 전체 기준) — 직접 만든 흐름처럼 그 값이 없으면 이 목록 안의 같은 이름 수
+    _entry_count: Dict[str, int] = {}
+    for _f in flows:
+        _entry_count[str(_f.get("entry_fn") or "")] = _entry_count.get(str(_f.get("entry_fn") or ""), 0) + 1
+    _design_ambiguous = 0
     for idx, flow in enumerate(flows, start=1):
         _sid = resolve_design_id(design_ids, flow.get("entry_fn")) if design_ids else ""
+        if _sid and int(flow.get("entry_builds") or _entry_count.get(str(flow.get("entry_fn") or ""), 0)) > 1:
+            _sid = ""
+            _design_ambiguous += 1
         if _sid:
             _design_hits += 1
             tc_id = f"SwITC_{_sid}"
@@ -2102,6 +2129,8 @@ def generate_itc_list(
             "test_method": _SITS_METHOD_DEFAULT,
             "gen_method": gen_method,
             "entry_fn": flow["entry_fn"],
+            "build": flow.get("build", ""),                          # (R89)
+            "entry_source_path": flow.get("entry_source_path", ""),  # (R89) 함수 간 oracle 의 진입 정의
             "call_chain": flow["call_chain"],
             "module_name": flow["module_name"],
             "input_vars": effective_input_vars,
@@ -2141,6 +2170,8 @@ def generate_itc_list(
             # 정본 실측: FI 는 **항상** `AOR/ABV`(경계값분석)와 짝이다.
             "gen_method": _SITS_GEN_BOUNDARY,
             "entry_fn": _ff.get("entry_fn", ""),
+            "build": _ff.get("build", ""),                          # (R89)
+            "entry_source_path": _ff.get("entry_source_path", ""),  # (R89)
             "call_chain": _ff.get("call_chain", ""),
             "module_name": _ff.get("module_name", ""),
             "input_vars": list(_ff.get("input_vars") or []),
@@ -2156,6 +2187,8 @@ def generate_itc_list(
         stats_out.update({
             "design_id_hits": _design_hits,
             "design_id_lookups": len(itcs),
+            # (R89) 이름은 맞았지만 두 빌드가 같은 이름을 정의해 어느 쪽 설계 요소인지 못 정한 TC — 순번 ID 로 나간다
+            "design_id_ambiguous_builds": _design_ambiguous,
             "design_id_map_entries": len((design_ids or {}).get("by_name") or {}),
             # FI 축 — 0 이 "요청이 없었다"인지 "요청했는데 못 냈다"인지 구분되게.
             "fi_emitted": _fi_emitted,
@@ -2574,6 +2607,56 @@ def _build_strategy_tree(
     return out, len(dropped)
 
 
+def _build_of_fn(source_roots: Optional[Sequence[str]]):
+    """(R89) ``info → 빌드 키``(정규화한 소스 루트). 루트가 둘 미만이면 모두 ``""``(한 빌드). 어느 루트 밑도 아닌 함수도 ``""``."""
+    roots = [os.path.normcase(os.path.normpath(str(r))) for r in (source_roots or []) if str(r or "").strip()]
+    roots = list(dict.fromkeys(roots))
+    if len(roots) < 2:
+        return lambda info: ""
+
+    def build_of(info) -> str:
+        p = os.path.normcase(os.path.normpath(str((info or {}).get("source_path") or ""))) if (info or {}).get(
+            "source_path") else ""
+        for r in roots:
+            if p and (p == r or p.startswith(r.rstrip("\\/") + os.sep)):
+                return r
+        return ""
+    return build_of
+
+
+def _split_by_build(function_details: Dict[str, Dict[str, Any]],
+                    source_roots: Optional[Sequence[str]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """(R89) ``{빌드 키: 그 빌드의 function_details}``. 어느 루트 밑도 아닌 함수(빌드 키 ``""``)는 **모든** 빌드에 들어간다 —
+    `c_project_context.build_context` 와 같은 읽기. 루트가 둘 미만이면 ``{"": 전부}``."""
+    build_of = _build_of_fn(source_roots)
+    parts: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    shared: Dict[str, Dict[str, Any]] = {}
+    for fid, info in (function_details or {}).items():
+        if not isinstance(info, dict):
+            continue
+        b = build_of(info)
+        (parts.setdefault(b, {}) if b else shared)[fid] = info
+    if not parts:
+        return {"": shared}
+    for part in parts.values():
+        part.update(shared)
+    if shared:
+        parts[""] = shared
+    return parts
+
+
+def _build_views(function_details: Dict[str, Dict[str, Any]], source_roots: Optional[Sequence[str]]) -> Dict[str, Any]:
+    """(R89) 빌드마다 ``(name_to_info, 함수 이름 소문자 집합, {이름: 모듈}, 호출 그래프)`` + ``"build_of"``."""
+    views: Dict[str, Any] = {"build_of": _build_of_fn(source_roots)}
+    for b, part in _split_by_build(function_details, source_roots).items():
+        n2i: Dict[str, Dict[str, Any]] = {}
+        for _fid, info in part.items():
+            n2i[str(info.get("name") or "")] = info
+        views[b] = (n2i, {n.lower() for n in n2i if n},
+                    {n: _get_module_name(i) for n, i in n2i.items() if n}, _build_calls_map(part))
+    return views
+
+
 def _build_calls_map(function_details: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
     """`{함수명: [프로젝트 내부 callee]}`. 외부 심볼(memset·printf 등)은 뺀다.
 
@@ -2647,7 +2730,9 @@ def _write_strategy_sheet(
     file_of: Dict[str, str],
     depth_of: Dict[str, int],
     stats_out: Optional[Dict[str, Any]] = None,
-    id_of_entry: Optional[Dict[str, str]] = None,
+    id_of_entry: Optional[Dict[Any, str]] = None,
+    # (R89) `{빌드: (calls_map, file_of, depth_of)}` — 흐름의 `build` 가 있으면 그 빌드의 것으로 트리를 편다
+    views_by_build: Optional[Dict[str, Tuple[Dict[str, List[str]], Dict[str, str], Dict[str, int]]]] = None,
 ) -> None:
     """정본 `2.SW Integration Strategy` 를 채운다 — 통합 지점별 호출 트리.
 
@@ -2694,10 +2779,12 @@ def _write_strategy_sheet(
     row = max(6, end_row and 6 or 6)
     blocks = truncated_blocks = 0
     node_total = node_dropped = 0
+    _all_views = (calls_map, file_of, depth_of)
     for f in flows:
         entry = str(f.get("entry_fn") or "")
         if not entry:
             continue
+        calls_map, file_of, depth_of = (views_by_build or {}).get(str(f.get("build") or ""), _all_views)
         nodes, dropped = _build_strategy_tree(
             entry, calls_map, _STRATEGY_MAX_NODES, _STRATEGY_MAX_DEPTH)
         if not nodes:
@@ -2720,7 +2807,8 @@ def _write_strategy_sheet(
         # ⚠ 여기 쓰는 ID 는 3번 시트의 TC ID 와 **연결되는 값**이어야 한다. 예전엔 내부
         #   `flow_id`(`SwUFn_3596`)를 썼는데, 그건 규격 시트 어디에도 없는 이름이라 두 시트를
         #   맞춰 볼 방법이 없었다(정본은 `SwITC_…` ↔ `SwIT_…` 로 접두만 다르다).
-        side: List[str] = [(id_of_entry or {}).get(entry)
+        side: List[str] = [(id_of_entry or {}).get((str(f.get("build") or ""), entry))
+                           or (id_of_entry or {}).get(entry)
                            or str(f.get("flow_id") or entry)]
         for _d, fn in nodes:
             fp = str(file_of.get(fn) or "")
@@ -2758,7 +2846,8 @@ def _write_relid_sheets(
     uds_related_map: Dict[str, List[str]],
     design_ids: Optional[Dict[str, Any]] = None,
     stats_out: Optional[Dict[str, Any]] = None,
-    id_of_entry: Optional[Dict[str, str]] = None,
+    id_of_entry: Optional[Dict[Any, str]] = None,
+    views_by_build: Optional[Dict[str, Tuple[Dict[str, List[str]], Dict[str, str], Dict[str, int]]]] = None,  # (R89)
 ) -> None:
     """정본 `Related_ID 확인` / `Related_ID 정리` 를 채운다 — Related 칸의 **계산 근거**.
 
@@ -2796,17 +2885,21 @@ def _write_relid_sheets(
 
     row = 2
     trow = 2
+    _all_calls, _all_files = calls_map, file_of
     for f in flows:
         entry = str(f.get("entry_fn") or "")
         if not entry:
             continue
+        _view = (views_by_build or {}).get(str(f.get("build") or ""))
+        _cm, file_of = (_view[0], _view[1]) if _view else (_all_calls, _all_files)
         nodes, _dropped = _build_strategy_tree(
-            entry, calls_map, _STRATEGY_MAX_NODES, _STRATEGY_MAX_DEPTH)
+            entry, _cm, _STRATEGY_MAX_NODES, _STRATEGY_MAX_DEPTH)
         if not nodes:
             continue
         if row + len(nodes) + 2 > _STRATEGY_MAX_ROWS:
             continue
-        flow_id = (id_of_entry or {}).get(entry) or str(f.get("flow_id") or entry)
+        flow_id = ((id_of_entry or {}).get((str(f.get("build") or ""), entry)) or (id_of_entry or {}).get(entry)
+                   or str(f.get("flow_id") or entry))
         union = [x for x in (f.get("related_ids") or []) if x]
         side = [flow_id]
         for _d, fn in nodes:
@@ -3133,21 +3226,24 @@ def generate_sits_xlsm(
         try:
             # 근거 시트의 통합 ID 는 규격 시트 TC ID 에서 파생한다 — 두 시트를 맞춰 볼 수
             # 없는 ID 를 적으면 근거표 구실을 못한다(정본: `SwITC_…` ↔ `SwIT_…`).
-            _id_of_entry: Dict[str, str] = {}
+            _id_of_entry: Dict[Any, str] = {}
             for _t in itcs or []:
                 _e = str(_t.get("entry_fn") or "")
                 if _e and _e not in _id_of_entry:
                     _id_of_entry[_e] = _integration_id(str(_t.get("tc_id") or ""))
+                # (R89) 두 빌드가 같은 이름의 진입 함수를 가지면 이름만으로는 첫 TC 를 가리킨다 — (빌드, 이름) 이 먼저
+                if _e and _t.get("build") and (_t["build"], _e) not in _id_of_entry:
+                    _id_of_entry[(_t["build"], _e)] = _integration_id(str(_t.get("tc_id") or ""))
             _write_strategy_sheet(
                 wb, flows or [],
                 _sctx.get("calls_map") or {}, _sctx.get("file_of") or {},
                 _sctx.get("depth_of") or {}, _sctx.get("stats_out"),
-                id_of_entry=_id_of_entry)
+                id_of_entry=_id_of_entry, views_by_build=_sctx.get("views_by_build"))
             _write_relid_sheets(
                 wb, flows or [],
                 _sctx.get("calls_map") or {}, _sctx.get("file_of") or {},
                 _sctx.get("uds_related_map") or {}, _sctx.get("design_ids"),
-                _sctx.get("stats_out"), id_of_entry=_id_of_entry)
+                _sctx.get("stats_out"), id_of_entry=_id_of_entry, views_by_build=_sctx.get("views_by_build"))
             # (R7) 인터페이스 근거 — 호출·반환 사용·제안값(미적용)과 근거(또는 못 정한 사유)·인자 바인딩·전역 생산→소비
             from generators.interface_contract import write_interface_evidence_sheet
             _n_iface = write_interface_evidence_sheet(wb, itcs or [])
@@ -3747,12 +3843,18 @@ def generate_sits(
     # Related 칸은 SwCom 만이 아니다(SwFn·SwSTR·SwST·SwTK) — 넓은 판을 따로 받는다.
     _uds_related_map = load_uds_related_map(uds_path)
     flow_stats: Dict[str, Any] = {}
+    # (R89) 빌드를 가르는 루트는 **파서가 실제로 쓴 루트**(`project_context["roots"]` — 로컬은 resolve 한 경로, Cloudium 은 받은 경로 그대로)
+    #   — 함수 레코드의 `source_path` 가 그 밑에 있다. 사용자가 적은 문자열(상대경로 · 정션 · 끝 슬래시)로 가르면 모드에 따라 결과가 갈린다.
+    #   경량 파서 폴백처럼 문맥이 없으면 받은 문자열.
+    _build_roots = list(((_oracle_source or {}).get("project_context") or {}).get("roots") or []) or split_source_roots(
+        source_root)
     flows = collect_integration_flows(
         function_details, max_flows=max_flows, stats_out=flow_stats,
         # (R66) 읽은 SDS 가 없으면 None — 품질 리포트의 출처 라벨이 'none'(빈 맵을 '받은 맵' 으로 적지 않는다)
         sds_map=_project_sds_map or None, uds_swcom_map=_uds_swcom_map,
         uds_asil_map=_uds_asil_map, uds_related_map=_uds_related_map,
-        globals_info_map=_globals_info_map, struct_members=_struct_members)
+        globals_info_map=_globals_info_map, struct_members=_struct_members,
+        source_roots=_build_roots)
 
     if not flows:
         _logger.warning("SITS: No integration flows found — check cross-module calls in source")
@@ -3799,7 +3901,10 @@ def generate_sits(
         for _fn, _toks in (_uds_related_map or {}).items():
             for _tk in _toks or []:
                 _by_design.setdefault(str(_tk), []).append(str(_fn))
-        _flow_by_fn = {str(f.get("entry_fn") or "").lower(): f for f in flows}
+        # (R89 리뷰 W3) 두 빌드가 같은 이름의 진입 흐름을 가지면 흐름 순서의 첫 것(앞 소스 루트) — 예전 dict 는 마지막 것을 남겼다
+        _flow_by_fn: Dict[str, Dict[str, Any]] = {}
+        for f in flows:
+            _flow_by_fn.setdefault(str(f.get("entry_fn") or "").lower(), f)
         for _did in fi_design_ids:
             _did = str(_did or "").strip()
             if not _did:
@@ -3921,9 +4026,16 @@ def generate_sits(
     # 품질 리포트로 합류하게 한다.
     _calls_map_all = _build_calls_map(function_details)
     _file_of = _build_file_map(function_details)
+    # (R89) 소스 루트가 둘 이상이면 빌드마다 그래프 · 파일 귀속 · 절대 깊이 한 벌 — 흐름은 자기 빌드의 것으로 트리를 편다
+    _views_by_build: Dict[str, Tuple[Dict[str, List[str]], Dict[str, str], Dict[str, int]]] = {}
+    for _b, _part in _split_by_build(function_details, _build_roots).items():
+        if _b:
+            _cm = _build_calls_map(_part)
+            _views_by_build[_b] = (_cm, _build_file_map(_part), _absolute_depth_map(_cm, _STRATEGY_ROOTS))
     _strategy_ctx = {
         "calls_map": _calls_map_all,
         "file_of": _file_of,
+        "views_by_build": _views_by_build,
         "depth_of": _absolute_depth_map(_calls_map_all, _STRATEGY_ROOTS),
         # (R69 리뷰 2차 W3) 소스 함수와 하나도 맞지 않은 SwUDS(다른 프로젝트 · 버전, SwUDS 가 아닌 문서)의 표를 SwUDS 함수 색인으로
         #   옮겨 적지 않는다 — 참조하지 않았다고 적은 문서의 내용이 산출물에 실린다

@@ -201,7 +201,8 @@ def _load_sds_map(sds_path: str) -> Tuple[Dict[str, Any], str]:
 
 
 def _measure_sits(fd: Dict[str, Any], sds_map: Dict[str, Any],
-                  sds_reason: str, uds_path: str = "") -> Dict[str, Any]:
+                  sds_reason: str, uds_path: str = "",
+                  source_roots: Optional[List[str]] = None) -> Dict[str, Any]:
     """통합 흐름과 그 **Related/Safety 근거**를 잰다.
 
     ⚠ 이 칸들을 실제로 채우는 건 SwDS 가 아니라 **SwUDS** 다. SDS 파티션 맵의 값
@@ -254,7 +255,10 @@ def _measure_sits(fd: Dict[str, Any], sds_map: Dict[str, Any],
     flows = collect_integration_flows(
         fd, max_flows=None, stats_out=stats, sds_map=sds_map,
         uds_swcom_map=_uds_swcom, uds_asil_map=_uds_asil,
-        uds_related_map=_uds_related)
+        uds_related_map=_uds_related,
+        # (R89 리뷰 W4) 문서와 같은 빌드 분리 — 빠지면 두 빌드가 같이 정의한 진입 함수가 흐름 하나로 합쳐져 게이트의 흐름 수가
+        #   문서보다 적다
+        source_roots=source_roots)
     total = int(stats.get("total_flows_found") or len(flows))
     cap = _DEFAULT_MAX_FLOWS
     headroom = cap - total
@@ -768,7 +772,8 @@ def measure(source_root: str, *, sds_path: str = "", srs_path: str = "",
         "ok": True,
         "functions": len(fd),
         "elapsed_s": round(time.time() - t0, 1),
-        "sits": _measure_sits(fd, sds_map, sds_reason, uds_path),
+        "sits": _measure_sits(fd, sds_map, sds_reason, uds_path,
+                              source_roots=list((_sections.get("project_context") or {}).get("roots") or [])),
         "suts": _measure_suts_types(fd),
         "suts_inputs": _measure_suts_inputs(fd_suts, sds_map, gim, units_out=_units, uds_io_map=_uds_io),
         "suts_asil": _measure_suts_asil(_units, uds_map=bool(_uds_io)),

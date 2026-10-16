@@ -830,6 +830,7 @@ def generate_uds_source_sections(
         items.append(display)
 
     truncated = False
+    _ctx_only_paths: List[Any] = []   # (R89 리뷰 C1) 문서 범위(verify=X) 밖이라 문서 표에는 안 싣는 파일
     for _walk_root in _roots:
         for p in _src_walk(_walk_root):
             ext = p.suffix.lower()
@@ -841,6 +842,9 @@ def generate_uds_source_sections(
                 #   그쪽은 루트를 따로 훑는다. 그래서 verify=X 파일의 함수가
                 #   산출물에 남고, 그 사실은 `generators/suts` 가 보고한다.
                 if component_verify_of(p, component_map) == "X":
+                    # (R89 리뷰 C1) 문서 범위 밖일 뿐 그 빌드의 컴파일 문맥이다 — 레지스터 헤더(HDPDM01 BOOT `mc9s12zvl64.h`)
+                    #   · 정의 파일(`Lib/mc9s12zvl64.c`)이 여기 걸린다. 빌드별 매크로 · 전역 판정(`_maps_for`)이 읽는다
+                    _ctx_only_paths.append(p)
                     continue
             files.append(p)
             ext_counts[ext] = ext_counts.get(ext, 0) + 1
@@ -862,6 +866,21 @@ def generate_uds_source_sections(
     # (R62 N69) 헤더 프로토타입의 문서 주석 — 이름 → 후보 목록(헤더가 APP/FBL 트리에 따로 있다).
     _header_docs: Dict[str, List[Dict[str, str]]] = {}
     _root_strs: List[str] = [str(_r) for _r in _roots]
+    # (R89) 소스 루트가 둘 이상이면 루트마다 **별개 빌드**다(HDPDM01: APP `PDS64_RD` · BOOT `PDS64_FBL`). 함수 본문의 매크로 · 전역
+    #   판정은 그 함수가 속한 빌드의 정의로 한다 — 이름 하나의 맵으로 합치면 BOOT 의 `SCI0BD`(BOOT 헤더: `r_SCI0BD.Word`)가 APP 헤더의
+    #   `REG_SCI0BD.Word` 로 풀려, BOOT 함수의 전역 목록에 BOOT 에 없는 레지스터가 실렸다(SITS 기대값 칸 6,072 · R89 실측).
+    _root_norms: List[str] = list(dict.fromkeys(os.path.normcase(os.path.normpath(_r)) for _r in _root_strs))
+
+    def _build_key(path: Any) -> str:
+        """정규화한 소스 루트(빌드 키). 루트가 하나거나 어느 루트 밑도 아니면 ``""``(모든 빌드가 본다)."""
+        if len(_root_norms) < 2 or not path:
+            return ""
+        q = os.path.normcase(os.path.normpath(str(path)))
+        for _rn in _root_norms:
+            if q == _rn or q.startswith(_rn.rstrip("\\/") + os.sep):
+                return _rn
+        return ""
+    _macro_def_builds: List[str] = []   # (R89) `macro_defs` 와 같은 순서 · 길이 — 행마다 정의 파일의 빌드
     # 죽은 `#if 0` 분기라 모으지 않은 정의 — {파일: [이름]}. 텍스트 루프가 읽는 `.c` 기준(면제 계층 파일은 애초에 안 읽는다).
     _dead_code_excluded: Dict[str, List[str]] = {}
     # (R63 N70) 같은 이유로 모으지 않은 전역·매크로·프로토타입 — {종류: {파일: [이름]}}. 이름은 그 파일 기준(다른 파일에 산 정의가 있을 수 있다).
@@ -1009,6 +1028,7 @@ def generate_uds_source_sections(
             macros.extend(_extract_c_macros(text))
             for m_name, m_val in _extract_c_macro_defs(text):
                 macro_defs.append([m_name, "", m_val, ""])
+                _macro_def_builds.append(_build_key(p))
         else:
             # (R62 N69) 죽은 `#if 0` 분기의 정의는 모으지 않는다 — tree-sitter 가 일부러 뺀 함수를 아래 "AST 누락분 병합" 이
             #   이름으로 되살려 KJPDS02 24개 · PDS64 13개가 실재 함수처럼 올라 있었다. (R63) `text` 가 이미 가린 판이다.
@@ -1062,6 +1082,7 @@ def generate_uds_source_sections(
             macros.extend(_extract_c_macros(text))
             for m_name, m_val in _extract_c_macro_defs(text):
                 macro_defs.append([m_name, "", m_val, ""])
+                _macro_def_builds.append(_build_key(p))
 
         lines = live_raw.splitlines()   # (R63) 주석 표도 죽은 분기는 읽지 않는다 — 위 요구 ID 추출과 한 규칙(리뷰 I4)
         stop_headers = [
@@ -1606,8 +1627,13 @@ def generate_uds_source_sections(
         #    한다(`^{g}(\.|->|\[)`). 필터를 빼도 결과는 같고 맵만 커진다(이 프로젝트 7,337개).
         macro_expansion_map: Dict[str, str] = {}
         macro_call_map: Dict[str, List[str]] = {}
-        if globals_info_map:
-            for row in macro_defs:
+
+        def _macro_maps(rows, global_set):
+            """`(macro_globals_map, macro_expansion_map, macro_call_map)` of ``rows`` against the globals ``global_set``."""
+            macro_globals_map: Dict[str, List[str]] = {}
+            macro_expansion_map: Dict[str, str] = {}
+            macro_call_map: Dict[str, List[str]] = {}
+            for row in rows:
                 if len(row) >= 3:
                     m_name = str(row[0]).strip()
                     m_val = str(row[2]).strip()
@@ -1624,7 +1650,7 @@ def generate_uds_source_sections(
                     #   비교가 되고 토큰을 순회하면 2만 번이다. 결과 집합은 같다
                     #   (아래 소비처는 전역별 플래그를 독립적으로 세우므로 **순서 무관**).
                     #   순서는 캐시 산출물에 실리므로 `sorted` 로 고정한다.
-                    hits = sorted(t for t in set(c_identifiers(m_val)) if t in globals_info_map)
+                    hits = sorted(t for t in set(c_identifiers(m_val)) if t in global_set)
                     if hits:
                         macro_globals_map[m_name] = hits
                     call_hits: List[str] = []
@@ -1633,6 +1659,61 @@ def generate_uds_source_sections(
                             call_hits.append(call_name)
                     if call_hits:
                         macro_call_map[m_name] = call_hits[:10]
+            return macro_globals_map, macro_expansion_map, macro_call_map
+
+        # (R89) 빌드마다 한 벌: 그 빌드(와 어느 루트 밑도 아닌 파일)에서 정의된 매크로 행으로 만든 맵. 전역 이름 집합은 거르지 않는다 —
+        #   함수 본문이 다른 빌드의 객체 이름을 직접 쓸 수는 없고(그 빌드에서 컴파일되지 않는다), 다른 빌드의 이름이 들어오던 길은
+        #   매크로 확장뿐이었다. 원문 토큰으로 거르면 원문을 다 읽지 못한 헤더의 이름(`@주소` 레지스터)까지 지울 수 있다.
+        _by_build: Dict[str, Tuple[Dict[str, List[str]], Dict[str, str], Dict[str, List[str]], List[str]]] = {}
+        _build_scan: Dict[str, Any] = {}
+        if globals_info_map:
+            macro_globals_map, macro_expansion_map, macro_call_map = _macro_maps(macro_defs, globals_info_map)
+            if len(_root_norms) > 1 and len(_macro_def_builds) == len(macro_defs):
+                # (R89 리뷰 C1) 문서 범위 밖 파일의 매크로 · 전역 이름 — 빌드 맵에만 더한다(문서의 매크로 · 전역 표는 그대로).
+                #   빼면 BOOT 함수의 `SCI0BD = …` 가 맵에 없어 전역 목록이 비고, 그 사실이 어디에도 안 남았다(R89 첫 판).
+                _ctx_rows: List[Tuple[str, List[str]]] = []
+                _ctx_globals: Dict[str, Set[str]] = {}
+                _ctx_unread: List[str] = []
+                for _cp in _ctx_only_paths:
+                    try:
+                        _ct = blank_dead_code(_src_read(_cp) or "")
+                    except Exception as _ce:  # noqa: BLE001 — 못 읽은 파일은 세어 공시한다
+                        _ctx_unread.append(f"{Path(str(_cp)).name}:{type(_ce).__name__}")
+                        continue
+                    _bk = _build_key(_cp)
+                    for _mn, _mv in _extract_c_macro_defs(_ct):
+                        _ctx_rows.append((_bk, [_mn, "", _mv, ""]))
+                    for _g in _extract_c_global_candidates(_ct):
+                        _gn = str(_g.get("name") or "").strip()
+                        if _gn and _gn not in function_name_set:
+                            _ctx_globals.setdefault(_bk, set()).add(_gn)
+                for _rn in _root_norms:
+                    # 문서 범위 밖 행을 앞에 — 같은 이름이면 문서 범위 안의 정의가 이긴다(`_macro_maps` 는 뒤 행이 덮는다)
+                    _rows = [r for b, r in _ctx_rows if b in ("", _rn)] + [
+                        r for r, b in zip(macro_defs, _macro_def_builds, strict=True) if b in ("", _rn)]
+                    _extra = sorted((_ctx_globals.get(_rn, set()) | _ctx_globals.get("", set())) - set(globals_info_map))
+                    _gset = set(globals_info_map) | set(_extra)
+                    _mg, _me, _mc = _macro_maps(_rows, _gset)
+                    _by_build[_rn] = (_mg, _me, _mc, list(globals_info_map.keys()) + _extra)
+                    _build_scan[Path(_rn).name] = {
+                        "macro_rows": len(_rows),
+                        "context_only_files": sum(1 for _cp in _ctx_only_paths if _build_key(_cp) == _rn),
+                        "context_only_macro_rows": sum(1 for b, _r in _ctx_rows if b == _rn),
+                        "context_only_globals": len(_extra)}
+                if _ctx_unread:
+                    _build_scan["context_only_unread"] = _ctx_unread[:20]
+                _logger.info("R89: 빌드별 매크로 판정 — %s", _build_scan)
+                # (R89 리뷰 I3) 빌드가 실제로 갈렸는지 · 문서 범위 밖에서 더한 것(빌드별 함수 수는 레코드가 다 선 뒤 아래에서)
+                _globals_loss["build_split"] = _build_scan
+            elif len(_root_norms) > 1:
+                _logger.warning("R89: 매크로 행 %d · 빌드 기록 %d — 길이가 달라 빌드별 매크로 맵을 만들지 않는다(전체 맵)",
+                                len(macro_defs), len(_macro_def_builds))
+
+        def _maps_for(file_path: Any):
+            """(R89) 함수가 속한 빌드의 `(macro_globals_map, macro_expansion_map, macro_call_map, 전역 이름 목록)`."""
+            hit = _by_build.get(_build_key(file_path))
+            return hit if hit is not None else (macro_globals_map, macro_expansion_map, macro_call_map,
+                                                list(globals_info_map.keys()))
 
         # 접근자 함수 패턴: get_*/set_* 함수가 전역변수를 반환/설정하는 패턴 감지
         _accessor_globals_map: Dict[str, List[str]] = {}
@@ -1684,7 +1765,7 @@ def generate_uds_source_sections(
                     merged.append(name)
             if len(merged) > len(ast_calls or []):
                 source_parts.append("body")
-            macro_calls = _extract_macro_call_names(body_text, macro_call_map)
+            macro_calls = _extract_macro_call_names(body_text, _maps_for(file_path)[2])
             for name in macro_calls:
                 if name and name != fn_name and name in function_name_set and name not in merged:
                     merged.append(name)
@@ -1870,9 +1951,9 @@ def generate_uds_source_sections(
                     if pname:
                         param_names.append(pname)
                 param_usage = _collect_var_usage(body_text, param_names)
-                global_names = list(globals_info_map.keys())
+                _mg_b, _me_b, _mc_b, global_names = _maps_for(file_path)   # (R89) 이 함수의 빌드
                 global_usage = _collect_var_usage(
-                    body_text, global_names, macro_globals_map, macro_expansion_map
+                    body_text, global_names, _mg_b, _me_b
                 )
                 for p in params:
                     ptype, pname, array_part = _split_param(p)
@@ -2163,7 +2244,7 @@ def generate_uds_source_sections(
                     module_hint = Path(file_path).stem if file_path else ""
                     desc_text = _enhance_function_description(name, called_list, module_hint)
                 body_text = str(fn.get("body") or "")
-                global_names = list(globals_info_map.keys())
+                global_names = _maps_for(file_path)[3]   # (R89) 이 함수의 빌드
                 global_usage = _collect_var_usage(body_text, global_names) if body_text and global_names else {}
                 globals_global: List[str] = []
                 globals_static: List[str] = []
@@ -2818,8 +2899,31 @@ def generate_uds_source_sections(
     # ── 간접 Globals 추적: same-module direct/2-hop globals를 제한적으로 caller에 전파 ──
     if call_map and function_details_by_name:
         _indirect_propagated = 0
-        for caller_name, callee_list in call_map.items():
-            caller_info = function_details_by_name.get(caller_name.lower())
+        # (R89) 소스 루트가 둘 이상이면 callee 는 **호출자의 빌드**에서 찾는다. `function_details_by_name` 은 이름마다 첫 정의(APP)라,
+        #   BOOT 함수가 부르는 `EEPROM_SetByte` 가 APP 의 것으로 읽혀 APP 의 `REG_FSTAT` 가 BOOT 호출자에 `[INDIRECT]` 로 실렸다.
+        _twin_of: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        if len(_root_norms) > 1:
+            for _tinfo in function_details.values():
+                if isinstance(_tinfo, dict) and _tinfo.get("name"):
+                    _twin_of.setdefault((_build_key(_tinfo.get("file")), str(_tinfo["name"]).lower()), _tinfo)
+
+        def _info_near(name: Any, near: Dict[str, Any]) -> Any:
+            """``name`` 의 레코드 — 루트가 둘 이상이고 ``near`` 가 한 빌드에 속하면 그 빌드의 정의(없으면 None: `call_map` 은 이름
+            하나에 두 빌드 정의의 callee 를 합친 것이라, 다른 빌드에만 있는 callee 도 여기 온다)."""
+            _b = _build_key(near.get("file")) if _twin_of else ""
+            if _b:
+                return _twin_of.get((_b, str(name).lower()))
+            return function_details_by_name.get(str(name).lower())
+
+        # (R89 리뷰 W1) 루트가 둘 이상이면 **레코드마다** 자기 callee(`calls_list`)로 돈다 — 이름 하나에 레코드 하나
+        #   (`function_details_by_name`, 첫 정의)만 돌면 두 번째 빌드의 쌍둥이(HDPDM01 BOOT `main` · `EEPROM_SetByte` …)는
+        #   간접 전역을 하나도 못 받고, 루트 순서를 뒤집으면 받는 쪽이 바뀌었다
+        if _twin_of:
+            _callers = [(str(_ci.get("name") or ""), _ci, list(_ci.get("calls_list") or []))
+                        for _ci in function_details.values() if isinstance(_ci, dict) and _ci.get("name")]
+        else:
+            _callers = [(_cn, function_details_by_name.get(_cn.lower()), _cl) for _cn, _cl in call_map.items()]
+        for caller_name, caller_info, callee_list in _callers:
             if not isinstance(caller_info, dict):
                 continue
             caller_gg = caller_info.get("globals_global") or []
@@ -2842,7 +2946,7 @@ def generate_uds_source_sections(
                     existing_gs_names.add(vname.lower())
             added = False
             for callee_name in callee_list:
-                callee_info = function_details_by_name.get(callee_name.lower())
+                callee_info = _info_near(callee_name, caller_info)
                 if not isinstance(callee_info, dict):
                     continue
                 if _module_name_for(caller_info) and _module_name_for(caller_info) != _module_name_for(callee_info):
@@ -2865,8 +2969,10 @@ def generate_uds_source_sections(
                         caller_gs.append(f"[INDIRECT] {var_name}")
                         existing_gs_names.add(var_name.lower())
                         added = True
-                for leaf_name in _call_edges(callee_name):
-                    leaf_info = function_details_by_name.get(str(leaf_name).lower())
+                # (R89 리뷰 I6) 2 홉 간선도 그 callee 정의 자신의 것 — 합친 `call_map` 은 다른 빌드 쌍둥이의 간선을 섞는다
+                _leaves = (list(callee_info.get("calls_list") or []) if _twin_of else _call_edges(callee_name))
+                for leaf_name in _leaves:
+                    leaf_info = _info_near(leaf_name, caller_info)
                     if not isinstance(leaf_info, dict):
                         continue
                     if not _should_propagate_2hop(caller_info, callee_info, leaf_info):
@@ -2900,6 +3006,11 @@ def generate_uds_source_sections(
                     continue
                 fname = str(info.get("name") or "").strip().lower()
                 src = function_details_by_name.get(fname)
+                # (R89) 이름이 같아도 **다른 파일의 정의**(APP/BOOT 쌍둥이)에는 옮기지 않는다 — 예전엔 BOOT 쌍둥이 11 개가 APP 정의의
+                #   전역 목록을 통째로 받았다(`SCI0_Init` 의 `REG_SCI0BD` 등). 같은 정의의 다른 사본만 맞춘다.
+                if isinstance(src, dict) and src is not info and os.path.normcase(str(src.get("file") or "")) != \
+                        os.path.normcase(str(info.get("file") or "")):
+                    continue
                 if isinstance(src, dict):
                     for gk in ("globals_global", "globals_static"):
                         sv = src.get(gk)
@@ -2926,6 +3037,14 @@ def generate_uds_source_sections(
                 and not any(p == _fp for p, _ in _read_truncated)):
             _d["source_unavailable_reason"], _d["source_text_complete"] = "", True
             _record_failed.pop(_fp, None)
+    if isinstance(_globals_loss.get("build_split"), dict):
+        # (R89 리뷰 I3) 빌드별 함수 수 — 어느 루트 밑도 아닌 함수는 '(루트 밖)'. 경로 모양이 어긋나 빌드가 갈리지 않았으면 여기서 보인다
+        _per_build: Dict[str, int] = {}
+        for _d in function_details.values():
+            _bk_name = Path(_build_key(_d.get("file") or _d.get("source_path"))).name if _build_key(
+                _d.get("file") or _d.get("source_path")) else "(루트 밖)"
+            _per_build[_bk_name] = _per_build.get(_bk_name, 0) + 1
+        _globals_loss["build_split"]["functions"] = _per_build
 
     return {
         "typedef_aliases": typedef_aliases,

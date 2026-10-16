@@ -13,6 +13,7 @@ model, and a callee that cannot be interpreted leaves what it may write unknown.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections import Counter
 from typing import Any
@@ -62,24 +63,44 @@ class CalleeProvider:
         self._statics_by_file: dict[str, Any] = {}
         # (review W-R2-1) names that denote more than one object in the project: an internal-linkage object of one
         # unit and any other object of the same name (a header ``static`` counts once per including unit)
-        owners: dict[str, set[str]] = {}
+        # (R89) per build: several source roots are separate programs — APP's ``static`` object and BOOT's external one
+        #   of the same name never meet in one evaluation (a call links within its own build, `_resolve`)
+        from generators.c_project_context import _root_of
+        multi = bool(context.get("roots"))
+        build_of = (lambda unit: _root_of(context, unit)) if multi else (lambda unit: "")
+        owners: dict[tuple[str, str], set[str]] = {}
         for unit, scope in scopes.items():
             for table in (scope.get("globals") or {}, scope.get("arrays") or {}):
                 for name, rec in table.items():
-                    owners.setdefault(name, set()).add(unit if rec.get("static") else "")
-        self.ambiguous_names = frozenset(n for n, o in owners.items() if len(o) > 1)
+                    owners.setdefault((build_of(unit), name), set()).add(unit if rec.get("static") else "")
         # (R39 review C3) a struct member ``s.a`` names its struct ``s``: ambiguous when ``s`` denotes more than one object
         # — a modeled struct here and an internal-linkage object (flattened or not) of that name in another unit
-        roots: dict[str, set[str]] = {}
-        modeled_roots: set[str] = set()
+        roots: dict[tuple[str, str], set[str]] = {}
+        modeled_roots: set[tuple[str, str]] = set()
         for unit, scope in scopes.items():
             for name, rec in (scope.get("struct_globals") or {}).items():
-                roots.setdefault(name, set()).add(unit if rec.get("static") else "")
-                modeled_roots.add(name)
+                roots.setdefault((build_of(unit), name), set()).add(unit if rec.get("static") else "")
+                modeled_roots.add((build_of(unit), name))
             for name, static in (scope.get("unmodeled_object_linkage") or {}).items():
                 # (review round 2 C3') an external-linkage object counts too (owner "": one object for every unit)
-                roots.setdefault(name, set()).add(unit if static else "")
-        self.ambiguous_struct_roots = frozenset(n for n in modeled_roots if len(roots.get(n) or ()) > 1)
+                roots.setdefault((build_of(unit), name), set()).add(unit if static else "")
+        self._build_of = build_of
+        self._ambiguous: dict[str, set[str]] = {}
+        self._ambiguous_struct: dict[str, set[str]] = {}
+        for (build, name), o in owners.items():
+            if len(o) > 1:
+                self._ambiguous.setdefault(build, set()).add(name)
+        for build, name in modeled_roots:
+            if len(roots.get((build, name)) or ()) > 1:
+                self._ambiguous_struct.setdefault(build, set()).add(name)
+        # every build's, for a reader that does not say which build it evaluates in (refuses more, never less)
+        self.ambiguous_names = frozenset(n for names in self._ambiguous.values() for n in names)
+        self.ambiguous_struct_roots = frozenset(n for names in self._ambiguous_struct.values() for n in names)
+
+    def ambiguous_for(self, unit: str) -> tuple[frozenset, frozenset]:
+        """(R89) Names that denote more than one object in ``unit``'s build: ``(objects, struct roots)``."""
+        build = self._build_of(unit)
+        return frozenset(self._ambiguous.get(build) or ()), frozenset(self._ambiguous_struct.get(build) or ())
 
     def definition(self, name: str, caller_unit: str):
         key = (name, caller_unit)
@@ -216,9 +237,9 @@ def attach_integration_evidence(itcs: list[dict[str, Any]], report_data: dict[st
     files = projected_texts(scopes, files)
     stats["body_projection"] = summarize_body_projection(scopes.values())
     stats["source_reading"] = summarize_source_reading(context, scopes.values())   # (R63)
-    from generators.pointer_flow import summarize_pointer_targets
-    stats["pointer_targets"] = summarize_pointer_targets(next(
-        (s.get("effects") for s in scopes.values() if s.get("effects")), None))   # (R64)
+    from generators.pointer_flow import summarize_pointer_targets_all
+    stats["pointer_targets"] = summarize_pointer_targets_all(
+        s.get("effects") for s in scopes.values())   # (R64) · (R89 리뷰 W2) 빌드마다 closure 하나 — 전부 합산
     from generators.c_project_context import summarize_build_assumptions
     stats["build_assumptions"] = summarize_build_assumptions(scopes.values())   # (R17)
     provider = CalleeProvider(context, files, scopes, parser)
@@ -232,11 +253,20 @@ def attach_integration_evidence(itcs: list[dict[str, Any]], report_data: dict[st
         subs = itc.get("sub_cases") or []
         entry = str(itc.get("entry_fn") or "")
         paths = paths_of.get(entry) or set()
+        own = str(itc.get("entry_source_path") or "")
+        _named = len(paths)
+        if own and len(paths) > 1:
+            # (R89) two builds define the entry (HDPDM01 ``main`` · ``lin_lld_sci_init`` in APP and BOOT): the flow says
+            #   whose — the definition the test case was built from, not a guess between namesakes
+            key = os.path.normcase(os.path.normpath(own))
+            paths = {p for p in paths if os.path.normcase(os.path.normpath(p)) == key}
         if not subs:
             skipped["no_sub_cases"] += 1
             continue
         if len(paths) != 1:
-            skipped["entry_definition_missing" if not paths else "entry_definition_ambiguous"] += 1
+            # (R89 리뷰 I5) 이름의 정의는 있는데 흐름이 가리킨 경로가 그중에 없으면 경로 모양이 어긋난 것 — '없음' 과 가른다
+            skipped["entry_definition_missing" if not _named else "entry_definition_not_at_flow_path" if not paths
+                    else "entry_definition_ambiguous"] += 1
             continue
         path = next(iter(paths))
         if path not in scopes:

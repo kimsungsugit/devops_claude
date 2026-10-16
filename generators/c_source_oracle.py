@@ -3339,8 +3339,12 @@ class _World:
         self.all_havocs = 0
         cache = getattr(provider, "linkage_cache", None)
         self.linkage_cache = cache if isinstance(cache, dict) else {}
-        self.ambiguous = getattr(provider, "ambiguous_names", None) or frozenset()
-        self.ambiguous_roots = getattr(provider, "ambiguous_struct_roots", None) or frozenset()
+        ambiguous_for = getattr(provider, "ambiguous_for", None)
+        if callable(ambiguous_for):   # (R89) the entry's build only — another build's namesake is another program's
+            self.ambiguous, self.ambiguous_roots = ambiguous_for(path)
+        else:
+            self.ambiguous = getattr(provider, "ambiguous_names", None) or frozenset()
+            self.ambiguous_roots = getattr(provider, "ambiguous_struct_roots", None) or frozenset()
         if self.admit(entry.scope) is not None:  # one unit cannot collide with itself
             raise Unsupported("linkage_collision_in_entry_unit")
 

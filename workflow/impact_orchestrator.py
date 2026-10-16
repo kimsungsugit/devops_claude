@@ -1694,7 +1694,10 @@ def _build_doc_proposal(
         _flows = collect_integration_flows(
             fdmap, max_flows=max(120, len(fdmap)), sds_map=_sds_map,
             uds_swcom_map=_uds_swcom, uds_asil_map=_uds_asil,
-            uds_related_map=_uds_related) or []
+            uds_related_map=_uds_related,
+            # (R89 리뷰 W4) 문서(`generate_sits`)와 같은 빌드 분리 — 빠지면 BOOT 쌍둥이가 APP 객체를 관측하고 `main` 이 문서에 없는
+            #   설계 ID TC 를 받는다
+            source_roots=list((sections.get("project_context") or {}).get("roots") or [])) or []
         _tgt_flows = [
             f for f in _flows
             if str(f.get("entry_fn") or "").strip().lower() in changed_set

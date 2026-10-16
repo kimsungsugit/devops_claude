@@ -3752,6 +3752,17 @@ def _unit_build_defines(context, path):
             "defines": dict(rec.get("defines") or {}), "cplusplus_mode": bool(rec.get("cplusplus_mode", True))}
 
 
+def build_context(context, root):
+    """(R89) The context of one build: the files under ``root`` and those under no root (shared by every build — the
+    same reading `_same_build` gives a file outside every root: it links with none, but its text is no other build's).
+    Without roots, the context itself."""
+    if not context.get("roots"):
+        return context
+    rn = os.path.normcase(os.path.normpath(root)) if root else ""
+    files = {p: rec for p, rec in (context.get("files") or {}).items() if _root_of(context, p) in ("", rn)}
+    return {**context, "files": files}
+
+
 def _same_build(context, a, b) -> bool:
     """(R67) Two files of one build: the same source root (APP and BOOT are separate builds). Without roots there is one
     build; a file outside every root belongs to none (review round 3 I-5 — ``"" == ""`` linked them)."""
@@ -3897,13 +3908,25 @@ def _eval(n, env, depth):
 
 
 def build_scopes(context: dict[str, Any], paths) -> dict[str, dict[str, Any]]:
-    """Scopes for the given translation units, sharing one project-wide callee write closure (``scope["effects"]``).
+    """Scopes for the given translation units, sharing one callee write closure per build (``scope["effects"]`` — R89:
+    each source root is a build of its own).
 
     Linkage: an ``extern const`` object seen in a unit takes its value from the one external, initialized
     definition in the project (same declared type). Only the units that define such an object are scoped for it
     (review W7 — every unit used to be scoped on every call, including the one-function impact proposal).
     """
-    effects = function_write_closure(context)
+    closures: dict[str, dict[str, Any]] = {}
+
+    def effects_of(path):
+        # (R89) several source roots are separate builds (HDPDM01: APP ``PDS64_RD`` and BOOT ``PDS64_FBL``): a call links
+        #   within its own build (`CalleeProvider._resolve`), so the closure a unit sees is its own build's. One closure
+        #   for the whole tree merged the 11 functions both builds define (``EEPROM_SetByte``, ``main``, …) — a caller in
+        #   one build was told the callee writes the other build's objects
+        root = _root_of(context, path) if context.get("roots") else ""
+        if root not in closures:
+            closures[root] = function_write_closure(build_context(context, root) if root else context)
+        return closures[root]
+
     bodies = macro_bodies(context)
     names = defined_names(context)
     files = context.get("files") or {}
@@ -3913,7 +3936,7 @@ def build_scopes(context: dict[str, Any], paths) -> dict[str, dict[str, Any]]:
     def scope_of(path):
         if path not in scopes:
             scope = translation_unit_scope(context, path, bodies, known_names=names)
-            scope["effects"] = effects
+            scope["effects"] = effects_of(path)
             scopes[path] = scope
         return scopes[path]
 

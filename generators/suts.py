@@ -8903,10 +8903,10 @@ def generate_suts(
     quality["source_reading"] = summarize_source_reading(report_data.get("project_context"),
                                                          [u.get("project_scope") for u in units])
     # (R64) 포인터로 쓰는 callee · stub 이 실제로 가리킬 수 있는 객체만 지우는가 — 분석이 대상을 특정한 함수와 못 한 원인
-    from generators.pointer_flow import summarize_pointer_targets
-    quality["pointer_targets"] = summarize_pointer_targets(next(
-        ((u.get("project_scope") or {}).get("effects") for u in units if (u.get("project_scope") or {}).get("effects")),
-        None))
+    from generators.pointer_flow import summarize_pointer_targets_all
+    # (R89 리뷰 W2) 소스 루트가 둘 이상이면 빌드마다 closure 하나 — 첫 unit 의 것만 세면 한 빌드만 보고된다
+    quality["pointer_targets"] = summarize_pointer_targets_all(
+        (u.get("project_scope") or {}).get("effects") for u in units)
     # (R21) 행이 설정해 열로 보인 입력·기대값(두 프로파일)
     quality["row_io_columns"] = summarize_row_io(units)
     # (R23) 입력이 앞 행과 같은 행 — 정본 규모 행은 남기고 세며, 확장 전략 행은 뺀 수

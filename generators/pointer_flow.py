@@ -2397,6 +2397,36 @@ def summarize_pointer_targets(effects: dict[str, Any] | None) -> dict[str, Any]:
             "unknown_samples": samples}
 
 
+def summarize_pointer_targets_all(effects_list) -> dict[str, Any]:
+    """(R89 리뷰 W2) `summarize_pointer_targets` over every distinct closure — several source roots give one closure per
+    build (`c_project_context.build_scopes`); summing only the first scope's reported one build (HDPDM01: 42 of 164
+    pointer writers). ``builds`` = closures summed."""
+    seen: dict[int, dict] = {}
+    for fx in effects_list or ():
+        if isinstance(fx, dict) and "functions" in fx:
+            seen.setdefault(id(fx), fx)
+    parts = [summarize_pointer_targets(fx) for fx in seen.values()]
+    parts = [p for p in parts if p]
+    if not parts:
+        return {}
+    if len(parts) == 1:
+        return parts[0]
+    causes: dict[str, int] = {}
+    samples: dict[str, list[str]] = {}
+    for p in parts:
+        for k, v in (p.get("unknown_causes") or {}).items():
+            causes[k] = causes.get(k, 0) + v
+        for k, v in (p.get("unknown_samples") or {}).items():
+            room = 3 - len(samples.setdefault(k, []))
+            samples[k].extend(v[:max(0, room)])
+    return {"refused": "; ".join(sorted({p.get("refused") or "" for p in parts} - {""})),
+            "pointer_writers": sum(p.get("pointer_writers") or 0 for p in parts),
+            "known_targets": sum(p.get("known_targets") or 0 for p in parts),
+            "through_parameters": sum(p.get("through_parameters") or 0 for p in parts),
+            "unknown_causes": dict(sorted(causes.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "unknown_samples": samples, "builds": len(parts)}
+
+
 def analyze(context: dict[str, Any] | None) -> tuple[Analysis | None, str]:
     """The project's solved points-to graph, or (None, why it is refused)."""
     from generators import c_project_context as cpc

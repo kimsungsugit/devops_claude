@@ -143,7 +143,7 @@ def test_measure_passes_uds_path_to_the_sits_axis(monkeypatch, tmp_path) -> None
     """`measure()` 가 uds_path 를 SITS 측정까지 내려보내는가(STS 만 받던 결함)."""
     seen: dict = {}
 
-    def _fake(fd, sds_map, sds_reason, uds_path=""):
+    def _fake(fd, sds_map, sds_reason, uds_path="", source_roots=None):   # (R89) 빌드 분리 루트도 받는다
         seen["uds_path"] = uds_path
         return {"flows_total": 0, "cap": 1, "headroom": 1, "at_cap_boundary": False}
 

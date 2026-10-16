@@ -1499,7 +1499,9 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 #   52 로 캐시된 결과는 읽기 실패를 빈 원문으로 담았을 수 있다 — 다시 읽는다. 읽기 실패가 있는 결과는 캐시하지 않는다(아래).
 # (R82) v54: project_context 스키마 25(구조체 멤버의 포인터 겹 수 `pointer_depth` — 포인터 매개변수 대상의 한 겹 포인터 멤버를 하네스
 #   버퍼로 읽는다). 24 로 캐시된 문맥의 멤버에는 없다.
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v54"
+# (R89) v55: 소스 루트가 둘 이상이면 함수의 전역 · 매크로 판정을 그 함수가 속한 빌드의 정의로 한다(BOOT 함수의 전역 목록에 APP 헤더의
+#   레지스터가 실리던 것). project_context 스키마는 그대로 — 54 로 캐시된 `function_details` 의 전역 목록이 다르다.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v55"
 #: (R68 리뷰 W3) 읽기 실패가 든 결과는 디스크에 두지 않고 메모리에만 이만큼 — 한 묶음(STS · SUTS · SITS 연속 생성)은 파싱 한 번을
 #   나눠 쓰고, 사용자의 다음 생성은 다시 읽는다. 0 이면 담지 않는다.
 _FAILED_SECTIONS_TTL = 90.0
