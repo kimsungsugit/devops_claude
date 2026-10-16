@@ -1551,11 +1551,10 @@ export default function ImpactGuideSection({ analysisResult, job }) {
                 {!m.gen_truncated && genTcs && genTcs.length > 4 && (
                   <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 생성기 TC {genTcs.length}건 중 {shown}건 표시</div>
                 )}
-                {/* (R76 리뷰 W3) 초안은 함수당 상한 밖의 경계값 TC 도 보인다 — 정본 규모 구간엔 그 TC 가 없고, (R87) 기본(확장) 문서도
-                    정본 규모 구간에서 TC 가 없던 함수에만 덧붙인다(리뷰 R87 I1).
-                    "생성기를 그대로 보인다" 는 카드의 약속과 어긋나는 한 건이라 말로 밝힌다. */}
+                {/* (R76 리뷰 W3) 초안은 함수당 상한 밖의 경계값 TC 도 보인다 — 정본 규모 문서엔 그 TC 가 없고, (R90) 기본(확장)
+                    문서는 그 요구 끝에 새 ID 로 덧붙인다. "생성기를 그대로 보인다" 는 카드의 약속과 어긋나는 한 건이라 말로 밝힌다. */}
                 {m.boundary_tc_extended_only === true && (
-                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 경계값 TC 는 함수당 TC 상한 밖이라 &lsquo;정본 규모&rsquo; 구간에는 실리지 않습니다 — 기본(확장) 문서는 정본 규모 구간에서 TC 가 없던 함수에만 덧붙입니다</div>
+                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 경계값 TC 는 함수당 TC 상한 밖이라 &lsquo;정본 규모&rsquo; 문서에는 실리지 않습니다 — 기본(확장) 문서는 그 요구 끝에 새 ID 로 덧붙입니다</div>
                 )}
                 {m.step_truncated && (
                   <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 TC의 절차는 {m.step_cap}스텝까지만 표시</div>

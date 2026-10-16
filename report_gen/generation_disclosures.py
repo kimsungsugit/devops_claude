@@ -448,11 +448,15 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     # STS 는 공통 `caps_effective` 를 쓰지 않는다 — 상한을 `max_tc_per_req` 한 값으로 적는다(생산자 차이).
     #   이 값이 없으면 아래 "상한에 걸린 요구 50건" 이 무슨 상한인지 화면에서 알 수 없다.
+    # (R90 리뷰 W1) 확장(기본) 문서는 상한에 걸린 시험을 요구 끝에 덧붙인다 — 상한 문구를 프로파일에 맞춘다.
+    _ext_doc = str(gs.get("tc_profile") or "") == TC_PROFILE_EXTENDED
     cap = _int(gs, "max_tc_per_req")
     if cap is not None:
         out.append(_item(
             "sts_max_tc_per_req", "요구당 TC 상한", str(cap),
-            "한 요구 밑에 만드는 시험의 최대 개수다. 이 상한에 걸린 요구의 나머지 시험은 이 문서에 없다."))
+            "한 요구 밑에 만드는 시험의 최대 개수다. "
+            + ("확장(기본) 문서에서는 정본 규모 구간(앞쪽 TC ID)에만 걸리고, 이 상한에 걸린 시험은 그 요구 끝에 새 ID 로 덧붙는다."
+               if _ext_doc else "이 상한에 걸린 요구의 나머지 시험은 이 문서에 없다.")))
 
     # 근거 보강(`recommended` 이상)이 바꾼 기대결과 수 / **근거가 없어 그대로 둔 수**.
     # 뒤 숫자가 곧 "지어내지 않았다" 의 증거라 0 이어도 싣는다 — 다만 보강을 안 켠 문서
@@ -480,7 +484,10 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
         value = f"{with_tc} / {mapped}" if mapped is not None else str(with_tc)
         note = ("요구에 매핑된 함수 중 실제로 시험을 가진 함수 수다. 요구 커버리지는 요구 단위 값이라 "
                 "이 절단을 반영하지 않는다.")
-        if without:
+        if without and _ext_doc:
+            note += (f" 나머지 {without}개 함수는 소스에서 시험 절차를 만들지 못해 시험이 없다(요구당 상한 때문이 아니다 — 아래 "
+                     "'확장 중 근거가 얇은 함수').")
+        elif without:
             note += f" 나머지 {without}개 함수는 요구당 TC 상한에 밀려 이 문서에 시험이 없다."
         elif without is None:
             note += " 시험이 없는 함수 수는 기록되지 않았다 — 0 으로 읽지 말 것."
@@ -490,7 +497,10 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     trunc = _int(gs, "requirements_truncated_count")
     if trunc is not None:
         note = "요구당 TC 상한(max_tc_per_req)에 도달해 더 만들 수 있었는데 멈춘 요구 수다."
-        if trunc:
+        if trunc and _ext_doc:
+            note += (" 확장(기본) 문서에서는 이 요구들이 상한에 걸린 시험을 요구 끝에 새 ID 로 덧붙였다 — 이 수는 정본 규모 문서가 "
+                     "잃는 요구다.")
+        elif trunc:
             head = _head(gs.get("requirements_truncated"))
             note += f" 예: {head} 외 — 상한을 올리면 이 요구들의 시험이 늘어난다." if head else " 상한을 올리면 시험이 늘어난다."
         else:
@@ -507,7 +517,8 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
         #   `{"boundary_tc_candidates": 40}` 만 적은 산출물이 "잘림 0"(=손실 없음) 으로 보였다.
         cut = None if (cut_req is None or cut_fn is None) else cut_req + cut_fn
         note = ("분기 TC 뒤에 덧붙이는 경계값 시험이다. 경계값 TC 는 분기 TC 를 밀어내지 않으므로, "
-                "잘린 만큼은 이 문서에 아예 없다.")
+                + ("잘린 수는 정본 규모 구간의 것이고 확장(기본) 문서는 잘린 경계값 TC 를 그 요구 끝에 새 ID 로 덧붙였다(아래 "
+                   "'상한이 버린 TC · 스텝' 이 이 문서에 없는 수다)." if _ext_doc else "잘린 만큼은 이 문서에 아예 없다."))
         if cut is None:
             note += " 잘린 수가 기록되지 않았다 — 0 으로 읽지 말 것."
         out.append(_item(
@@ -515,7 +526,30 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"후보 {cand} · 남김 {_show(kept)} · 잘림 {_show(cut)}"
             + (f" (요구 상한 {_show(cut_req)} · 함수 상한 {_show(cut_fn)})" if cut else ""),
             note,
-            tone=_tone(cut is None or cut > 0)))
+            tone=_tone(cut is None or (cut > 0 and not _ext_doc))))
+
+    # (R90) 상한이 버린 TC · 스텝 — **고유** 기준(문서에 TC 가 실린 함수에서, 상한 없이 만든 TC 중 문서에 없는 것 · 스텝이 잘린 채 실린
+    #   TC). 미기록(옛 산출물)은 줄을 내지 않는다 — 0 으로 읽히면 '잘림 없음' 이 거짓이 된다.
+    _lf, _lt, _sc = _int(gs, "cap_lost_functions"), _int(gs, "cap_lost_tcs"), _int(gs, "cap_cut_step_tcs")
+    if _lf is not None and _lt is not None and _sc is not None:
+        _ap = _int(gs, "extended_appended_tcs")
+        _note = ("상한(함수당 · 요구당 TC, TC 당 스텝)이 버린 분기 · 오류 경로 · 경계값 TC 와, 뒤쪽 스텝이 잘린 채 실린 TC 다. 버린 "
+                 "TC 의 분기는 이 문서에 시험이 없고, 스텝이 잘린 TC 는 뒤쪽 행동 · 기대결과가 없다. 문서에 시험이 하나라도 실린 "
+                 "함수 기준이다 — 시험이 하나도 없는 함수는 위 '시험을 가진 함수' 에서 센다.")
+        if _ext_doc:
+            _note += (" 확장(기본) 문서는 상한이 버리던 TC 를 그 요구 끝에 새 ID 로 덧붙이고(기존 TC 의 ID · 순서는 그대로) 스텝 상한에 "
+                      f"잘린 규칙 TC 는 같은 ID 에서 채운다 — 덧붙인 TC {_show(_ap)}. AI 가 다시 쓴 스텝에는 스텝 상한이 그대로 걸린다.")
+        out.append(_item(
+            "sts_caps_cut", "상한이 버린 TC · 스텝",
+            f"버린 TC {_lt} (함수 {_lf}) · 스텝 잘린 TC {_sc}", _note, tone=_tone(bool(_lt) or bool(_sc))))
+
+    # (R90) 템플릿으로 쓴 정본의 시험 명세 시트를 지운 사실 — SITS(R88)와 같은 공시
+    _sts_dropped = gs.get("template_sheets_dropped")
+    if isinstance(_sts_dropped, list) and _sts_dropped:
+        out.append(_item(
+            "sts_template_sheets_dropped", "템플릿의 정본 시트 제거", f"{len(_sts_dropped)}개",
+            "템플릿으로 쓴 정본의 시험 명세 시트를 지우고 이 문서의 시트로 다시 썼다(정본마다 시트 이름이 달라 정본의 TC 가 든 "
+            "시트가 남아 있었다): " + ", ".join(str(x) for x in _sts_dropped[:8]) + "."))
 
     # 경계값을 **만들 수 없던** 함수 — 값을 지어내지 않은 결과라 결함이 아니다(info).
     unavail = _int(gs, "boundary_tc_unavailable")
@@ -533,7 +567,8 @@ def _sts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
         out.append(_item(
             "sts_extended", "확장으로 덧붙인 시험",
             f"함수 {ext_fn} · TC {ext_tc}" + (f" (경계값 {ext_b})" if ext_b else ""),
-            "정본 규모 구간에서 시험이 하나도 없던 함수에 덧붙인 분이다."
+            "정본 규모 구간에서 시험이 하나도 없던 함수에 덧붙인 분과, 정본 규모 구간이 일부만 시험한 함수의 상한 밖 분기를 요구 "
+            "끝에 덧붙인 분(아래 '상한이 버린 TC · 스텝' 의 덧붙인 TC)을 합친 수다. 함수 수는 앞의 것만 센다."
             + (f" 그중 {safety}개는 안전 요구 밑에 놓였다." if safety else "")))
         no_detail = _int(gs, "extended_functions_without_detail")
         no_steps = _int(gs, "extended_functions_without_steps")

@@ -105,8 +105,9 @@ class TestRequirementCap:
     def _run(max_tc, n_fns=2):
         fd = {f"SwUFn_{i:03d}": _fn(f"S_Fn_{i}") for i in range(1, n_fns + 1)}
         stats: dict = {}
+        # (R90) 정본 규모 블록의 상한 계수를 잰다 — 기본(확장)은 상한이 버린 TC 를 요구 끝에 덧붙이므로 프로파일을 밝힌다
         tcs = generate_test_cases([{"id": "SwTR_0001", "req_type": "TR"}], fd, {"SwTR_0001": list(fd)},
-                                  {"max_tc_per_req": max_tc}, stats_out=stats)
+                                  {"max_tc_per_req": max_tc, "tc_profile": "reference"}, stats_out=stats)
         return tcs, stats
 
     def test_requirement_cap_cut_is_counted_separately(self):
@@ -160,7 +161,8 @@ class TestQualityReportWarning:
         fd = {f"SwUFn_{i:03d}": _fn(f"S_Fn_{i}") for i in range(1, 3)}
         reqs = [{"id": "SwTR_0001", "req_type": "TR"}]
         stats: dict = {}
-        tcs = generate_test_cases(reqs, fd, {"SwTR_0001": list(fd)}, {"max_tc_per_req": max_tc}, stats_out=stats)
+        tcs = generate_test_cases(reqs, fd, {"SwTR_0001": list(fd)}, {"max_tc_per_req": max_tc, "tc_profile": "reference"},
+                                  stats_out=stats)
         return generate_quality_report(tcs, generate_traceability_matrix(tcs, reqs), generation_stats=stats)
 
     def test_cut_boundary_tcs_are_named_in_coverage_warnings(self):

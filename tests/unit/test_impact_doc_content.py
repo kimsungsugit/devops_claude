@@ -1472,7 +1472,8 @@ def test_sits_sub_cap_matches_generator_default(monkeypatch):
     from workflow.impact_orchestrator import _load_sits_fn_chains
 
     sub_cap = inspect.signature(_load_sits_fn_chains).parameters["sub_cap"].default
-    assert sub_cap >= _DEFAULT_SUBCASES, (
+    # (R90) 기본 `None` = 문서의 sub-case 전부 — 확장(기본) 문서는 후보 카탈로그 전부라 생성기 상수(14)보다도 많다(실측 15)
+    assert sub_cap is None or sub_cap >= _DEFAULT_SUBCASES, (
         f"sub_cap={sub_cap} < 생성기 기본 {_DEFAULT_SUBCASES} — docPartial 상시 참"
     )
 

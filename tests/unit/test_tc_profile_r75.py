@@ -179,9 +179,12 @@ class TestStsProfile:
         added = [t for t in ext if t.get("tc_profile") == TC_PROFILE_EXTENDED]
         fns = {t["title"].rsplit(" - ", 1)[-1] for t in added}
         base_fns = {t["title"].rsplit(" - ", 1)[-1] for t in base}
-        assert not (fns & base_fns), "이미 시험이 있는 함수는 되풀이하지 않는다"
         assert fns | base_fns == {f"S_Fn_{i}" for i in range(1, 7)}
-        for fn in fns:
+        # (R90) 정본 규모 블록이 일부만 실은 함수는 상한이 버린 분기를 덧붙인다 — 그래도 **같은 분기는 한 번만** 실린다
+        for fn in {f"S_Fn_{i}" for i in range(1, 7)}:
+            steps = [tuple((s["action"], s["expected"]) for s in t["steps"]) for t in ext if t["title"].endswith(f" - {fn}")]
+            assert len(steps) == len(set(steps)), f"{fn}: 같은 분기가 두 번 실렸다"
+        for fn in fns - base_fns:
             assert len({t["srs_id"] for t in added if t["title"].endswith(f" - {fn}")}) == 1, "함수마다 한 요구 밑에만"
 
     def test_function_goes_under_its_narrowest_requirement_and_ties_follow_document_order(self):
@@ -206,7 +209,9 @@ class TestStsProfile:
         assert len(kept) == 3 and _classify_steps(kept[-1])[1] == "BAA" and _classify_steps(kept[0])[1] != "BAA"
         ext, st = _sts("extended", max_tc=2)
         assert st["extended_boundary_tcs"] == st["extended_functions"] > 0
-        assert sum(1 for t in ext if t.get("tc_profile") == TC_PROFILE_EXTENDED and t["gen_method"] == "BAA") == st["extended_boundary_tcs"]
+        # (R90) 함수마다 경계값 TC 는 문서에 정확히 한 번 — 정본 규모 블록이 버렸던 것은 확장이 요구 끝에 덧붙인다
+        for i in range(1, 7):
+            assert sum(1 for t in ext if t["title"].endswith(f" - S_Fn_{i}") and t["gen_method"] == "BAA") == 1, i
 
     def test_unknown_typed_inputs_still_get_no_invented_boundary(self):
         """확장은 상한을 풀 뿐 값을 지어내지 않는다 — 모르는 타입뿐인 함수는 확장에서도 경계값 TC 가 없다."""
@@ -514,10 +519,12 @@ class TestGateRow:
         assert ext["state"] == "ok" and "시험되지" not in ext["reason"] and ext["measured"]["beyond_cap"] == 0
         assert ext["measured"]["beyond_cap_in_reference"] == 1 and "확장 프로파일" in ext["reason"]
 
-    def test_step_cap_is_judged_as_before_under_the_extension(self, tmp_path):
+    def test_step_cap_is_lifted_by_the_extension_and_judged_as_before_otherwise(self, tmp_path):
+        # (R90) 확장이 덧붙이는 TC 는 스텝 상한이 없다 — 게이트가 그렇게 말하고, 정본 규모 프로파일은 예전 판정 그대로
         ext = self._steps("sts", tmp_path, {"tc_profile": "extended"})["cap_max_steps_per_tc"]
         ref = self._steps("sts", tmp_path, {"tc_profile": "reference"})["cap_max_steps_per_tc"]   # (R87) 기본은 확장
-        assert ext == ref
+        assert ext["measured"].get("lifted_by_profile") == "extended" and "lifted_by_profile" not in ref["measured"]
+        assert "같은 ID 에서 스텝을 채움" in ext["reason"] and "같은 ID 에서 스텝을 채움" not in ref["reason"]
 
 
 # ── 배선 ─────────────────────────────────────────────────────────────────────
@@ -609,6 +616,7 @@ class TestWiring:
         from backend.services import docgen_requirements as req
 
         declared = {c for d in ("sts", "suts", "sits") for c in req.requirements_for(d)["caps"]}
-        assert set(_CAPS_LIFTED_BY_EXTENDED) == {"max_tc_per_req", "max_sequences", "max_subcases", "max_flows"}
+        # (R90) STS 확장 덧붙임 구간은 TC 당 스텝 상한도 없다(`generators.sts._EXTENDED_UNCAPPED`)
+        assert set(_CAPS_LIFTED_BY_EXTENDED) == {"max_tc_per_req", "max_steps_per_tc", "max_sequences", "max_subcases",
+                                                 "max_flows"}
         assert set(_CAPS_LIFTED_BY_EXTENDED) <= declared
-        assert "max_steps_per_tc" not in _CAPS_LIFTED_BY_EXTENDED, "TC 당 스텝 상한은 확장에서도 그대로 자른다"

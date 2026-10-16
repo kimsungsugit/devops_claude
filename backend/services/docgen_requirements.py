@@ -412,7 +412,8 @@ DOC_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
                                    "adjustable": True,
                                    "effect": "TC 당 스텝 상한 — 넘는 스텝은 **잘려서 "
                                              "시험 절차에 남지 않습니다**(AI 보강 스텝도 "
-                                             "같은 상한을 받습니다)"}},
+                                             "같은 상한을 받습니다). 확장(기본) 문서는 규칙이 만든 "
+                                             "스텝을 자르지 않습니다"}},
         choices={"template_source": _template_source_choice(),
                  "tc_profile": _tc_profile_choice("sts")},
         handler="POST /api/jenkins/sts/generate-async",

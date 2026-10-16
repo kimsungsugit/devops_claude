@@ -97,7 +97,8 @@ class TestGeneratedLabelsFollowSteps:
     @staticmethod
     def _run(fd, req=None, cfg=None):
         req = req or {"id": "SwTR_0001", "req_type": "TSR", "asil": "B"}
-        return generate_test_cases([req], fd, {req["id"]: list(fd)}, cfg or {"max_tc_per_req": 9})
+        # (R90) 정본 규모 블록의 라벨을 본다 — 기본(확장)은 상한이 버린 TC 를 덧붙인다
+        return generate_test_cases([req], fd, {req["id"]: list(fd)}, cfg or {"max_tc_per_req": 9, "tc_profile": "reference"})
 
     def test_typed_inputs_with_branch_flow_label_only_the_tc_that_has_boundary_steps(self):
         """옛 휴리스틱: `u8` 입력이 있으면 **모든** TC 가 BAA, TSR 이면 FIT. 라벨은 스텝을 따른다 — 분기 TC 는 ECA,

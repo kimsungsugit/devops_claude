@@ -1278,7 +1278,7 @@ def _load_sits_fn_chains(
     linked_doc: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None,
     content_sink: Optional[Dict[str, Any]] = None,
     *,
-    sub_cap: int = 14, kv_cap: int = 12,
+    sub_cap: Optional[int] = None, kv_cap: int = 12,
 ) -> Dict[str, List[str]]:
     """Return {entry_fn: [label, ...]} from the SITS vectorcast intermediate JSON.
 
@@ -1287,8 +1287,9 @@ def _load_sits_fn_chains(
     (문서 카드용, TC-ID 키). 프론트가 TC-ID로 조인하므로 entry_fn 매칭과 무관하게 전체 TC를 담는다.
     회귀 반환({entry_fn:[label]})은 불변(순수 additive).
 
-    sub_cap: 서브케이스 표시 상한. ⚠ 생성기 기본값(`generators.sits._DEFAULT_SUBCASES` = 14)과
-    **같아야 한다** — 문서가 그 생성기 산출물이라 더 작게 잡으면 `sub_total(14) > loaded(6)`가
+    sub_cap: 서브케이스 표시 상한. ⚠ (R90) 기본 `None` = 문서의 sub-case 전부 — 생성기 기본(확장) 문서는 후보 카탈로그 전부
+    (실측 15)라 예전 기본 14(`generators.sits._DEFAULT_SUBCASES`)는 확장 문서보다 작았다. 문서보다 **작게 잡으면 안 된다** —
+    문서가 그 생성기 산출물이라 더 작게 잡으면 `sub_total(14) > loaded(6)`가
     상시 참이 되고, 프론트가 "원문 일부만 로드 → 없다고 단정 불가"로 강등해 **'문서에 없음'
     신호가 통째로 죽는다**(실측: 미매칭 케이스가 신규추가 대신 전부 검증필요).
     절단이 실제로 나면 sub_total로 표면화한다. 예산 초과 시엔 `_shrink_doc_content`가 다시 줄인다.
@@ -1756,7 +1757,7 @@ def _build_doc_proposal(
 
     # ── STS: 함수별 _generate_steps_from_flow(logic_flow 없으면 내부에서 _generate_simple_steps 폴백) ──
     try:
-        from generators.sts import _generate_steps_from_flow
+        from generators.sts import _EXTENDED_UNCAPPED, _MAX_TC_PER_REQ, _generate_steps_from_flow
         from generators.tc_profile import is_evidence_enriched
 
         # (R87 리뷰 W-R2-2) 기본 문서(확장)는 시험 근거 보강이 켜진다 — 초안도 같은 규칙(문서 기본 · 사용자 선택은 못 받는다)
@@ -1773,7 +1774,9 @@ def _build_doc_proposal(
             #   프론트 4건)에 가장 먼저 잘려, 분기가 많은 함수의 미리보기엔 구조적으로 안 보였다. 초안은 "무슨 시험을 쓸지"
             #   를 보이는 자리라 `keep_boundary` 로 받고, 자를 땐 마지막 자리를 경계값 TC 에 남기며 그 위치를 알린다.
             _b_stats: Dict[str, Any] = {}
+            # (R90 리뷰 W3) 기본(확장) 문서는 함수의 분기 TC · 스텝을 상한 없이 싣는다 — 초안의 총량도 같은 규칙
             _raw_tc = list(_generate_steps_from_flow(_info.get("logic_flow") or [], _info,
+                                                     max_steps=_EXTENDED_UNCAPPED, max_tc=_EXTENDED_UNCAPPED,
                                                      stats=_b_stats, keep_boundary=True, enrich=_sts_enrich) or [])
             # (리뷰 I4·I5) 경계값 TC 는 **생성기가 알려 준 자리**로 집는다 — "마지막" 이라 가정하면 flow 없는 함수(둘째 자리)를
             #   놓치고, 빈 TC 가 걸러질 때 옆 TC 에 표시가 간다. 아래 표시는 객체 동일성으로 따라간다.
@@ -1808,9 +1811,11 @@ def _build_doc_proposal(
                     "step_cap": step_cap,
                     # 보낸 목록에서 경계값 TC 의 자리(없으면 None) — 프론트가 4건으로 줄일 때 이 TC 를 남긴다.
                     "boundary_tc_index": _b_shown,
-                    # (리뷰 W3) 초안은 `keep_boundary` 로 받아 함수당 상한 **밖**의 경계값 TC 도 보인다. 기본 프로파일의 문서는
-                    #   그 TC 를 싣지 않는다(확장 프로파일만) — 화면이 그 차이를 말하도록 사실을 싣는다.
-                    "boundary_tc_extended_only": bool(_b_shown is not None and _b_stats.get("boundary_beyond_function_cap")),
+                    # (리뷰 W3) 초안은 `keep_boundary` 로 받아 함수당 상한 **밖**의 경계값 TC 도 보인다. 정본 규모 문서는 그 TC 를
+                    #   싣지 않는다 — 화면이 그 차이를 말하도록 사실을 싣는다. (R90 리뷰 I3) 초안은 상한 없이 만들어 생성기의
+                    #   `boundary_beyond_function_cap` 이 늘 거짓이라, 정본 규모의 함수당 상한(`_MAX_TC_PER_REQ`)에 대어 본다.
+                    "boundary_tc_extended_only": bool(_b_shown is not None and isinstance(_bi, int)
+                                                      and _bi >= _MAX_TC_PER_REQ),
                 }
     except Exception as exc:  # noqa: BLE001
         logger.debug("doc_proposal STS synth failed: %s", exc)

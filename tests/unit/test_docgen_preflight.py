@@ -476,7 +476,8 @@ def test_cap_with_no_measurement_path_says_so(tmp_path: Path, monkeypatch) -> No
     대신 측정하지 않는다는 사실을 말한다.
     """
     _fake_cat_cache(monkeypatch, None)
-    step = _step(_post({"doc_type": "sts", "source_root": str(tmp_path)}),
+    # (R90) 기본(확장)은 스텝 상한을 풀므로 이 축의 판정은 정본 규모 프로파일에서 본다
+    step = _step(_post({"doc_type": "sts", "source_root": str(tmp_path), "caps": {"tc_profile": "reference"}}),
                  "cap_max_steps_per_tc")
     assert step["state"] == "ok", step
     assert "측정하지 않습니다" in step["reason"], step["reason"]

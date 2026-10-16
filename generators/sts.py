@@ -48,6 +48,27 @@ _REQ_ID_PAT = re.compile(
 # `3.SW Integration Test Spec` 이라 부른다(그쪽 템플릿 잔재 — 열이 FS_REQ/SRS 다).
 # 읽는 쪽은 둘 다 받는다(`_STS_SHEET_CANDIDATES`).
 _SPEC_SHEET_NAME = "3.SW Test Spec"
+# (R90) a reference STS's own test-spec sheet under any numbering / naming (KJPDS02 `3.SW Test Spec` — ours; HDPDM01
+#   `3.SW Integration Test Spec`). Matched on the name with spaces removed, lower case (as SITS R88 `_norm_sheet_key`).
+_TEMPLATE_SPEC_RX = re.compile(r"^\d+(?:-\d+)*\.?sw(?:integration)?testspec(?:ification)?$")
+
+
+def _drop_template_spec_sheets(wb) -> List[str]:
+    """(R90) 템플릿(정본)의 시험 명세 시트 중 이 생성기의 이름(`_SPEC_SHEET_NAME`)이 아닌 것을 지운다 — HDPDM01 정본을
+    템플릿으로 쓰면 정본 TC 59 개가 든 `3.SW Integration Test Spec` 이 우리 `3.SW Test Spec` 옆에 남았다(SITS 는 R88 에서
+    같은 결함을 고쳤다). 지운 시트 이름을 돌려준다."""
+    def key(name: Any) -> str:
+        return re.sub(r"\s+", "", str(name or "")).lower()
+    # (리뷰 I1) 남기는 것은 **정확히 같은 이름**뿐이다 — 라이터는 정확한 이름만 지우고 새로 쓴다. 표기만 다른 `3. SW Test Spec` 을
+    #   남기면 정본 TC 가 든 시트가 그대로 남고, `3.SW test spec` 이면 openpyxl 이 대소문자 무시 중복으로 보고 우리 시트를
+    #   `3.SW Test Spec1` 로 만들어 이름으로 찾는 reader · validator 가 못 찾았다
+    dropped = [sn for sn in wb.sheetnames if _TEMPLATE_SPEC_RX.match(key(sn)) and sn != _SPEC_SHEET_NAME]
+    active_dropped = wb.active is not None and wb.active.title in dropped
+    for sn in dropped:
+        del wb[sn]
+    if active_dropped and wb.sheetnames:
+        wb.active = 0
+    return dropped
 
 # ── 값 어휘 — **STS 정본의 Introduction 1.5/1.6** 이 출처다 ──────────────────
 #
@@ -134,6 +155,50 @@ _REVIEW_ONLY_METHODS = {"RVW"}
 _DEFAULT_TEST_ENV = "SwTE_01"
 _MAX_TC_PER_REQ = 5
 _MAX_STEPS_PER_TC = 15
+# (R90) 확장(기본) 문서는 상한이 자르던 분기 · 스텝을 다 싣는다. 사용자 "설정이나 이런건 최대 우리 효율이 나올 수 있는 걸로 디폴트
+#   값을 변경해야해". 상한이 자르던 것은 함수의 실제 분기(그 분기는 시험이 없다)와 TC 의 뒤쪽 스텝(행동만 있고 기대가 잘린 TC)이다.
+#   ⚠ 기존 TC 의 ID · 순서 · 내용은 그대로 둔다(R75) — 함수마다 예전 상한으로 만든 TC 가 그 자리에 서고(스텝이 잘렸던 TC 는 같은 ID
+#   에서 스텝만 채움), 상한에 빠졌던 분기는 그 요구 끝에 새 ID 로 붙는다(`generate_test_cases` 확장 구간). 정본 규모 블록은 그대로.
+_EXTENDED_UNCAPPED = 1 << 30
+
+
+def _step_key(steps: List[Dict[str, str]]) -> Tuple[Tuple[str, str], ...]:
+    """(R90) TC 비교 키 — 행동 · 기대결과만. 문서에 실을 때 근거 표식을 스텝 dict 에서 제자리로 떼므로(`_drain_evidence_marks`)
+    dict 전체를 비교하면 같은 분기가 다른 분기로 보여 두 번 실린다."""
+    return tuple((str(st.get("action") or ""), str(st.get("expected") or "")) for st in steps)
+
+
+def _pair_branches(full: List[List[Dict[str, str]]], emitted: List[List[Dict[str, str]]]) -> Dict[int, int]:
+    """(R90) 한 번의 생성(상한 적용)으로 나온 ``emitted`` 를 상한 없이 만든 ``full`` 과 짝짓는다 — ``{emitted 위치: full 위치}``.
+    **완전 일치가 먼저**고, 앞부분 일치(스텝 상한에 잘린 TC)는 남은 것끼리만 본다(리뷰 C1): 중첩 분기의 TC 는 부모 TC 의 스텝을 앞에
+    달고 부모보다 먼저 나와서, 앞부분 일치를 먼저 쓰면 부모 TC 가 상한에 빠진 형제와 짝지어져 그 형제가 '실렸다' 로 보이고(손실 0 의
+    가짜 통과) 부모 ID 에 형제의 스텝이 채워졌다. 한 full TC 는 한 번만 짝짓는다."""
+    kf = [_step_key(f) for f in full]
+    taken: set = set()
+    pair: Dict[int, int] = {}
+    ke = [_step_key(e) if e else None for e in emitted]
+    for exact in (True, False):
+        for i, k_e in enumerate(ke):
+            if k_e is None or i in pair:
+                continue
+            j = next((j for j, k in enumerate(kf)
+                      if j not in taken and (k == k_e if exact else k[:len(k_e)] == k_e)), None)
+            if j is not None:
+                taken.add(j)
+                pair[i] = j
+    return pair
+
+
+def _cap_losses(full: List[List[Dict[str, str]]], groups: List[List[List[Dict[str, str]]]]) -> Tuple[List[int], int]:
+    """(R90) ``full`` 중 어느 생성(``groups`` — 요구마다 · 확장 구간마다 한 묶음)에도 실리지 않은 위치(순서 유지)와, 실렸지만 **모든**
+    실림이 스텝이 잘린 TC 수. 묶음마다 따로 짝짓는다 — 같은 함수가 여러 요구 밑에 되풀이되면 한 목록으로 합친 두 번째 부모 TC 가
+    앞부분 일치로 빠진 자식 분기와 짝지어져 손실이 0 으로 보인다."""
+    whole: set = set()
+    cut: set = set()
+    for g in groups:
+        for i, j in _pair_branches(full, g).items():
+            (whole if len(g[i]) >= len(full[j]) else cut).add(j)
+    return [j for j in range(len(full)) if j not in whole and j not in cut], len(cut - whole)
 _REVIEW_SHEET_ERROR = "Requirement Review: "   # (R45) marks the review sheet's error among ``sheet_errors``
 
 _HEADER_ROW = 6
@@ -2296,10 +2361,24 @@ def generate_test_cases(
     _proj_is_safety = is_safety_asil(project_asil)
 
     all_tcs: List[Dict[str, Any]] = []
+    _profile, _profile_bad = normalize_tc_profile(config.get("tc_profile"), "sts")   # (R87) 미설정 = 확장
     # (R75) 요구별로 쓴 TC 번호의 끝 — 확장 프로파일이 그 뒤를 이어 쓴다(기본 TC 의 ID 는 그대로).
     _req_tc_count: Dict[str, int] = {}
     # (R72 N81) 경계값 TC 의 후보·보존·절단·못 붙임 계수((요구, 함수) 쌍 축). 아래 `stats_out` 엔 정수만 싣는다.
     _bstats: Dict[str, Any] = {}
+    # (R90) 문서에 실린 TC 의 원 스텝 — 함수별 · 생성 한 번(요구 하나 · 확장 구간 하나)마다 한 묶음. 상한이 버린 분기 · 스텝을 고유
+    #   기준으로 세고, 확장 문서가 그 나머지를 덧붙이는 기준(`_cap_losses`)
+    _emitted_raw: Dict[str, List[List[List[Dict[str, str]]]]] = {}
+    _ref_home: Dict[str, str] = {}   # 정본 규모 블록이 그 함수의 TC 를 처음 실은 요구
+    _full_cache: Dict[str, List[List[Dict[str, str]]]] = {}
+
+    def _full_steps(fid: str, info: Dict[str, Any]) -> List[List[Dict[str, str]]]:
+        """(R90) 상한 없이 만든 그 함수의 TC 전부(분기 · 오류 경로 · 경계) — 함수마다 한 번."""
+        if fid not in _full_cache:
+            _full_cache[fid] = [list(t) for t in _generate_steps_from_flow(
+                info.get("logic_flow") or [], info, max_steps=_EXTENDED_UNCAPPED, max_tc=_EXTENDED_UNCAPPED,
+                keep_boundary=True, enrich=_evidence) if t]
+        return _full_cache[fid]
 
     for req in requirements:
         rid = req["id"]
@@ -2340,6 +2419,14 @@ def generate_test_cases(
                                                   max_tc=max_tc, stats=_bstats, enrich=_evidence)
             # (R72 N81) 이번 함수의 경계값 TC 는 **마지막 자리**에만 있다(위치 판정 — id 로 식별하지 않는다, 리뷰 C1).
             _has_boundary = bool(_bstats.get("boundary_appended"))
+            # (R90 리뷰 W2) 확장(기본) 문서는 이 블록의 TC 도 스텝 상한에 잘린 것을 같은 ID 에서 채운다(확장 구간과 같은 정책).
+            #   정본 규모 문서는 그대로다.
+            _fill = {}
+            if _profile == TC_PROFILE_EXTENDED and step_sets and isinstance(info, dict) and info:
+                _full = _full_steps(fid, info)
+                _fill = {k: _full[j] for k, j in _pair_branches(_full, step_sets).items()
+                         if len(_full[j]) > len(step_sets[k])}
+            _group: List[List[Dict[str, str]]] = []
 
             for k, steps in enumerate(step_sets):
                 if tc_counter >= max_tc:
@@ -2351,6 +2438,9 @@ def generate_test_cases(
                     _bstats["boundary_tc_kept"] = int(_bstats.get("boundary_tc_kept") or 0) + 1
                 tc_counter += 1
                 used_fids.add(fid)
+                steps = _fill.get(k, steps)
+                _group.append(list(steps))
+                _ref_home.setdefault(fid, rid)
                 tc_id = _make_tc_id(rid, tc_counter)
                 # 라벨은 상한 절단·최소 스텝 보강까지 끝난 **최종 스텝**에서 읽는다 —
                 # 절단으로 경계값 스텝이 잘렸으면 BAA 도 같이 사라져야 한다.
@@ -2365,6 +2455,8 @@ def generate_test_cases(
                     func_name=info.get("name"),
                     review_only=review_only,
                 ))
+            if _group:
+                _emitted_raw.setdefault(fid, []).append(_group)
         _req_tc_count[rid] = tc_counter
 
     # ── (R75) 확장 프로파일 ─────────────────────────────────────────────────
@@ -2372,8 +2464,8 @@ def generate_test_cases(
     # 못 푼다 — 요구 하나에 함수가 600개씩 매핑돼 (요구, 함수) 쌍이 9,434 이고, 같은 함수가 여러 요구 밑에 되풀이된다.
     # 확장은 **시험이 하나도 없는 함수마다 한 번씩**, 그 함수를 가장 좁게 가리키는 요구(매핑 함수 수 최소, 동률이면
     # 문서 순서) 밑에 분기·경계값 TC 를 덧붙인다. 기본 TC 는 ID·순서·내용이 그대로다(포함 관계).
-    _profile, _profile_bad = normalize_tc_profile(config.get("tc_profile"), "sts")   # (R87) 미설정 = 확장
-    _ext = {"functions": 0, "tcs": 0, "boundary_tcs": 0, "no_detail": 0, "no_steps": 0, "safety_preferred": 0}
+    _ext = {"functions": 0, "tcs": 0, "boundary_tcs": 0, "no_detail": 0, "no_steps": 0, "safety_preferred": 0,
+            "appended_tcs": 0}
     _xstats: Dict[str, Any] = {}
     if _profile == TC_PROFILE_EXTENDED:
         # 같은 요구 ID 가 두 번 나오면 **첫 등장**이 순서·등급을 정한다(리뷰 I1).
@@ -2403,17 +2495,43 @@ def generate_test_cases(
                 if fid not in _narrowest or _width_key(rid) < _width_key(_narrowest[fid]):
                     _narrowest[fid] = rid
         # 같은 요구 ID 가 두 번 나와도 두 번째 바퀴는 할 일이 없다 — 그 요구의 함수는 첫 바퀴에서 전부 `used_fids` 에 들어갔다.
+        def _emit_ext(req, rid, n, info, steps, is_safety):
+            final_steps = _ensure_min_steps(steps, info, enrich=_evidence)
+            _drain_evidence_marks(final_steps, _estats)
+            method, gen, review_only = _classify_steps(final_steps)
+            tc = _build_tc_dict(
+                tc_id=_make_tc_id(rid, n), req=req, steps=final_steps,
+                test_method=method, gen_method=gen,
+                test_env=test_env, is_safety=is_safety,
+                func_name=info.get("name"),
+                review_only=review_only,
+            )
+            tc["tc_profile"] = TC_PROFILE_EXTENDED
+            all_tcs.append(tc)
+            _ext["tcs"] += 1
+
+        _tailed: set = set()
         for req in requirements:
             rid = req["id"]
             is_safety = is_safety_asil(str(req.get("asil") or "").strip())
             n = _req_tc_count.get(rid, 0)
+            _tails: List[Tuple[str, Dict[str, Any], List[Dict[str, str]]]] = []
             for fid in req_to_fids.get(rid, []):
+                info = function_details.get(fid, {})
+                if fid in _ref_home and _ref_home[fid] == rid and fid not in _tailed:
+                    # (R90 리뷰 W1) 정본 규모 블록이 일부만 실은 함수 — 함수당 · 요구당 상한이 버린 분기를 이 요구 끝에
+                    _tailed.add(fid)
+                    if isinstance(info, dict) and info:
+                        _full = _full_steps(fid, info)
+                        _rest, _ = _cap_losses(_full, _emitted_raw.get(fid) or [])
+                        _tails.extend((fid, info, _full[j]) for j in _rest)
+                    continue
                 if _home.get(fid) != rid or fid in used_fids:
                     continue
-                info = function_details.get(fid, {})
                 if not isinstance(info, dict) or not info:
                     _ext["no_detail"] += 1
                     continue
+                # 앞 구간(A): 예전 상한 그대로 — 이전 문서와 같은 TC ID · 순서 · 분기
                 step_sets = _generate_steps_from_flow(info.get("logic_flow") or [], info, max_steps=max_steps,
                                                       max_tc=max_tc, stats=_xstats, keep_boundary=True,
                                                       enrich=_evidence)
@@ -2425,26 +2543,44 @@ def generate_test_cases(
                 if _narrowest.get(fid) != rid:
                     _ext["safety_preferred"] += 1
                 _last_is_boundary = bool(_xstats.get("boundary_appended"))
+                _full = _full_steps(fid, info)
+                _pair = _pair_branches(_full, step_sets)
+                _group = []
                 for k, steps in enumerate(step_sets):
                     n += 1
-                    final_steps = _ensure_min_steps(steps, info, enrich=_evidence)
-                    _drain_evidence_marks(final_steps, _estats)
-                    method, gen, review_only = _classify_steps(final_steps)
-                    tc = _build_tc_dict(
-                        tc_id=_make_tc_id(rid, n), req=req, steps=final_steps,
-                        test_method=method, gen_method=gen,
-                        test_env=test_env, is_safety=is_safety,
-                        func_name=info.get("name"),
-                        review_only=review_only,
-                    )
-                    tc["tc_profile"] = TC_PROFILE_EXTENDED
-                    all_tcs.append(tc)
-                    _ext["tcs"] += 1
+                    # 스텝 상한에 잘렸던 TC 는 같은 ID 에서 스텝만 채운다(같은 분기)
+                    full_steps = _full[_pair[k]] if k in _pair else steps
+                    _group.append(list(full_steps))
+                    _emit_ext(req, rid, n, info, full_steps, is_safety)
                     if _last_is_boundary and k == len(step_sets) - 1:
                         _ext["boundary_tcs"] += 1
+                _emitted_raw.setdefault(fid, []).append(_group)
+                _taken = set(_pair.values())
+                _tails.extend((fid, info, _full[j]) for j in range(len(_full)) if j not in _taken)
+            # 뒤 구간(B): 상한이 버렸던 분기 — 새 ID 로 요구 끝에
+            for fid, info, steps in _tails:
+                n += 1
+                _emitted_raw.setdefault(fid, []).append([list(steps)])
+                _emit_ext(req, rid, n, info, steps, is_safety)
+                all_tcs[-1]["cap_appended"] = True   # `generate_sts` 가 요구 경계 TC 뒤로 번호를 다시 매긴다
+                _ext["appended_tcs"] += 1
             _req_tc_count[rid] = n
         # 문서의 TC 는 요구 순서로 모여 있어야 한다(라이터·추적성 시트가 등장 순서를 쓴다) — 안정 정렬이라 요구 안의 순서는 그대로다.
         all_tcs.sort(key=lambda tc: _order.get(str(tc.get("srs_id") or ""), len(_order)))
+
+    # (R90 리뷰 W2) 상한이 버린 것 — **고유** 기준(문서에 TC 가 하나라도 실린 함수에서, 상한 없이 만든 TC 중 문서에 없는 것 ·
+    #   스텝이 잘린 채 실린 TC). (요구, 함수) 쌍으로 세면 같은 함수가 여러 요구 밑에 되풀이돼 부풀고, 함수 안에서 요구당 상한이 자른
+    #   몫은 빠졌다. 확장(기본) 문서는 둘 다 0 이어야 하고, 정본 규모 문서의 수는 그 프로파일이 잃는 양이다.
+    _lost_fns = _lost_tcs = _cut_step_tcs = 0
+    for _fid, _em in _emitted_raw.items():
+        _info = function_details.get(_fid, {})
+        if not isinstance(_info, dict) or not _info:
+            continue
+        _rest, _cut = _cap_losses(_full_steps(_fid, _info), _em)
+        if _rest:
+            _lost_fns += 1
+            _lost_tcs += len(_rest)
+        _cut_step_tcs += _cut
 
     if stats_out is not None:
         stats_out.update({
@@ -2476,6 +2612,12 @@ def generate_test_cases(
             "boundary_tc_kept": int(_bstats.get("boundary_tc_kept") or 0),
             "boundary_tc_cut_by_function_cap": int(_bstats.get("boundary_tc_cut_by_function_cap") or 0),
             "boundary_tc_cut_by_req_cap": int(_bstats.get("boundary_tc_cut_by_req_cap") or 0),
+            # (R90) 상한이 버린 것 — 정본 규모 블록(`max_tc_per_req` · `max_steps_per_tc`)과 확장 덧붙임 구간을 따로. 확장 구간은
+            #   기본이 상한 없음이라 0 이어야 하고, 정본 규모 블록의 수는 정본 규모를 고를 때 잃는 양이다
+            "cap_lost_functions": _lost_fns,
+            "cap_lost_tcs": _lost_tcs,
+            "cap_cut_step_tcs": _cut_step_tcs,
+            "extended_appended_tcs": _ext["appended_tcs"],
             "boundary_tc_unavailable": int(_bstats.get("boundary_tc_unavailable") or 0),
             # 근거 보강(`recommended` 이상): 출력 확인 스텝의 기대결과를 관측 대상이 드러나는
             # 문장으로 바꾼 수 · **근거가 없어 그대로 둔 수**. 뒤 숫자가 곧 "지어내지 않았다" 의
@@ -2485,6 +2627,38 @@ def generate_test_cases(
         })
 
     return all_tcs
+
+
+def _renumber_cap_appended(test_cases: List[Dict[str, Any]], appended: List[Dict[str, Any]],
+                           requirements: List[Dict[str, Any]]) -> None:
+    """(R90) 상한이 버리던 TC(`cap_appended`)를 그 요구의 **모든** TC 뒤에 다시 번호 매겨 붙인다 — 요구 경계 TC(R6)는 기존 규칙대로
+    요구의 마지막 번호 다음을 받으므로, 덧붙인 TC 가 먼저 번호를 쓰면 이전 문서의 요구 경계 TC ID 가 밀린다."""
+    if not appended:
+        return
+    last: Dict[str, int] = {}
+    for tc in test_cases:
+        rid = str(tc.get("srs_id") or "")
+        tail = str(tc.get("id") or "").rsplit("_", 1)[-1]
+        if rid and tail.isdigit():
+            last[rid] = max(last.get(rid, 0), int(tail))
+    by_req: Dict[str, List[Dict[str, Any]]] = {}
+    for tc in appended:
+        rid = str(tc.get("srs_id") or "")
+        last[rid] = last.get(rid, 0) + 1
+        tc["id"] = _make_tc_id(rid, last[rid])
+        by_req.setdefault(rid, []).append(tc)
+    # (리뷰 I6) 그 요구의 마지막 TC 바로 뒤에 넣는다 — 문서를 다시 정렬하지 않는다(같은 요구 ID 가 둘이면 정렬 기준에 따라 이전
+    #   문서의 TC 순서가 바뀌었다)
+    end = {str(tc.get("srs_id") or ""): i for i, tc in enumerate(test_cases)}
+    out: List[Dict[str, Any]] = []
+    for i, tc in enumerate(test_cases):
+        out.append(tc)
+        rid = str(tc.get("srs_id") or "")
+        if end.get(rid) == i:
+            out.extend(by_req.pop(rid, []))
+    for rest in by_req.values():
+        out.extend(rest)
+    test_cases[:] = out
 
 
 def _make_tc_id(req_id: str, seq: int) -> str:
@@ -2742,9 +2916,9 @@ def generate_quality_report(
             f"[coverage] 분기 TC 뒤에 덧붙인 경계값 TC {int(gen_stats.get('boundary_tc_candidates') or 0)}건 중 {_b_cut}건이 "
             f"상한에 잘렸다(요구당 {int(gen_stats.get('boundary_tc_cut_by_req_cap') or 0)} · 함수당 "
             f"{int(gen_stats.get('boundary_tc_cut_by_function_cap') or 0)}, 남은 것 {int(gen_stats.get('boundary_tc_kept') or 0)}건). "
-            "경계값 TC 는 분기 TC 를 밀어내지 않는다 — 더 넣으려면 max_tc_per_req 를 올릴 것"
-            + (" (확장 프로파일 — 이 수치는 **정본 규모 구간**의 것이다. 정본 규모 구간에서 TC 를 받은 함수는 확장이 되풀이하지 않으므로 "
-               "거기서 잘린 경계값 TC 는 확장 문서에도 없다)" if _is_ext else "")
+            + ("확장(기본) 프로파일 — 이 수치는 **정본 규모 구간**의 것이고, 잘린 경계값 TC 는 그 요구 끝에 새 ID 로 덧붙었다"
+               "(정본 규모 문서에는 없다)" if _is_ext else
+               "경계값 TC 는 분기 TC 를 밀어내지 않는다 — 더 넣으려면 max_tc_per_req 를 올리거나 확장 프로파일을 쓸 것")
         )
 
     return {
@@ -2772,6 +2946,8 @@ def generate_sts_xlsm(
     project_config: Optional[Dict[str, Any]] = None,
     sheet_errors: Optional[List[str]] = None,
     requirement_review: Optional[List[Dict[str, Any]]] = None,
+    # (R90) receives the names of the template's own test-spec sheets that were dropped (`_drop_template_spec_sheets`)
+    dropped_sheets: Optional[List[str]] = None,
 ) -> str:
     """Generate STS XLSM file. ``sheet_errors`` collects why an optional evidence sheet was left out.
     ``requirement_review`` (R45): what the requirement documents leave undecided or state two ways — the
@@ -2793,6 +2969,11 @@ def generate_sts_xlsm(
     if template_path and Path(template_path).is_file():
         wb = openpyxl.load_workbook(template_path, keep_vba=True)
         _logger.info("Loaded STS template: %s", template_path)
+        _dropped = _drop_template_spec_sheets(wb)
+        if _dropped:
+            _logger.info("STS: 템플릿(정본)의 시험 명세 시트를 지웠다 — %s", ", ".join(_dropped))
+            if dropped_sheets is not None:
+                dropped_sheets.extend(_dropped)
         # ⚠ 이 갈래는 `_create_intro_sheet` 를 부르지 않는다 — 1.5 범례는 **템플릿이
         #   갖고 있던 것**이다. 두 정본의 범례가 반대라(위 어휘 블록) 템플릿에 없는
         #   코드를 칸에 적을 수 있다: KJPDS02 템플릿(1.5 = RBT·FIT)에 리뷰 전용 TC 가
@@ -3630,6 +3811,12 @@ def generate_sts(
             gen_stats.get("requirements_truncated_count"),
         )
 
+    # (R90) 상한이 버리던 TC 는 요구 경계 TC 가 번호를 받은 **뒤에** 번호를 받는다 — 이전 문서의 TC ID 가 그대로 남게. AI 보강
+    #   **전에** 뺀다(리뷰 I2): 보강 후보는 "스텝 3개 이하 TC 중 앞에서 50개" 라 덧붙인 TC 가 이전 문서의 후보 자리를 차지했다.
+    _cap_appended = [t for t in test_cases if t.get("cap_appended")]
+    if _cap_appended:
+        test_cases[:] = [t for t in test_cases if not t.get("cap_appended")]
+
     if ai_config:
         _progress(65, "AI 향상 적용 중")
         enhance_test_cases_with_ai(
@@ -3750,6 +3937,7 @@ def generate_sts(
             _review.clear()
             _logger.warning("requirement boundary TCs skipped: %s", exc, exc_info=True)
             gen_stats["requirement_boundary"] = {"error": f"{type(exc).__name__}: {exc}"}
+    _renumber_cap_appended(test_cases, _cap_appended, reqs)
 
     _progress(78, "추적성 매트릭스 생성 중")
     trace = generate_traceability_matrix(test_cases, reqs)
@@ -3759,8 +3947,10 @@ def generate_sts(
 
     _progress(85, "XLSM 파일 생성 중")
     _sheet_errors: List[str] = []
+    _dropped_sheets: List[str] = []
     out = generate_sts_xlsm(template_path, test_cases, trace, output_path, project_config, sheet_errors=_sheet_errors,
-                            requirement_review=_review)
+                            requirement_review=_review, dropped_sheets=_dropped_sheets)
+    gen_stats["template_sheets_dropped"] = _dropped_sheets   # (R90) quality 가 같은 dict 를 든다
     if _sheet_errors and isinstance(gen_stats.get("requirement_boundary"), dict):
         # quality 가 같은 dict 를 든다. (R45 review W5) 두 부가 시트의 오류는 따로 — 한 칸이면 검토 시트 실패가
         #   'Requirement Evidence' 의 이름으로 보이거나 둘 다 실패할 때 사라진다
