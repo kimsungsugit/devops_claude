@@ -434,11 +434,13 @@ def test_a_member_named_by_a_macro_hides_the_members():
     assert "value" not in r["outputs"]["g_o"]
 
 
-def test_a_bit_field_body_keeps_no_members():
-    # (review I-e) never flattened — the context does not carry its members
+def test_a_bit_field_body_is_never_flattened_and_keeps_its_members_for_the_storage_model():
+    # (review I-e) never flattened by R39 — (R90) the context carries its members, with each bit-field's width, for the
+    #   storage model (`test_register_model_r90`)
     rec = cpc.build_project_context({os.path.join(ROOT, "hb.h"): H})["files"][os.path.join(ROOT, "hb.h")]
     (entry,) = [e for k, v in rec["structs"].items() for e in v if e.get("bit_fields")]
-    assert entry["members"] == []
+    assert [(m["name"], m["bitfield"], m["bits"]) for m in entry["members"]] == [("f", True, "3"), ("k", False, "")]
+    assert "gb" not in SCOPE["struct_globals"]
 
 
 def test_a_member_declaration_that_does_not_parse_hides_the_members():

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import logging
 import os
 import re
 import struct
@@ -28,7 +29,7 @@ from generators import pointer_flow
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 25  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 27  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
 # 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
 # 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
@@ -78,6 +79,12 @@ SCHEMA_VERSION = 25  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 24 (R64 review round 4): per-file `paren_amp` — ``(T)&x`` read as a bitwise and — 23 lacks it. Paired with v52.
 # 25 (R82): struct members carry `pointer_depth` (``UINT8 *data`` 1) — a pointee's one-level pointer member is a harness
 #    buffer (`pointee_types[...]["pointers"]`); 24 lacks it. Paired with v54.
+# 26 (R90): a union's and a bit-field struct's members are kept (with each bit-field's width `bits` and the unnamed
+#    bit-fields), a body records `storage_hidden`, and a nested body behind an unnamed bit-field is recorded — the storage
+#    model (`_storage_layout`) lays union / bit-field objects out from them; 25 kept no union member. Paired with v56 (v55 is R89's).
+#    (re-review W-N2) and per file `storage_order_pragmas` — a record without it lays no storage object out.
+# 27 (R90 re-review 3 I-R3-3): 26 as R90 left it after its second review (`storage_order_pragmas` on every file record) —
+#    a 26 cached by an earlier R90 build may lack it. Paired with v57.
 _ARRAY_INIT_BUDGET = 20000
 #: (R67 review I-1) element values a const table may hold in the scope — a designator index or a declared length past it
 #   (``{ [2000000] = 1U }``) is no lookup table; its values stay unread
@@ -623,6 +630,26 @@ def reading_text(raw: bytes) -> tuple[bytes, dict[str, int]]:
     return _blanked(raw, [(a, b) for a, b, _k in blanks]), counts
 
 
+# (R90 re-review W-N2) a pragma that may reverse bit-field allocation or change a scalar's byte order in an aggregate:
+#   CodeWarrior ``reverse_bitfields``, IAR ``bitfields=reversed``, Renesas ``bit_order``, GCC ``scalar_storage_order``,
+#   an ``endian…`` pragma — the storage model's layouts do not hold where one is in the unit's text
+_STORAGE_ORDER_PRAGMA_RE = re.compile(
+    r"(?i)\b(?:reverse_bit_?fields?|bit_?fields?\s*=|bit_?order|bit_?field_?order|scalar_storage_order|endian\w*)")
+_PRAGMA_OPERATOR_RE = re.compile(rb'\b_Pragma\s*\(\s*"((?:\\.|[^"\\\n])*)"')
+
+
+def _storage_order_pragmas(pragmas, raw: bytes) -> list[dict[str, Any]]:
+    """(R90 re-review W-N2) The ``#pragma`` lines (``(line, argument)``) and ``_Pragma("…")`` operators of a file that
+    match `_STORAGE_ORDER_PRAGMA_RE`: ``{"line", "text"}``."""
+    found = [{"line": line, "text": " ".join(str(arg).split())[:80]} for line, arg in pragmas
+             if _STORAGE_ORDER_PRAGMA_RE.search(str(arg))]
+    for m in _PRAGMA_OPERATOR_RE.finditer(raw):
+        text = m.group(1).decode("utf-8", "replace")
+        if _STORAGE_ORDER_PRAGMA_RE.search(text):
+            found.append({"line": raw.count(b"\n", 0, m.start()) + 1, "text": "_Pragma " + " ".join(text.split())[:72]})
+    return found
+
+
 def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
     raw, blanked = reading_text(text.encode("utf-8"))
     root = parser.parse(raw).root_node
@@ -653,7 +680,9 @@ def _scan_file(path: str, text: str, parser) -> dict[str, Any]:
                            #   with the tree's type names whether ``T`` is a type
                            "paren_amp": _paren_amp(root, raw),
                            # (R64) file-scope objects' declared kinds and initializers, unread regions (`pointer_flow`)
-                           "flow": pointer_flow.file_facts(root, raw, path)}
+                           "flow": pointer_flow.file_facts(root, raw, path),
+                           # (R90 re-review W-N2) pragmas that may change how a union / bit-field object is laid out
+                           "storage_order_pragmas": _storage_order_pragmas(walk["pragmas"], raw)}
     for d in walk["defines"]:
         entry = {"body": d["body"], "line": d["line"], "pos": d["pos"], "conditional": d["conditional"],
                  "function_like": d["function_like"]}
@@ -982,7 +1011,9 @@ def _file_walk(root, raw) -> dict[str, Any]:
     stack: list[dict[str, Any]] = []
     out: dict[str, Any] = {"events": events, "defines": [], "undefs": [], "includes": [], "system_includes": [],
                            "strays": strays, "problems": {}, "spans": spans_d, "beyond_tree": beyond,
-                           "spliced_defines": 0, "unbalanced_brace_macros": []}
+                           "spliced_defines": 0, "unbalanced_brace_macros": [],
+                           # (R90 re-review W-N2) every ``#pragma`` line — in a function body too — ``(line, argument)``
+                           "pragmas": [(r["line"], r["argument"]) for r in recs if r["keyword"] == "pragma"]}
 
     def problem(kind):
         out["problems"][kind] = out["problems"].get(kind, 0) + 1
@@ -1510,6 +1541,24 @@ def _field_name(node, raw):
     return _text(node, raw) if node is not None else ""
 
 
+def _padding_only_errors(node) -> bool:
+    """(R90) Whether every parse error under ``node`` is the missing name of an unnamed bit-field (``U8 :1;`` — the
+    grammar wants a name there and inserts an empty one): such a member is padding, not a member the text hides."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.type == "ERROR":
+            return False
+        if n.is_missing:
+            p = n.parent
+            if not (n.type == "field_identifier" and p is not None and p.type == "field_declaration"
+                    and any(c.type == "bitfield_clause" for c in p.children)):
+                return False
+        if n.has_error:
+            stack.extend(n.children)
+    return True
+
+
 def _collect_struct(spec, raw, rec, line, pos, conditional, names=(), quals=()):
     """(R39) Record a struct/union body's members under its key — ``struct tag`` / ``union tag``, or one key per anonymous
     body — and an alias to the key under each typedef name in ``names`` (with the typedef's own qualifiers ``quals``:
@@ -1518,7 +1567,13 @@ def _collect_struct(spec, raw, rec, line, pos, conditional, names=(), quals=()):
     first), shape (``scalar`` · ``array`` · the declarator kind otherwise) and bit-field / qualifier flags; an anonymous
     nested body is recorded under its own key, which is then the member's type. A body with anything but plain member
     declarations — an ``#if`` around a member, an unnamed struct/union member, a parse error — is ``hidden``: its
-    members cannot all be named (review C2). A union's members are not kept (a union is never flattened)."""
+    members cannot all be named (review C2). R39 never flattens a union or a body with bit-fields.
+
+    (R90) A union's and a bit-field struct's members are kept as well — the storage model (`_storage_layout`) lays
+    them out — with each bit-field's width text (``bits``) and the unnamed bit-fields (``U8 :1;``, padding: ``name``
+    "") among them. ``storage_hidden`` is that model's own verdict: a ``#define`` among the members (Processor Expert
+    register headers) or an unnamed bit-field hides no member from it; an ``#if``, a parse error, an unnamed
+    struct/union member does. ``hidden`` keeps R39's reading."""
     if spec is None or spec.type not in {"struct_specifier", "union_specifier"}:
         return ""
     kind = "union" if spec.type == "union_specifier" else "struct"
@@ -1532,13 +1587,20 @@ def _collect_struct(spec, raw, rec, line, pos, conditional, names=(), quals=()):
     body = spec.child_by_field_name("body")
     if body is None:
         return key
-    members, hidden = [], False
+    members, hidden, storage_hidden = [], False, False
     for fd in body.named_children:
         if fd.type == "comment":
             continue
-        if fd.type != "field_declaration" or fd.has_error:
-            hidden = True   # ``#if FEATURE`` around a member, a parse error, …
+        if fd.type in {"preproc_def", "preproc_function_def"}:
+            # (R90) a #define among the members declares none (the register header puts its access macros there) —
+            #   R39 reads the body as hidden, as before
+            hidden = True
             continue
+        if fd.type != "field_declaration" or (fd.has_error and not _padding_only_errors(fd)):
+            hidden = storage_hidden = True   # ``#if FEATURE`` around a member, a parse error, …
+            continue
+        if fd.has_error:
+            hidden = True   # (R90) only an unnamed bit-field's missing name (here or in a nested body) — R39 as before
         ft = fd.child_by_field_name("type")
         fquals = {_text(c, raw) for c in fd.named_children if c.type == "type_qualifier"}
         if ft is not None and ft.type in {"struct_specifier", "union_specifier"}:
@@ -1548,12 +1610,21 @@ def _collect_struct(spec, raw, rec, line, pos, conditional, names=(), quals=()):
             typename = "enum " + _text(etag, raw) if etag is not None else f"enum @{rec['path']}:{ft.start_byte}"
         else:
             typename = " ".join(_text(ft, raw).split()) if ft is not None else ""
-        bitfield = any(c.type == "bitfield_clause" for c in fd.named_children)
+        clause = next((c for c in fd.named_children if c.type == "bitfield_clause"), None)
+        bitfield = clause is not None
+        # (R90) the width expression of a bit-field (``:1`` → "1")
+        width = strip_comments(_text(clause, raw)).strip().lstrip(":").strip() if clause is not None else ""
         declarators = fd.children_by_field_name("declarator")
         if not declarators:
-            hidden = True   # an unnamed struct/union member (C11 anonymous member): its members are this struct's
-            continue
+            hidden = storage_hidden = True   # an unnamed struct/union member (C11 anonymous member): its members are
+            continue                         # this struct's
         for d in declarators:
+            if d.is_missing:
+                # (R90) ``U8 :1;`` — an unnamed bit-field (the grammar's missing name): padding the layout counts
+                members.append({"name": "", "type": typename, "dims": [], "shape": "scalar", "bitfield": True,
+                                "bits": width, "volatile": "volatile" in fquals, "const": "const" in fquals,
+                                "pointer_depth": 0})
+                continue
             dims, inner = [], d
             while inner is not None and inner.type == "array_declarator":
                 size = inner.child_by_field_name("size")
@@ -1570,11 +1641,12 @@ def _collect_struct(spec, raw, rec, line, pos, conditional, names=(), quals=()):
             while p is not None and p.type == "pointer_declarator":
                 depth, p = depth + 1, p.child_by_field_name("declarator")
             members.append({"name": _field_name(d, raw), "type": typename, "dims": list(reversed(dims)), "shape": shape,
-                            "bitfield": bitfield, "volatile": "volatile" in fquals, "const": "const" in fquals,
+                            "bitfield": bitfield, "bits": width, "volatile": "volatile" in fquals,
+                            "const": "const" in fquals,
                             "pointer_depth": depth if p is not None and p.type == "field_identifier" else 0})
-    bit_fields = any(m["bitfield"] for m in members)   # never flattened: the members are not kept (review I-e)
-    structs.setdefault(key, []).append({"union": kind == "union", "hidden": hidden, "bit_fields": bit_fields,
-                                        "members": [] if kind == "union" or bit_fields else members,
+    bit_fields = any(m["bitfield"] for m in members)   # R39 never flattens it (review I-e)
+    structs.setdefault(key, []).append({"union": kind == "union", "hidden": hidden, "storage_hidden": storage_hidden,
+                                        "bit_fields": bit_fields, "members": members,
                                         "line": line, "pos": pos, "conditional": conditional})
     return key
 
@@ -1769,7 +1841,87 @@ def detect_build_config(cproject_texts: dict[str, str]) -> dict[str, Any]:
         dirs.update(_TOOLCHAIN_INCLUDE_RE.findall(text or ""))
     return {"toolchain_include_dirs": sorted(dirs), "evidence": sorted(p for p, t in cproject_texts.items()
                                                                       if _TOOLCHAIN_INCLUDE_RE.search(t or "")),
-            "configurations": {p: _build_defines(t or "") for p, t in sorted(cproject_texts.items())}}
+            "configurations": {p: _build_defines(t or "") for p, t in sorted(cproject_texts.items())},
+            # (R90 review W2) the target family each configuration builds for (``com.freescale.s12z.toolchain…``) —
+            #   one family per file, else none (`storage_byte_order`)
+            "targets": {p: fam for p, t in sorted(cproject_texts.items())
+                        if len(fams := set(_TOOLCHAIN_FAMILY_RE.findall(t or ""))) == 1 for fam in fams}}
+
+
+_TOOLCHAIN_FAMILY_RE = re.compile(r"\bcom\.freescale\.([a-z0-9]+)\.toolchain\b")
+# (R90 review W2) the byte order of the targets a build configuration names: the Freescale/NXP 16-bit families (S12Z,
+#   HCS12(X), HC12) are big-endian. A family not listed is no evidence.
+_TARGET_BYTE_ORDER = {"s12z": "be", "hcs12": "be", "hcs12x": "be", "hc12": "be"}
+# (R90 re-review W-N2) the bit-field allocation of the same families' compilers (CodeWarrior HC12 / S12Z): from the least
+#   significant bit of the unit — the S12Z header's own NAME_MASK macros agree, and the HDPDM01 reference SUTS register
+#   cells (run on the target) do. ``#pragma reverse_bitfields`` reverses it (`_storage_order_pragmas` refuses then).
+_TARGET_BIT_ORDER = {"s12z": "lsb", "hcs12": "lsb", "hcs12x": "lsb", "hc12": "lsb"}
+#: (R90 review W2) ``DEVOPS_STORAGE_BYTE_ORDER``: ``target`` (default — the build target's, when its configuration names
+#:   one), ``be`` / ``le`` (the harness's, set by the user), ``any`` (no byte order assumed: a value through a member of
+#:   another width only where both agree). (re-review I-4) Any other value is not ignored silently: no byte order is
+#:   assumed and the basis says why (and a warning is logged).
+STORAGE_BYTE_ORDER_ENV = "DEVOPS_STORAGE_BYTE_ORDER"
+_STORAGE_BYTE_ORDER_SETTINGS = ("target", "be", "le", "any")
+_warned_settings: set[str] = set()
+
+
+def _unit_configuration(context, path) -> str:
+    """(R90 review W2) The ``.cproject`` of the source root that compiles ``path`` — `_unit_build_defines`'s choice."""
+    configs = ((context.get("build") or {}).get("configurations") or {})
+    root = _root_of(context, path)
+    if root:
+        return next((p for p in configs if os.path.normcase(os.path.dirname(os.path.normpath(p))) == root), "")
+    if len(configs) == 1 and not (context.get("roots") or ()):
+        return next(iter(configs))
+    return ""
+
+
+def storage_byte_order(context: dict[str, Any], path: str) -> tuple[str | None, str]:
+    """(R90 review W2) The byte order union / bit-field objects of the unit ``path`` are laid out with — ``"be"`` /
+    ``"le"``, or None (every order kept, a value only where they agree) — and what says so. A configured order
+    (`STORAGE_BYTE_ORDER_ENV`, or the context's ``storage_byte_order``) wins; else the build target's (an S12Z
+    configuration: big-endian — the ``@0x…`` register declarations compile only there); else none. (re-review I-4) A
+    setting that is none of `_STORAGE_BYTE_ORDER_SETTINGS` assumes none and says so."""
+    raw = context.get("storage_byte_order") or os.environ.get(STORAGE_BYTE_ORDER_ENV) or "target"
+    configured = str(raw).strip().lower()
+    if configured not in _STORAGE_BYTE_ORDER_SETTINGS:
+        shown = str(raw)[:40]
+        if shown not in _warned_settings:
+            _warned_settings.add(shown)
+            logging.getLogger(__name__).warning(
+                "%s=%r is not one of %s: no byte order is assumed for union / bit-field objects",
+                STORAGE_BYTE_ORDER_ENV, shown, "/".join(_STORAGE_BYTE_ORDER_SETTINGS))
+        return None, (f"none assumed ({STORAGE_BYTE_ORDER_ENV}={shown!r} is not one of "
+                      + "/".join(_STORAGE_BYTE_ORDER_SETTINGS) + ")")
+    if configured in ("be", "le"):
+        return configured, "configured (" + STORAGE_BYTE_ORDER_ENV + "=" + configured + ")"
+    if configured == "any":
+        return None, "none assumed (" + STORAGE_BYTE_ORDER_ENV + "=any)"
+    family, where = _unit_target(context, path)
+    order = _TARGET_BYTE_ORDER.get(family or "")
+    if order is None:
+        return None, "none assumed (no build target names a byte order)"
+    return order, f"the build target ({family}, {where}): " + ("big" if order == "be" else "little") + "-endian"
+
+
+def _unit_target(context, path) -> tuple[str | None, str]:
+    """(R90) The target family the unit's build configuration names, and that configuration (``<root>/.cproject``)."""
+    cproject = _unit_configuration(context, path)
+    family = ((context.get("build") or {}).get("targets") or {}).get(cproject) if cproject else None
+    return family, (os.path.basename(os.path.dirname(os.path.normpath(cproject))) + "/.cproject" if cproject else "")
+
+
+def storage_bit_order(context: dict[str, Any], path: str) -> tuple[str | None, str]:
+    """(R90 re-review W-N2) The end of a unit bit-fields are allocated from in the unit ``path`` — ``"lsb"`` where the
+    build target's compiler is known to (`_TARGET_BIT_ORDER`), else None: the allocation order is implementation-defined
+    (C11 6.7.2.1p11; GCC on big-endian targets, PowerPC, ARM BE8 and IAR ``bitfields=reversed`` start at the most
+    significant bit), so layouts of both ends are kept and a value is given only where they agree — the header's own
+    NAME_MASK / NAME_BITNUM macros drop the end they contradict."""
+    family, where = _unit_target(context, path)
+    if _TARGET_BIT_ORDER.get(family or "") == "lsb":
+        return "lsb", f"from the least significant bit (the build target {family}, {where})"
+    return None, ("either end (no build target names one — a layout the header's NAME_MASK / NAME_BITNUM macros "
+                  "contradict is dropped)")
 
 
 _DEFINE_TOKEN = re.compile(r"-D([A-Za-z_]\w*)(?:=([^\s\"'$`\\]*))?")
@@ -2959,6 +3111,9 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
                              # (R39 review C3) the objects this unit does not model (a struct it cannot flatten among
                              # them) → internal linkage: another unit's modeled member of the same root may not be it
                              "unmodeled_object_linkage": {},
+                             # (R90) union / bit-field objects whose members share one storage (`_storage_object`):
+                             #   candidates (declared type, linkage) and why one could not be laid out
+                             "storage_candidates": {}, "storage_unresolved": {},
                              "missing_includes": [], "system_includes": [], "files": []}
     if path not in files:
         scope["status"] = "file_not_in_project_context"
@@ -3375,6 +3530,8 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
             if d["shape"] == "scalar":
                 _scope_struct(scope, name, defs, raw_structs, pp, type_of, agreeing,   # (R39) no-op unless a struct
                               macro_names=every_macro_name)
+                if name not in scope["struct_globals"]:
+                    _storage_candidate(scope, name, defs, raw_structs, pp)   # (R90) a union / bit-field object
             if d["shape"] != "scalar":
                 raise Unresolved("global_not_scalar:" + d["shape"])
             if d["type"] == "struct":
@@ -3428,8 +3585,119 @@ def translation_unit_scope(context: dict[str, Any], path: str, bodies: dict | No
                     continue
                 scope["pointee_types"][core] = _pointee_layout(core, raw_structs, type_of, agreeing, every_macro_name,
                                                                gaps=bool(pp["gaps"]))
+    # (R90) union / bit-field objects, laid out on first use (`_storage_object` — 346 register objects in every unit that
+    #   includes the S12Z header, a few in each function)
+    index: dict[str, list[str]] = {}
+
+    def body_index():
+        if not index and scope["macro_bodies"]:
+            for mname, mbody in scope["macro_bodies"].items():
+                text = "".join(str(mbody).split())
+                if "." in text and _MEMBER_PATH_RE.fullmatch(text):
+                    index.setdefault(text, []).append(mname)
+            index.setdefault("", [])
+        return index
+
+    def width_of(text):
+        text = strip_comments(str(text)).strip()
+        if text.isdigit():
+            return int(text)
+        value, t, _extra = agreeing(text, macro_body=False)
+        if is_float(t) or type(value) is not int:
+            raise Unresolved("not_an_integer_constant")
+        return value
+
+    order, basis = storage_byte_order(context, path)
+    scope["storage_byte_order"] = {"order": order, "basis": basis}   # (R90 review W2)
+    bit_order, bit_basis = storage_bit_order(context, path)
+    scope["storage_bit_order"] = {"order": bit_order, "basis": bit_basis}   # (R90 re-review W-N2)
+    # (R90 re-review W-N2) a pragma in the unit's text that may reverse bit-fields or a scalar's byte order: no object is
+    #   laid out (a file record of an older scan has no list — not laid out either)
+    pragmas = [f"{os.path.basename(p)}:{x.get('line')}:{x.get('text')}" for p, rec in recs
+               for x in (rec.get("storage_order_pragmas") or ())]
+    unscanned = [p for p, rec in recs if rec.get("storage_order_pragmas") is None]
+    refusal = ("storage_order_pragma:" + pragmas[0] if pragmas else
+               "storage_order_pragmas_not_scanned:" + os.path.basename(unscanned[0]) if unscanned else "")
+    scope["storage_globals"] = _LazyStorage(
+        lambda n: _storage_object(scope, n, raw_structs, type_of, width_of, every_macro_name, body_index, order, basis,
+                                  bit_order, bit_basis, refusal))
     scope["status"] = "resolved" if not scope["missing_includes"] else "partial"
     return scope
+
+
+_MEMBER_PATH_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
+
+
+def _shares_storage(key, raw_structs, depth=0) -> bool:
+    """(R90) Whether the body ``key`` holds a union or a bit-field (itself or a nested body) — an object R39 cannot
+    flatten because its members share storage. Undecidable bodies (several, conditional) answer True: the layout says
+    why it cannot be laid out."""
+    entries = raw_structs.get(key) or []
+    if depth > 6 or len(entries) != 1:
+        return True
+    e = entries[0]
+    if e.get("alias"):
+        return _shares_storage(e["alias"], raw_structs, depth + 1)
+    if e.get("union") or e.get("bit_fields"):
+        return True
+    for m in e.get("members") or []:
+        core = " ".join(w for w in str(m.get("type") or "").split() if w not in {"const", "volatile"})
+        if core in raw_structs and _shares_storage(core, raw_structs, depth + 1):
+            return True
+    return False
+
+
+def _storage_volatile(key, raw_structs, types=None, depth=0) -> tuple[bool, bool]:
+    """(R90 re-review W-N1) ``(the type is volatile, a member is)`` for the body ``key``: a typedef of it declared
+    ``volatile`` anywhere along the alias chain (``typedef volatile union {…} VSTR;``) makes every object of it volatile;
+    a member declared volatile (``volatile U8 Byte;``, or of a volatile scalar typedef), at any depth, makes its reads
+    volatile ones. ``types``: the unit's resolved typedefs (no type is resolved here). Undecidable bodies (several,
+    conditional) answer what their entries say."""
+    entries = raw_structs.get(key) or []
+    whole = member = False
+    if depth > 6:
+        return whole, member
+    for e in entries:
+        if e.get("alias"):
+            w, m = _storage_volatile(e["alias"], raw_structs, types, depth + 1)
+            whole, member = whole or bool(e.get("volatile")) or w, member or m
+            continue
+        for m in e.get("members") or []:
+            words = str(m.get("type") or "").split()
+            core = " ".join(w for w in words if w not in {"const", "volatile"})
+            if m.get("volatile") or "volatile" in words:
+                member = True
+            elif core in raw_structs:
+                w, mm = _storage_volatile(core, raw_structs, types, depth + 1)
+                member = member or w or mm
+            elif isinstance((types or {}).get(core), dict) and "volatile" in (types[core].get("qualifiers") or []):
+                member = True   # ``typedef volatile U8 VU8;``
+    return whole, member
+
+
+def _storage_candidate(scope, name, defs, raw_structs, pp):
+    """(R90) Record a global whose declared type is a struct / union body this unit sees and R39 did not flatten — a union
+    or a struct with bit-fields is laid out as one storage when first used (`_storage_object`). ``reason``: why it never
+    will be (the object rules R39 applies: a const object, an array of them, an unreadable include). (re-review W-N1)
+    ``volatile``: the declaration's qualifiers, the type's (its typedef chain) or a member's say so — ``object_volatile``
+    the first two (every member of the object is a volatile lvalue)."""
+    d = defs[0]
+    words = [w for w in str(d["type"]).split() if w not in {"const", "volatile"}]
+    key = d.get("struct_key") if d["type"] == "struct" else " ".join(words)
+    if not key or key not in raw_structs or not _shares_storage(key, raw_structs):
+        return
+    reason = ""
+    if any(x.get("dims") for x in defs):
+        reason = "array_of_storage_objects"
+    elif any(x.get("const") for x in defs):
+        reason = "const_object"
+    elif pp["gaps"]:
+        reason = "preprocessing_gaps"   # a member may sit under an #if the unit cannot decide (as R39)
+    type_whole, type_member = _storage_volatile(key, raw_structs, scope.get("types"))
+    whole = any(x.get("volatile") for x in defs) or "volatile" in str(d["type"]).split() or type_whole
+    scope["storage_candidates"][name] = {"key": key, "typename": d["type"], "file": d["file"], "line": d["line"],
+                                         "static": any(x.get("static") for x in defs),
+                                         "volatile": whole or type_member, "object_volatile": whole, "reason": reason}
 
 
 def _flatten_struct(key, raw_structs, type_of, agreeing, macro_names=(), volatile=False, pointers=None):
@@ -3511,6 +3779,337 @@ def _flatten_struct(key, raw_structs, type_of, agreeing, macro_names=(), volatil
         return out
 
     return walk(key, "", volatile, 0), unmodeled
+
+
+# ── (R90) union / bit-field storage objects ───────────────────────────────────────────────────────────────────────────
+# A union object (a Processor Expert register: ``typedef union { U8 Byte; struct { U8 TEN:1; … } Bits; } TSCR1STR;``) or
+# a struct with bit-fields is one storage of its size that every member reads and writes. A member is a "leaf" — a scalar
+# or a bit-field at a byte offset — and its value bits sit at fixed bits of the storage; which ones depends on choices the
+# target makes, so a layout is computed for each of them and a value is given only where they agree:
+#   ``le``        little-endian, a bit-field allocated from the least significant bit of a unit of its declared type;
+#   ``be``        big-endian (S12Z), same units;
+#   ``be_bytes``  big-endian, bit-fields allocated byte by byte (a compiler may use any addressable unit large enough —
+#                 C11 6.7.2.1p11; CodeWarrior's type-size reduction does);
+#   ``le_msb``    (re-review W-N2) little-endian, bit-fields allocated from the most significant bit of their unit;
+#   ``be_msb``    big-endian, the same.
+# The allocation order within a unit is implementation-defined too (C11 6.7.2.1p11): where the build target names a
+# compiler known to allocate from the least significant bit (`storage_bit_order` — CodeWarrior HC12 / S12Z) only the
+# first three are kept, else all five. (re-review I-2) Byte units place a field that crosses no byte exactly as the
+# units of its declared type do — little-endian from the least significant bit and big-endian from the most significant
+# one; big-endian from the least significant bit they place it differently (``be_bytes``). A field that does cross a
+# byte is placed by ``be_bytes`` nowhere (None — the allocation may move it to the next byte); the other orders place it
+# as the units of its declared type do, which a compiler that moves it would not. The header's own ``NAME_MASK`` /
+# ``NAME_BITNUM`` macros are checked wherever ``NAME`` is the member's access macro (``#define TIM0TSCR1_TEN
+# REG_TIM0TSCR1.Bits.TEN``): a layout that contradicts one is dropped, all contradicted refuses the object.
+STORAGE_ORDERS = ("le", "be", "be_bytes", "le_msb", "be_msb")
+_LITTLE_ENDIAN_ORDERS = frozenset({"le", "le_msb"})
+_MSB_FIRST_ORDERS = frozenset({"le_msb", "be_msb"})
+
+
+def _storage_bits(leaf: dict[str, Any], order: str) -> tuple[int, ...] | None:
+    """(R90) The storage bit (``byte * 8 + bit``) holding each value bit of ``leaf``, least significant first, under
+    ``order`` — None when this model cannot say where that allocation puts it: under ``be_bytes`` a bit-field crossing
+    a byte, or one after such a field in the same run (the allocation would move it, and what follows it)."""
+    w = leaf["width"]
+    little = order in _LITTLE_ENDIAN_ORDERS
+    if not leaf["bitfield"]:
+        o, n = leaf["offset"], leaf["unit"]
+        return tuple(((o + k // 8) if little else (o + n - 1 - k // 8)) * 8 + k % 8 for k in range(w))
+    if order == "be_bytes":
+        q0 = leaf["seq"]
+        if not leaf.get("bytes_exact", True):
+            return None
+        return tuple((leaf["run"] + (q0 + k) // 8) * 8 + (q0 + k) % 8 for k in range(w))
+    o, u, lo = leaf["offset"], leaf["unit"], leaf["lo"]
+    if order in _MSB_FIRST_ORDERS:
+        lo = u * 8 - lo - w   # (re-review W-N2) the first field takes the unit's most significant bits
+    return tuple(((o + (lo + k) // 8) if little else (o + u - 1 - (lo + k) // 8)) * 8 + (lo + k) % 8
+                 for k in range(w))
+
+
+def _container_mask(bits, container: tuple[int, int], order: str) -> int | None:
+    """(R90) The mask ``bits`` (storage bits) make in the value of the aggregate ``container`` (offset, size) read as one
+    integer under ``order`` — what a header's ``NAME_MASK`` states for a bit-field of that register."""
+    co, cs = container
+    mask = 0
+    for b in bits:
+        byte, i = divmod(b, 8)
+        j = ((byte - co) if order in _LITTLE_ENDIAN_ORDERS else (co + cs - 1 - byte)) * 8 + i
+        if not 0 <= j < cs * 8:
+            return None
+        mask |= 1 << j
+    return mask
+
+
+def _storage_layout(key, raw_structs, type_of, width_of, macro_names=()):
+    """(R90) The leaves of the union / struct ``key`` → ``(size, {path: leaf}, [bit-field leaves incl. unnamed])``.
+    A leaf: ``type`` (resolved), ``typename``, ``bitfield``, ``width`` (bits), ``offset`` (byte offset of the scalar or of
+    the bit-field's unit), ``unit`` (bytes), ``lo`` (first bit in the unit), ``run``/``seq`` (the bit-field run's first
+    byte and the field's bit position counted from it — the byte-by-byte allocation) and ``container`` (offset, size of
+    the aggregate that declares it). Unresolved — with the reason — when the layout is not one this model can state:
+    a body it cannot see whole, a const / array / pointer / enum / ``_Bool`` / floating member, a signed bit-field, a
+    member a padding rule could move (every scalar at a multiple of its size, every aggregate's size a multiple of its
+    alignment — no implementation-defined padding), a bit-field crossing its unit or sharing one with another type, a
+    multi-byte unit left partly unused. (re-review W-N1) ``volatile``: the leaf is a volatile lvalue — a volatile typedef
+    along the way, a volatile member or a member of a volatile scalar type; (I-1) ``narrow``: ``(member offset, size,
+    union offset, size)`` of the innermost union member narrower than its union the leaf lies in (a store through it
+    leaves the union's other bytes unspecified — C11 6.2.6.1p7), absent when none."""
+    leaves: list[dict[str, Any]] = []
+    fields: list[dict[str, Any]] = []   # every bit-field, unnamed too (the byte-by-byte allocation must hold them all)
+
+    def scalar(m, path):
+        try:
+            t = type_of(m["type"])
+        except Unresolved as exc:
+            raise Unresolved(f"member_type_unresolved:{path}:{exc}") from exc
+        if not isinstance(t, dict) or is_float(t) or t.get("enum") or t.get("kind") == "_Bool" \
+                or not t.get("bits") or t["bits"] % 8:
+            raise Unresolved("member_type_not_an_integer:" + path)
+        return t
+
+    def place(k, prefix, base, depth, vol=False):
+        entries = raw_structs.get(k) or []
+        if depth > 6 or len(entries) != 1 or entries[0].get("conditional"):
+            raise Unresolved("storage_definition_missing_or_ambiguous:" + (prefix or "object"))
+        e = entries[0]
+        if e.get("alias"):
+            if e.get("const"):
+                raise Unresolved("const_storage_type")
+            return place(e["alias"], prefix, base, depth + 1, vol or bool(e.get("volatile")))
+        if e.get("storage_hidden", True):   # a context of an older schema did not record it: not laid out
+            raise Unresolved("storage_body_hides_members:" + (prefix or "object"))
+        union = bool(e.get("union"))
+        off, size, align = 0, 0, 1
+        # [unit bytes, unit offset, bits used, run start (offsets relative to ``base``), a field crossed a byte]
+        run: list[int] | None = None
+        mine: list[dict[str, Any]] = []   # bit-fields this aggregate declares (their container is this aggregate)
+        spans: list[tuple[int, int, int]] = []   # (union) each member's first leaf, end leaf and size in bytes
+
+        def close():
+            nonlocal run
+            if run is not None and run[0] > 1 and run[2] != run[0] * 8:
+                raise Unresolved("bit_field_unit_not_full:" + (prefix or "object"))
+            run = None
+
+        for m in e.get("members") or []:
+            name = str(m.get("name") or "")
+            path = f"{prefix}.{name}" if prefix and name else (name or prefix)
+            words = str(m.get("type") or "").split()
+            if (name and name in macro_names) or any(w in macro_names for w in words):
+                raise Unresolved("storage_member_named_by_macro:" + path)
+            if m.get("const"):
+                raise Unresolved("const_member:" + path)
+            if m.get("shape") != "scalar" or m.get("dims"):
+                raise Unresolved(f"member_not_scalar:{path}:{m.get('shape')}")
+            if not name and not m.get("bitfield"):
+                raise Unresolved("unnamed_member:" + (prefix or "object"))
+            core = " ".join(w for w in words if w not in {"const", "volatile"})
+            mvol = vol or bool(m.get("volatile")) or "volatile" in words
+            first = len(leaves)
+            if m.get("bitfield"):
+                t = scalar(m, path or "<unnamed>")
+                if t.get("signed"):
+                    raise Unresolved("signed_bit_field:" + (path or "<unnamed>"))   # its conversions are the target's
+                u = t["bits"] // 8
+                try:
+                    w = width_of(str(m.get("bits") or ""))
+                except Unresolved as exc:
+                    raise Unresolved(f"bit_field_width_unresolved:{path}:{exc}") from exc
+                if not 0 <= w <= t["bits"] or (w == 0 and name):
+                    raise Unresolved("bit_field_width_invalid:" + (path or "<unnamed>"))
+                if union:
+                    if w == 0:
+                        continue
+                    lo, unit_off, start = 0, 0, 0
+                    size, align = max(size, u), max(align, u)
+                    exact = w <= 8   # a union member is a run of its own
+                else:
+                    if w == 0:
+                        close()   # ``:0`` — the next bit-field starts a new unit
+                        continue
+                    if run is not None and run[0] != u:
+                        if run[2] != run[0] * 8:
+                            raise Unresolved("bit_field_unit_types_mixed:" + path)
+                        close()
+                    if run is not None and run[2] + w > u * 8:
+                        if run[2] != u * 8:
+                            raise Unresolved("bit_field_straddles_unit:" + (path or "<unnamed>"))
+                        run[1], run[2] = off, 0   # the unit is full: the next one of the same run
+                        off += u
+                    if run is None:
+                        if off % u:
+                            raise Unresolved("layout_padding_implementation_defined:" + (path or "<unnamed>"))
+                        run = [u, off, 0, off, 0]
+                        off += u
+                    lo, unit_off, start = run[2], run[1], run[3]
+                    run[2] += w
+                    align = max(align, u)
+                    # (be_bytes) placed as laid out only while no field of the run has crossed a byte
+                    seq = (unit_off - start) * 8 + lo
+                    run[4] = run[4] or int(seq % 8 + w > 8)
+                    exact = not run[4]
+                field = {"path": path if name else "", "type": t, "typename": core, "bitfield": True, "width": w,
+                         "offset": base + unit_off, "unit": u, "lo": lo, "run": base + start,
+                         "seq": (unit_off - start) * 8 + lo, "bytes_exact": exact,
+                         "volatile": mvol or "volatile" in (t.get("qualifiers") or [])}
+                fields.append(field)
+                mine.append(field)
+                if name:
+                    leaves.append(field)
+                if union:
+                    spans.append((first, len(leaves), u))
+                continue
+            if not union:
+                close()
+            at = 0 if union else off
+            if core in raw_structs:
+                msize, malign = place(core, path, base + at, depth + 1, mvol)
+            else:
+                t = scalar(m, path)
+                msize = malign = t["bits"] // 8
+                leaves.append({"path": path, "type": t, "typename": core, "bitfield": False, "width": t["bits"],
+                               "offset": base + at, "unit": msize, "lo": 0,
+                               "volatile": mvol or "volatile" in (t.get("qualifiers") or [])})
+            if union:
+                spans.append((first, len(leaves), msize))
+            if at % malign:
+                raise Unresolved("layout_padding_implementation_defined:" + path)
+            align = max(align, malign)
+            if union:
+                size = max(size, msize)
+            else:
+                off += msize
+        if not union:
+            close()
+            size = off
+        if not size or size % align:
+            raise Unresolved("layout_padding_implementation_defined:" + (prefix or "object"))
+        for f in mine:
+            f["container"] = (base, size)
+        for first, end, msize in spans:
+            if msize < size:   # (I-1) the innermost such member: an inner union marked its leaves first
+                for leaf in leaves[first:end]:
+                    leaf.setdefault("narrow", (base, msize, base, size))
+        return size, align
+
+    size, _align = place(key, "", 0, 0)
+    return size, {leaf["path"]: leaf for leaf in leaves}, fields
+
+
+class _LazyStorage(dict):
+    """(R90) A unit's storage objects (`_storage_object`), laid out when first asked for (``name in storage``)."""
+
+    def __init__(self, resolve):
+        super().__init__()
+        self._resolve = resolve
+        self._failed: set[str] = set()
+
+    def __contains__(self, name):
+        if dict.__contains__(self, name):
+            return True
+        if not isinstance(name, str) or name in self._failed:
+            return False
+        try:
+            dict.__setitem__(self, name, self._resolve(name))
+        except (Unresolved, RecursionError):
+            self._failed.add(name)
+            return False
+        return True
+
+    def __getitem__(self, name):
+        if name not in self:
+            raise KeyError(name)
+        return dict.__getitem__(self, name)
+
+    def get(self, name, default=None):
+        return self[name] if name in self else default
+
+
+def _storage_object(scope, name, raw_structs, type_of, width_of, macro_names, body_index, byte_order=None,
+                    byte_order_basis="", bit_order=None, bit_order_basis="", refusal=""):
+    """(R90) The storage layout of the union / bit-field global ``name`` (`scope["storage_candidates"]`) — what the source
+    oracle reads and writes its members through. Records the reason it cannot in ``scope["storage_unresolved"]``.
+
+    ``{"size", "orders", "leaves": {path: {"type", "typename", "bitfield", "width", "bits": {order: (storage bits)}}},
+    "whole", "volatile", "static", "typename", "file", "line", "masks_checked", "signature"}`` — ``orders``: the layouts
+    the target may use (`STORAGE_ORDERS`) that no header mask contradicts, one per distinct placement; ``whole``: the one
+    member that is the whole object (a scalar at offset 0 of its size — ``Byte`` / ``Word``), None when there is none or
+    several. ``body_index()``: macro body (blanks removed) → the macros with it. ``byte_order`` (review W2): the unit's
+    (`storage_byte_order`) — only the layouts of that byte order are kept (``be``: ``be``, ``be_bytes`` and ``be_msb``);
+    None keeps both. ``bit_order`` (re-review W-N2, `storage_bit_order`): ``"lsb"`` drops the layouts that allocate
+    bit-fields from the most significant bit; None keeps them. ``refusal``: why no object of the unit is laid out (a
+    pragma that changes the layout — `_storage_order_pragmas`)."""
+    cand = (scope.get("storage_candidates") or {}).get(name)
+    if cand is None:
+        raise Unresolved("not_a_storage_object")   # not recorded: the name is no union / bit-field object here
+    try:
+        if cand.get("reason"):
+            raise Unresolved(cand["reason"])
+        if refusal:
+            raise Unresolved(refusal)
+        size, leaves, fields = _storage_layout(cand["key"], raw_structs, type_of, width_of, macro_names)
+        if not leaves:
+            raise Unresolved("no_member")
+        orders = [o for o in STORAGE_ORDERS if byte_order is None or (o in _LITTLE_ENDIAN_ORDERS) == (byte_order == "le")]
+        if bit_order == "lsb":
+            orders = [o for o in orders if o not in _MSB_FIRST_ORDERS]
+        bits = {path: {o: _storage_bits(leaf, o) for o in STORAGE_ORDERS} for path, leaf in leaves.items()}
+        checked, contradicted = 0, ""
+        index = body_index()
+        constants = scope.get("constants")   # lazy: an empty dict until asked — never ``or {}`` it away
+        for path, leaf in leaves.items():
+            if not leaf["bitfield"]:
+                continue
+            for macro in index.get(f"{name}.{path}", ()):
+                stated = {}
+                for suffix in ("_MASK", "_BITNUM"):
+                    c = constants.get(macro + suffix) if constants is not None else None
+                    if isinstance(c, dict) and type(c.get("value")) is int and not is_float(c.get("type")):
+                        stated[suffix] = c["value"]
+                if not stated:
+                    continue
+                checked += 1
+                for o in list(orders):
+                    if bits[path][o] is None:
+                        continue   # (be_bytes) a field this model cannot place there: its mask says nothing of it
+                    mask = _container_mask(bits[path][o], leaf["container"], o)
+                    low = (mask & -mask).bit_length() - 1 if mask else None
+                    if ("_MASK" in stated and stated["_MASK"] != mask) or ("_BITNUM" in stated and stated["_BITNUM"] != low):
+                        orders.remove(o)
+                        contradicted = contradicted or macro + ("_MASK" if "_MASK" in stated else "_BITNUM")
+        if not orders or all(o in _MSB_FIRST_ORDERS for o in orders):
+            # (re-review W-N2) a layout from the most significant bit is kept to withhold values, never as the one
+            #   placement: masks that rule out every least-significant-first one contradict the model
+            raise Unresolved("layout_contradicts_header_mask:" + contradicted)
+        if "be_bytes" in orders and any(_storage_bits(f, "be_bytes") is None for f in fields):
+            # a byte-by-byte allocation no mask ruled out, of a field (or one after it) that crosses a byte: where that
+            #   allocation puts it is the compiler's — the object is not modeled
+            raise Unresolved("bit_field_byte_allocation_unmodeled")
+        distinct: dict[tuple, str] = {}
+        for o in orders:   # one placement per distinct layout (an 8-bit register: one per allocation end)
+            distinct.setdefault(tuple(bits[p][o] for p in sorted(bits)), o)
+        kept = list(distinct.values())
+        whole = [p for p, leaf in leaves.items() if not leaf["bitfield"] and leaf["offset"] == 0 and leaf["unit"] == size]
+        # (re-review W-N1) a volatile object, a volatile typedef or a volatile member: the object is a register
+        whole_volatile = bool(cand.get("object_volatile", cand["volatile"]))
+        out = {"size": size, "orders": kept, "typename": cand["typename"], "file": cand["file"], "line": cand["line"],
+               "volatile": bool(cand["volatile"]) or any(leaf.get("volatile") for leaf in leaves.values()),
+               "static": cand["static"], "masks_checked": checked,
+               "byte_order": byte_order or "any", "byte_order_basis": byte_order_basis,
+               "bit_order": bit_order or "any", "bit_order_basis": bit_order_basis,
+               "whole": whole[0] if len(whole) == 1 else None,
+               "leaves": {p: {"type": leaf["type"], "typename": leaf["typename"], "bitfield": leaf["bitfield"],
+                              "width": leaf["width"], "bits": {o: bits[p][o] for o in kept},
+                              "volatile": whole_volatile or bool(leaf.get("volatile")),
+                              **({"narrow": leaf["narrow"]} if leaf.get("narrow") else {})}
+                          for p, leaf in leaves.items()}}
+        out["signature"] = (size, tuple(kept), tuple(sorted(
+            (p, leaf["width"], leaf["bitfield"], leaf["type"].get("bits"), bool(leaf["type"].get("signed")),
+             tuple(bits[p][o] for o in kept)) for p, leaf in leaves.items())))
+        return out
+    except Unresolved as exc:
+        scope.setdefault("storage_unresolved", {})[name] = str(exc)
+        raise
 
 
 def _pointer_params(fn, raw):

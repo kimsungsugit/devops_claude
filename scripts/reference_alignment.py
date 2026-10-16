@@ -285,7 +285,9 @@ def align(reference: str, roots: list[Path], clang: bool = False, clang_exe: str
                              "possible_ub": result.get("possible_undefined_behavior") or []}
                     disagreements.append(entry)
                     found.append({"unit": unit, "inputs": inputs, "outputs": {slot: got["value"]},
-                                  "possible_ub": entry["possible_ub"], "_entry": entry})
+                                  "possible_ub": entry["possible_ub"], "_entry": entry,
+                                  # (R90 review W-R3-4) a run on the union / bit-field storage model: not clang-checked
+                                  "storage_objects": result.get("storage_objects") or []})
                 slots[kind] += 1
         distinct = Counter((c["input"], c["reference"], c["held"], c.get("written")) for cs in conversions for c in cs)
         return {"path": path, "slots": slots, "reasons": reasons, "bases": bases, "via_symbol": via_symbol,

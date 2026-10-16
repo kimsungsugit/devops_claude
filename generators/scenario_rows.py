@@ -107,6 +107,12 @@ EXPOSE_KINDS = ("boundary", "write", "arith")
 _FAR = 10 ** 9
 
 
+def _stopped_by_budget(reason: Any) -> bool:
+    """A run a step budget stopped — by the reason's head: (R90 re-review 3 W-R3-3) a budget reason may name what spent
+    it (``execution_budget:polling_way_out_search``)."""
+    return str(reason or "").split(":", 1)[0] in ("search_step_budget", "execution_budget")
+
+
 def _free_value(i: int) -> int:
     """The operating value of the i-th input the code compares with nothing (no design range): 101 + 11·i mod 80 — no two
     of the first 80 share one (11 and 80 are coprime: a difference of two is never 0), each is past the divisors such
@@ -770,7 +776,7 @@ def find_scenarios(unit: dict[str, Any], domains: dict[str, Any], outputs: list[
                     # (review R84 I3 · I-R2-3) a run a step budget stopped — never started, or cut by its share of what
                     #   was left — is counted apart from one the model refuses; one the suite check stopped is not kept
                     #   (the search phase has its own budget and runs it again)
-                    stopped = pr.get("reason") in ("search_step_budget", "execution_budget")
+                    stopped = _stopped_by_budget(pr.get("reason"))
                     report["propagate_perturbed_budget" if stopped else "propagate_perturbed_refused"] += 1
                     if not (stopped and run_budget[0] is None):
                         pcache[(vkey(v), ti)] = None

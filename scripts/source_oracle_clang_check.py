@@ -45,8 +45,12 @@ Independence and its limits:
   value; a mismatch there stays a mismatch) and listed in ``outputs_not_named_by_body`` for review;
 * stand-ins (R63, R64): a register object the scope does not model is a struct of the member paths the code names, and
   a struct object's member the oracle does not model (a pointer member read as ``q.tl_pdu[h][3]``) is an object that
-  gives the fill value however it is indexed (`_member_stand_ins`) — the oracle reads both as unknown, so no claim
-  may rest on them, and the fill varies by run so a claim that does is caught;
+  gives the fill value however it is indexed (`_member_stand_ins`) — the oracle reads the second as unknown, so no claim
+  may rest on it, and the fill varies by run so a claim that does is caught. (R90) The first is no longer read as
+  unknown: the oracle lays union / bit-field objects out as one storage (a write through ``Byte`` is what ``Bits.X``
+  reads). The stand-in has no such overlap (separate 64-bit leaves), so a claim whose run used that storage model (the
+  ``Test Evidence`` row's assumptions name it, or the claim's ``storage_objects``) is ``unchecked:storage_model`` —
+  never compiled against the stand-in, never agreed or contradicted;
 * the fill values are a sample (0/90/201), not a proof of independence from unset state;
 * C++ sequences some things C leaves unsequenced (``=`` operands since C++17, list-initialization items): the
   oracle refuses those in C, so no claim rests on the difference — but clang cannot catch that refusal missing;
@@ -72,6 +76,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 _FILLS = (0, 90, 201)
+# (R90 review W-R3-4) what a `Test Evidence` row's assumptions say when its run used the union / bit-field storage model
+#   (`c_source_oracle.STORAGE_ASSUMPTION`'s opening words — kept literal: the script reads documents of any build)
+_STORAGE_MARK = "(R90) a union / bit-field object is one storage"
 # How the fills of one claim combine. Checking a claim, a contradiction wins over a harness limit. Probing for undefined
 #   behaviour (R10), an evaluation error anywhere is the answer, and a fill clang could not evaluate at all outranks a
 #   placeholder mismatch — "not reproduced" needs every fill evaluated to a value (review R10 round 2 W3).
@@ -222,10 +229,12 @@ def _member_stand_ins(root, unmodeled, text):
 def _register_struct_text(paths):
     """(R63) A stand-in for an object the scope declares but does not model — a volatile register union of the target's
     header (``REG_PTP.Bits.PTP3`` through ``#define PTP_PTP3 REG_PTP.Bits.PTP3``, readable since R63): a plain struct of
-    just the member paths the code names, wide unsigned leaves. The oracle reads such an object as unknown, so no claim
-    rests on its value; the stand-in lets the rest of the function compile and be checked. What it does not reproduce —
-    union aliasing (``Byte`` / ``Bits``), the placement address — no claim depends on. None when a path is used both as a
-    member and as a whole."""
+    just the member paths the code names, wide unsigned leaves; it lets the rest of the function compile and be
+    checked. It does not reproduce union aliasing (``Byte`` / ``Bits``) or the placement address. (R90) The oracle now
+    lays such objects out (`c_project_context._storage_object`) and derives values through the aliasing: a claim whose
+    run used that model is not checked against this stand-in at all (`check_claims` — ``unchecked:storage_model``);
+    a claim that did not use it rests on no register value. None when a path is used both as a member and as a
+    whole."""
     tree: dict = {}
     for path in paths:
         node = tree
@@ -815,7 +824,13 @@ def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430
     from generators import c_project_context as cpc
     from generators.c_source_oracle import _find_function
     groups: dict[tuple, list] = {}
+    storage_claims = []
     for claim in claims:
+        if claim.get("storage_model") or claim.get("storage_objects"):
+            # (R90 review W-R3-4) the run used the union / bit-field storage model: the harness's register stand-in
+            #   (`_register_struct_text`) has no member overlap — no verdict either way
+            storage_claims.append(claim)
+            continue
         unit = claim["unit"]
         groups.setdefault((unit.get("source_path") or "", unit.get("name") or "", id(unit["project_scope"]),
                            id(claim.get("instrument"))), []).append(claim)
@@ -823,6 +838,11 @@ def check_claims(claims: list[dict], clang: str = "clang", target: str = "msp430
               "claims": sum(len(c["outputs"]) for c in claims),
               "checked": 0, "agree": 0, "agree_with_stubbed_callees": 0, "mismatch": 0, "eval_error": 0, "unchecked": 0,
               "unchecked_reasons": Counter(), "mismatches": [], "eval_errors": []}
+    for claim in storage_claims:
+        for name in claim["outputs"]:
+            claim.setdefault("verdicts", {})[name] = "unchecked:storage_model"
+            report["unchecked"] += 1
+            report["unchecked_reasons"]["storage_model"] += 1
     work = work_dir or tempfile.mkdtemp(prefix="oracle_clang_")
     os.makedirs(work, exist_ok=True)
     parser = cpc.shared_parser()
@@ -947,6 +967,8 @@ def _claims_from_xlsm(xlsm: str, source_root: str) -> tuple[list[dict], dict]:
                                      "source_hash": str(d.get("Source SHA256") or ""),
                                      "possible_ub": reason.split("possible_ub=", 1)[1].split("+") if "possible_ub=" in reason else []})
         g["outputs"][d["Observable"]] = int(d["Expected"])
+        if _STORAGE_MARK in str(d.get("Assumptions") or ""):
+            g["storage_model"] = True   # (R90 review W-R3-4) the run used the union / bit-field storage model
     # Several roots (``APP,BOOT``) are joined with ``,``/``;`` as in the SCM registry — one context, as generated.
     roots = [r.strip() for r in re.split(r"[,;]", source_root) if r.strip()]
     texts, unread = {}, []

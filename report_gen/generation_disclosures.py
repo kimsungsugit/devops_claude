@@ -1208,6 +1208,26 @@ _SITS_SKIP = {"compared_value_unresolved": "비교 상수 미해석", "switch_ca
               "return_type_bounds_unknown": "반환 타입 범위 미상"}
 
 
+def _register_storage_note(counts: Dict[str, Any], clang_script: str) -> str:
+    """(R90 재리뷰 W-N3) 레지스터(공용체 · 비트필드 객체) 저장소 모델에 기댄 도출 칸 — 행 단위로 센 상한. 폴링 루프 종료
+    가정 · 레지스터를 하네스 메모리로 읽은 칸 · clang 대조가 그 칸을 확인하지 못한다는 것을 한 문단으로."""
+    storage = _int(counts, "derived_on_storage_model")
+    memory = _int(counts, "derived_on_register_memory")
+    polling = _int(counts, "derived_on_assumed_polling_exit")
+    out = ""
+    if storage:
+        out += (f" {storage}칸은 공용체 · 비트필드 객체를 한 저장소로 배치한 모델(바이트 순서 · 비트필드 할당 방향은 "
+                "'Test Evidence' 시트의 가정 열)에 기댄 행의 값이다 — " + clang_script + " 의 clang 대조는 공용체 멤버의 "
+                "겹침(한 멤버로 쓴 비트를 다른 멤버로 읽기)을 재현하지 않아 이 칸들의 근거가 되지 못한다.")
+    if memory:
+        out += (f" {memory}칸은 volatile 레지스터를 하네스 메모리로 읽은 행의 값이다 — 실행 중 하드웨어가 그 레지스터를 "
+                "바꾸지 않는다고 본다.")
+    if polling:
+        out += (f" {polling}칸은 레지스터 플래그를 기다리는 폴링 루프가 끝난다고 가정한 행의 값이다 — 하네스가 그 플래그를 "
+                "stub 하거나 모사해야 성립한다(플래그의 어떤 값이 루프를 끝내고 폴링이 다른 상태를 바꾸지 않는 루프만).")
+    return out + (" (위 칸 수는 행 단위로 센 상한.)" if out else "")
+
+
 # ── SUTS ───────────────────────────────────────────────────────────────────
 def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
@@ -1243,7 +1263,8 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             # (R81) 행이 값을 주지 않고 관측만 해서 할당된 포인터 매개변수 대상에 기댄 행의 칸
             + (f" {_int(ev, 'derived_on_observed_only_pointee')}칸은 행이 포인터 매개변수의 대상에 값을 주지 않고 관측만 하는 "
                "행의 값이다 — 시험 하네스가 그 대상을 할당해야 성립한다(행 단위로 센 상한, '포인터 매개변수 표기')."
-               if _int(ev, "derived_on_observed_only_pointee") else "")))
+               if _int(ev, "derived_on_observed_only_pointee") else "")
+            + _register_storage_note(ev, "scripts/source_oracle_clang_check.py")))
 
     # (R10) 소스 소견 — 기대값을 내다가 증명한 미정의 동작. 결함 **후보**다(입력이 호출 측에서 가능한지는 사람 판단).
     sf = qr.get("source_findings")
@@ -2100,6 +2121,7 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "독립 경로(clang 등)로 대조하지 않았다 — scripts/integration_oracle_clang_check.py 가 생성본을 따로 잰다. "
                 f"도출 칸 중 흐름이 쓴 값 {_show(_int(io, 'derived_assigned'))} · 입력을 그대로 둔 값 "
                 f"{_show(_int(io, 'derived_unchanged_input'))}."
+                + _register_storage_note(io, "scripts/integration_oracle_clang_check.py")
                 + (" 도출 못 한 칸의 사유(상위): " + ", ".join(f"{k} {v}" for k, v in list(reasons.items())[:6])
                    + (f" 외 {int(io['unknown_reason_kinds']) - 6}종" if int(io.get("unknown_reason_kinds") or 0) > 6 else "")
                    + "." if reasons else "")

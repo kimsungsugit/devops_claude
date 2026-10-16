@@ -95,6 +95,14 @@ def _units(findings: list[dict], roots: list[Path]) -> dict[tuple, dict]:
     return units
 
 
+def _storage_objects(unit: dict, example: dict) -> list[str]:
+    """(R90 re-review 4 W-R4-4) The union / bit-field objects the oracle's run of the example used (its record says so
+    whether it derived or refused) — a claim on them is not one the clang harness can reproduce."""
+    from generators.c_source_oracle import evaluate_outputs
+    (record,) = evaluate_outputs(unit, [example.get("inputs") or {}], [[example.get("observable")]])   # never raises
+    return list(record.get("storage_objects") or [])
+
+
 def reproduce(findings: list[dict], roots: list[Path], clang_exe: str = "clang") -> Counter:
     from source_oracle_clang_check import check_claims
     units = _units(findings, roots)
@@ -105,7 +113,9 @@ def reproduce(findings: list[dict], roots: list[Path], clang_exe: str = "clang")
             f["reproduction"] = "unchecked:source_not_found"
         else:
             # the asserted value is a placeholder: UB-probe mode lets an evaluation error in any fill answer
-            claim = {"unit": unit, "inputs": f["example"]["inputs"], "outputs": {f["example"]["observable"]: 0}}
+            claim = {"unit": unit, "inputs": f["example"]["inputs"], "outputs": {f["example"]["observable"]: 0},
+                     # (R90 re-review 4 W-R4-4) a run on the union / bit-field storage model: `unchecked:storage_model`
+                     "storage_objects": _storage_objects(unit, f["example"])}
             try:
                 report = check_claims([claim], clang=clang_exe, ub_probe=True)
             except Exception as exc:  # noqa: BLE001 — one harness failure is that finding's verdict, not the run's

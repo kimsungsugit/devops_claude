@@ -21,7 +21,10 @@ enumerators, const objects, scalar globals and one-dimensional arrays. Nothing i
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import itertools
+import math
 import os
 import re
 import threading
@@ -76,6 +79,72 @@ _UB_REASONS = frozenset({"signed_overflow", "division_by_zero", "shift_count_out
 _EXECUTION_BUDGET = 200_000
 _PATH_BUDGET = 64
 _LOOP_BUDGET = 4096
+# (R90 re-review C-N1 a) register values a polling loop's way out is searched over, per staying path (the product over the
+#   polled members — `_Interp.polling_way_out`); over it the loop is not assumed to end
+_POLL_SEARCH_BUDGET = 4096
+_BUDGET_REASONS = frozenset({"loop_iteration_budget", "execution_budget", "path_budget"})
+# (R90 re-review 3 W-R3-2) searches of a polling loop's way out as members read only under other flag values join
+_POLL_MEMBER_ROUNDS = 4
+_PROBE_FAILED = object()
+# (re-review 3 W-R3-1) what a hypothetical probe (`_Interp.hypothetical`) may record — put back after it
+_HYPOTHETICAL_TABLES = ("stubs_used", "linked_reads", "stub_keys", "assumed_undefined", "storage_used",
+                        "storage_volatile_reads", "volatile_polls", "volatile_poll_members", "polling_assumed",
+                        "storage_narrow", "storage_unspecified", "static_keys", "pointees", "observed_only_pointees",
+                        "harness_buffers", "buffer_reach", "buffer_reach_unknown", "pointer_member_keys")
+_HYPOTHETICAL_WORLD_TABLES = ("inlined", "not_inlined", "effects_only", "static_keys", "array_names", "global_names",
+                              "admitted")
+# world tables that only gain keys (``setdefault`` / a value an existing key already holds): put back by dropping the keys
+#   added after the probe began — a dict keeps insertion order — instead of copying them for every probe
+_HYPOTHETICAL_WORLD_GROWING = ("failed", "linkage", "objects", "types", "storage_scopes", "storage_signatures")
+# (re-review 4 X5) what a hypothetical probe leaves as it found it, or must not put back — and why. Every attribute an
+#   activation or the world sets is in a list above or here (`tests/unit/test_register_model_r90.py` holds them to it)
+_HYPOTHETICAL_EXEMPT = {
+    # the activation's fixed context (``raw`` is swapped and put back around a statement macro)
+    **dict.fromkeys(("fn", "raw", "scope", "inputs", "parser", "fn_raw", "function_name", "world", "param_prefix",
+                     "limit"), "the activation's fixed context"),
+    # the unit's scope, read only
+    **dict.fromkeys(("widths", "int_t", "constants", "globals", "arrays", "array_shapes", "struct_globals", "storage",
+                     "macro_status", "macro_bodies", "macro_params", "fmacro_bodies", "closure", "address_taken"),
+                    "the unit's scope, read only"),
+    # caches of the text — what a probe adds a real run would add alike
+    **dict.fromkeys(("shared", "macro_memo", "expansions", "walks", "fn_names", "body_address_names",
+                     "storage_inputs"), "a cache of the text or of the row's inputs: the same whoever fills it"),
+    # (re-review 5 I-R5-3) a call site a probe found order-dependent stays marked: the real run then reads that site as
+    #   its effects only — less precise, never a value the program does not give
+    "no_inline": "call sites marked order-dependent (a probe's mark only costs precision at that site)",
+    "lexical": "pushed and popped in pairs by the statements a probe runs",
+    "no_inline_depth": "raised and lowered in pairs around a call",
+    "steps": "the run's budget: the steps a probe spends stay spent",
+    "params": "bound when the activation starts — a probe binds none",
+    "kept_raws": "expansion buffers stay alive: their ids are in keys",
+    "watch": "put back by the probe itself (no decision is observed on it)",
+    **dict.fromkeys(("guards", "statement_marks", "operand_marks", "write_marks", "perturb", "observed"),
+                    "what the caller asked to observe, set before the run"),
+    # the world
+    **dict.fromkeys(("provider", "linkage_cache", "ambiguous", "ambiguous_roots"), "the run's fixed context"),
+    "stack": "pushed and popped in pairs by an inline",
+    "activations": "names the parameter keys of an activation: must stay unique",
+    "kept": "expansion buffers of finished activations stay alive: their ids are in keys",
+    **dict.fromkeys(("pointer_havocs", "all_havocs"), "statistics nothing reads"),
+}
+
+
+def _table_copy(t):
+    """One level deeper than ``copy``: the sets / lists / dicts a table holds are copied too."""
+    if isinstance(t, dict):
+        return {k: (v.copy() if isinstance(v, (set, list, dict)) else v) for k, v in t.items()}
+    return t.copy()
+
+
+def _table_restore(live, old):
+    """Put ``old`` back into ``live`` in place — whoever holds the table sees it as it was."""
+    if isinstance(live, list):
+        live[:] = old
+    else:
+        live.clear()
+        live.update(old)
+
+
 ASSUMPTIONS = (
     "undefined behaviour is refused when proven on the run's only path; where it depends on an unknown value (divisor, "
     "shift count, index, overflow of an unknown operand, or a branch on an unknown value that chose the path it was "
@@ -85,8 +154,9 @@ ASSUMPTIONS = (
     "the sequence stubs writes no global or static (what it may put through a pointer argument is unknown)",
     "reachability and termination of callees are not proven",
     "fixed-address register objects are distinct objects (writes to one do not change another)",
-    "an integer converted to a pointer addresses hardware, not a C object: a write through a pointer reaches only "
-    "address-taken objects, arrays and locals whose address escaped",
+    "an integer converted to a pointer addresses hardware — no C object but (R90) the registers, the @-placed union / "
+    "bit-field objects the model holds values of: a write through a pointer reaches address-taken objects, arrays, locals "
+    "whose address escaped and every register",
     "(R64) a write a callee or a stub makes through a pointer reaches what the project-wide points-to analysis says "
     "that pointer may hold (every definition and initializer the context read, an object of integer type holding no "
     "pointer — an object that may hold pointers written as bytes holds unknown ones, an integer object a pointer "
@@ -138,6 +208,12 @@ def _havocked(value, reason):
 
 
 _POINTER_REASONS = ("pointer_parameter:", "pointer_local:", "pointer_value:", "array_value:")
+_STORAGE_ADDRESS = "address_value:"   # (R90 review C2) + root: the address of a union / bit-field object
+# (R90 review C2) `havoc_bases` mark: a write through a pointer may have landed on any volatile union / bit-field object
+#   (a register: ``@``-placed next to the others, so an offset from one reaches the next)
+_VOLATILE_STORAGE = "@storage:volatile"
+# (R90 re-review 4 C-R4-1) why the registers are unknown after a callee the run did not interpret (+ the next ones — I-R5-4)
+_CALLEE_REGISTERS = "register_read_by_callee_not_interpreted:"
 
 
 def _untyped_overflow_tag(operands, int_bits):
@@ -146,6 +222,12 @@ def _untyped_overflow_tag(operands, int_bits):
     16 bits, so against operands no wider than ``int`` the result is unsigned and cannot overflow (``None``); anything
     else (a call's return, an unresolved macro, ``*p``) may be a signed int."""
     untyped = [x.v.reason if isinstance(x.v, Unknown) else "" for x in operands if x.t is None]
+    if any(r.startswith(_STORAGE_ADDRESS) for r in untyped):
+        # (R90 review C2) ``(T *)&REG_FCCOB2 + j``: a register's address offset by what is not 0 leaves the object (the
+        #   next register on the target — C11 6.5.6p8 makes the access undefined)
+        others = [x for x in operands if not (x.t is None and isinstance(x.v, Unknown)
+                                              and x.v.reason.startswith(_STORAGE_ADDRESS))]
+        return None if others and all(_known_int(x) == 0 for x in others) else "pointer_past_object"
     if any(r.startswith(_POINTER_REASONS) for r in untyped):
         return "pointer_arithmetic_untyped"
     if untyped and all(r in ("sizeof_unmodeled", _SIZE_REASON) for r in untyped) and all(
@@ -221,6 +303,64 @@ class _Pointer:
 
     def __repr__(self):
         return f"_Pointer({self.target!r})"
+
+
+class _Bits:
+    """(R90) What a run left in one byte of a union / bit-field object (store key ``REG.@order:byte``): ``written`` — the
+    bits it wrote, ``known`` (within them) — those of known value, ``value`` — their values, ``reason`` — why the other
+    written ones are unknown. A bit it did not write holds what the object held before the run (`_Interp.storage_value`).
+    Immutable; equal records compare equal (a join keeps a byte every path left alike)."""
+    __slots__ = ("written", "known", "value", "reason")
+
+    def __init__(self, written: int, known: int, value: int, reason: str):
+        self.written, self.known, self.value, self.reason = written, known, value & known, reason
+
+    def __eq__(self, other):
+        return isinstance(other, _Bits) and (self.written, self.known, self.value, self.reason) == (
+            other.written, other.known, other.value, other.reason)
+
+    def __hash__(self):
+        return hash(("_Bits", self.written, self.known, self.value, self.reason))
+
+    def __repr__(self):
+        return f"_Bits(w={self.written:#04x}, k={self.known:#04x}, v={self.value:#04x}, {self.reason!r})"
+
+
+def _byte_state(v):
+    """(R90) ``(written, known, value, reason)`` of a stored byte — none written when absent; a byte a havoc made
+    ``Unknown`` is written and unknown whole."""
+    if isinstance(v, _Bits):
+        return v.written, v.known, v.value, v.reason
+    if v is None or v is _MISSING:
+        return 0, 0, 0, ""
+    return 0xFF, 0, 0, v.reason if isinstance(v, Unknown) else "storage_byte_unmodeled"
+
+
+def _join_bytes(values, why):
+    """(R90) A storage byte after paths that left it differently: a bit every path wrote with one known value keeps it,
+    a bit no path wrote still holds the object's earlier value, any other written bit is unknown (``why``)."""
+    states = [_byte_state(v) for v in values]
+    written = 0
+    for w, _k, _v, _r in states:
+        written |= w
+    known, value = written, 0
+    for w, k, v, _r in states:
+        known &= w & k
+    for bit in (1 << i for i in range(8)):
+        if known & bit:
+            seen = {s[2] & bit for s in states}
+            if len(seen) != 1:
+                known &= ~bit
+            else:
+                value |= seen.pop()
+    return _Bits(written, known, value, why if written & ~known else "")
+
+
+def _state_key(s):
+    """(R90 review W1) What a loop's next iteration reads of a path: its objects (stored values compare by value —
+    an unknown by identity, so a path that re-stores one is never taken for unchanged), its havoc marks and escapes."""
+    return (s.mode, tuple(sorted(s.store.items())), s.havoc_all, s.havoc_pointer, tuple(sorted(s.havoc_bases.items())),
+            frozenset(s.escaped))
 
 
 def _ir_outcome(ir, truths):
@@ -505,6 +645,24 @@ class _Interp:
         self.array_shapes = scope.get("array_shapes") or {}
         # (R39) struct objects whose scalar members are objects of their own (``g.a`` in globals, ``g.b`` in arrays)
         self.struct_globals = scope.get("struct_globals") or {}
+        # (R90) union / bit-field objects whose members share one storage (`cpc._storage_object` — laid out when first
+        #   asked): their bytes are store keys ``REG.@order:byte`` (`_Bits`), a member's value is read from them
+        #   (`read_storage`)
+        self.storage = scope.get("storage_globals")
+        self.storage_inputs: dict[str, dict] = {}   # root → the row's input bits per layout order (`storage_input_bits`)
+        self.storage_used: set[str] = set()   # objects this run read, wrote or observed through the model
+        self.storage_volatile_reads: set[str] = set()   # volatile ones among them the run read or observed (registers)
+        # (R90 review W1) every volatile storage read, in order (a loop's condition reads are a slice of it), and the
+        #   polling loops on such a flag this run assumed to end
+        self.volatile_polls: list[str] = []
+        # (R90 re-review C-N1 a) the member each of those reads went through (``(root, member path)`` — aligned with
+        #   `volatile_polls`): the values a polling loop's way out is searched over (`polling_way_out`)
+        self.volatile_poll_members: list[tuple[str, str]] = []
+        self.polling_assumed: list[str] = []
+        # (R90 re-review I-1) union members narrower than their union the run stored through (root → their spans —
+        #   `cpc._storage_layout` ``narrow``), and the objects it then read across bytes such a store left unspecified
+        self.storage_narrow: dict[str, set] = {}
+        self.storage_unspecified: set[str] = set()
         self.macro_status = scope.get("macro_status") or {}
         self.macro_bodies = scope.get("macro_bodies") or {}
         self.macro_params = scope.get("function_like_macro_params") or {}
@@ -734,6 +892,8 @@ class _Interp:
         return self.initial(state, key, base, t)
 
     def havoc_base(self, state, base, reason):
+        if "." in base and not base.startswith("@") and self.storage_root(_root_object(base), world=True) is not None:
+            base = _root_object(base)   # (R90) a write to part of a union / bit-field object changes every member of it
         for key in list(state.store):
             if key == base or key.startswith(base + "[") or key.startswith(base + "."):
                 state.store[key] = Unknown(reason)
@@ -788,7 +948,9 @@ class _Interp:
     def havoc_pointer_targets(self, state, reason):
         """A write through a pointer: it reaches only an object whose address was taken somewhere in the project,
         an array (arrays decay to pointers without ``&``) or a local whose address left this function — given that
-        an integer converted to a pointer addresses hardware, not a C object (see ``ASSUMPTIONS``)."""
+        an integer converted to a pointer addresses hardware, not a C object (see ``ASSUMPTIONS``) — and (R90 re-review
+        5 C-R5-1) every register: the hardware it addresses is where the @-placed registers are (``*(volatile U8 *)
+        0x390U``, a global pointer that may hold one)."""
         world = self.world
         arrays, globals_ = self.arrays, self.globals
         other_arrays = world.array_names if world is not None else ()
@@ -799,12 +961,17 @@ class _Interp:
             # (R39) a struct member is reachable when its struct's address was taken (``&g`` → ``g.a``)
             if base in state.escaped or base in arrays or base in other_arrays or (
                     (base in globals_ or base in other_globals)
-                    and (base in self.address_taken or _root_object(base) in self.address_taken)):
+                    and (base in self.address_taken or _root_object(base) in self.address_taken)) or (
+                    # (R90) a bit of a union / bit-field object whose address was taken or escaped
+                    ".@" in base and (_root_object(base) in state.escaped or _root_object(base) in self.address_taken)):
                 state.store[key] = _havocked(state.store[key], reason)
         for base in state.escaped:
             state.havoc_bases.setdefault(base, reason)
             if base.startswith("@pointee:"):
                 self.rebind_under(state, base)   # (review R82 C1) a write through a pointer may rebind its pointer members
+        # (R90 review C2 · re-review 5 C-R5-1) whatever the project takes the address of: a pointer it cannot follow may
+        #   hold an integer address — the hardware, where the registers are
+        self.havoc_volatile_storage(state, reason)
         if not state.havoc_pointer:
             state.havoc_pointer = reason
         if world is not None:
@@ -814,6 +981,10 @@ class _Interp:
         kind = target[0]
         if kind == "key":
             _, key, t, volatile = target
+            st = self.storage_member(key)
+            if st is not None:
+                self.write_storage(state, key, st, val)   # (R90) into the bits every member of the object shares
+                return
             if key.startswith("@pointee:") and key.endswith("]"):
                 base, _, index = key[:-1].rpartition("[")
                 extent = self.harness_buffers.get(base)
@@ -1102,30 +1273,66 @@ class _Interp:
                 raise Unsupported("non_terminating_loop")
             exits_before = len(done)
             try:
-                return self.loop_iterations(pending, done, first, cond, body, update)
+                return self.loop_iterations(pending, done, first, cond, body, update, n)
             except Unsupported as exc:
                 # (R16 review C-R3-3) a loop whose controlling expression is constant is not one the implementation may
                 # assume to terminate (C11 6.8.5p6): out of budget with no path out yet, it may never end — never
                 # assumed to return. (W-R4-3) once some path left it (a polled register), the caller's fallback stands.
-                if self.world is not None and str(exc) in {"loop_iteration_budget", "execution_budget", "path_budget"} \
+                # (R90 re-review 3 W-R3-3) a budget reason may name what spent it (``execution_budget:polling_…``)
+                if self.world is not None and str(exc).split(":", 1)[0] in _BUDGET_REASONS \
                         and len(done) == exits_before and _constant_condition(cond, self.raw, self):
                     raise Unsupported("constant_condition_loop_unfinished") from exc
                 raise
         finally:
             self.lexical.pop()
 
-    def loop_iterations(self, pending, done, first, cond, body, update):
+    def loop_iterations(self, pending, done, first, cond, body, update, node=None):
         iterations = 0
+        # (R90 review W1, W4) ``polled``: the registers the last condition read when it let no path out; ``last``: the paths
+        #   at the start of that iteration — the next one starting from the very same paths runs the same forever
+        polled, prev, last = frozenset(), None, None
+        # (R90 re-review C-N1 b, c) decided at the FIRST iteration whose condition polled a register and let no path out:
+        #   "" — the condition left the paths as they came to it, its body (+ update) left them as the condition did and
+        #   read no polled register, so the state after the loop is the same however many polls the flag takes; else why
+        #   the loop is not assumed to end (the state after it would depend on when the hardware changes the flag).
+        #   ``cond_read_register``: the last condition read a register — the paths before the next one are kept to compare
+        #   (as in the first iterations: a loop that never polls pays for a few)
+        verdict, members, cond_read_register = None, (), False
+        body_reads: set[str] = set()   # (re-review 4 C-R4-3) registers the body (+ update) read, every iteration
         while pending:
             iterations += 1
             if iterations > _LOOP_BUDGET:
                 raise Unsupported("loop_iteration_budget")
+            prev = [_state_key(s) for s in pending] if polled else None
+            if prev is not None and prev == last:
+                if verdict:
+                    raise Unsupported(verdict)
+                return self.polling_exit(pending, done, polled, node, cond, members, body_reads)
+            last = prev
+            pre = None
+            if verdict is None and not first and cond is not None and (cond_read_register or iterations <= 8):
+                # by path: a path the condition lets out has nothing to compare (re-review 3 I-R3-1)
+                pre = dict(zip((id(s) for s in pending), prev if prev is not None else [_state_key(s) for s in pending],
+                               strict=True))
+            mark = len(self.volatile_polls)
             if not first and cond is not None:
                 pending, exits = self.branch(pending, cond)
                 done.extend(exits)
+            cond_read_register = len(self.volatile_polls) > mark
+            # (snapshots are taken only after a condition that read a register and kept a path) — (re-review 3 I-R3-1)
+            #   whatever it let out leaves as any exit does: a flag the model reads as unknown (``while (RSTA == 1U) {}``
+            #   after another such loop) lets a copy out each iteration and keeps the path the hardware has to end
+            polled = frozenset(self.volatile_polls[mark:]) if pending and cond is not None else frozenset()
+            members = tuple(dict.fromkeys(self.volatile_poll_members[mark:])) if polled else ()
             first = False
             if not pending:
                 break
+            stay = [_state_key(s) for s in pending] if polled and verdict is None else None
+            if stay is not None and (pre is None or [pre.get(id(s)) for s in pending] != stay):
+                # ``while ((FLW_RSTA == 0U) && (step() != 0U))`` with ``step`` counting: the poll itself changes what the
+                #   next one sees (a first poll whose paths were not kept to compare is not checked — not assumed either)
+                verdict = "polling_loop_condition_changes_state" if pre is not None else "polling_loop_first_poll_unchecked"
+            body_mark = len(self.volatile_polls)
             after = self.run(pending, body) if body is not None else pending
             pending = []
             for s in after:
@@ -1139,6 +1346,17 @@ class _Interp:
                     pending.append(s)
             if update is not None:
                 pending = [self.full_expression(s, update, self.raw) for s in pending]
+            body_reads.update(self.volatile_polls[body_mark:])
+            if polled and not verdict:
+                # (C-N1 c) a body that reads the flag sees a value that depends on when the hardware changes it — (re-review
+                #   3 C-R3-2) through a callee the run interprets too (its reads are merged into this activation's)
+                flag_reads = polled.intersection(self.volatile_polls[body_mark:])
+                if flag_reads:
+                    verdict = "polling_loop_body_reads_flag:" + "+".join(sorted(flag_reads))
+            if stay is not None and verdict is None:
+                # (C-N1 b) ``if (n < 3U) { n++; } else { err = 1U; }``: the paths a poll keeps are not the paths the next
+                #   poll sees — the loop's last iteration is not what the program leaves after k polls
+                verdict = "" if [_state_key(s) for s in pending] == stay else "polling_loop_body_changes_state"
             if len(done) + len(pending) > _PATH_BUDGET:
                 raise Unsupported("path_budget")
         return done
@@ -1197,6 +1415,167 @@ class _Interp:
                 continue
             out.append(("stmt", x))
         return out
+
+    def polling_exit(self, pending, done, polled, node, cond=None, members=(), body_reads=frozenset()):
+        """(R90 review W1) A loop that, on the paths it runs, reads a register flag and changes nothing — ``while
+        (ADC0FLWCTL_RSTA == big_SET) {}``: under the model (a register is memory) it never ends; on the target the hardware
+        clears the flag. The run goes on as if it did: the polled registers hold an unknown value after the loop, nothing
+        else changes, and the record says so (`STORAGE_POLLING_ASSUMPTION`) — a harness must stub or simulate the flag.
+        (R90 re-review C-N1 a) Only when, on every path the loop keeps, some value of the polled registers makes the
+        condition false without changing anything else (`polling_way_out`): a condition no register value can end
+        (``FLW_RSTA <= 1U``) never ends on the target either. (re-review 3 W-R3-2) The registers the condition reads only
+        for another flag value (``(RSTA == 1U) || (B_RSTA == 1U)``) are polled too: unknown after the loop as well.
+        (re-review 4 C-R4-3) ``body_reads``: the registers the body (+ update) read in any iteration — one of the final
+        polled registers among them is a body that reads the flag (as `loop_iterations` refuses for the condition's own),
+        and the members the search added are reads of this loop on the target (an enclosing loop's body read them)."""
+        extra_ub: set[str] = set()
+        roots = set(polled)
+        searched: list[tuple[str, str]] = []
+        for s in pending:
+            why, ub, read = self.polling_way_out(s, cond, members)
+            if why:
+                raise Unsupported(why)
+            extra_ub |= ub
+            roots |= {r for r, _p in read}
+            searched.extend(m for m in read if m not in members and m not in searched)
+        flag_reads = roots & set(body_reads)
+        if flag_reads:
+            raise Unsupported("polling_loop_body_reads_flag:" + "+".join(sorted(flag_reads)))
+        for root, path in searched:   # aligned lists (`read_storage`)
+            self.volatile_polls.append(root)
+            self.volatile_poll_members.append((root, path))
+        line = node.start_point[0] + 1 if node is not None else 0
+        self.polling_assumed.append(f"{self.function_name or '?'}:{line}:{'+'.join(sorted(roots))}")
+        for s in pending:
+            for root in sorted(roots):
+                self.havoc_base(s, root, "polling_loop_exit_assumed:" + root)
+            s.possible_ub |= extra_ub   # what the condition may do with the value the hardware leaves
+            s.mode = "normal"
+            done.append(s)
+        return done
+
+    def polling_way_out(self, state, cond, members):
+        """(R90 re-review C-N1 a) ``("", possible undefined behaviour, polled members)`` when some value of the polled
+        members (``(root, member path)``) lets the path ``state`` out of the loop: the condition, evaluated on a copy of the
+        path with them set to it, is false — and every value tried leaves the path as it was (the state after the loop
+        does not depend on which one the hardware leaves). Else ``(why not, …)``. A member of at most 8 bits takes every
+        value, a wider one 0, all ones and the inverse of what it holds; the product over the members is bounded
+        (`_POLL_SEARCH_BUDGET`). (re-review 3 W-R3-2) A member the condition reads only under another value (the short
+        circuit of ``(RSTA == 1U) || (BUSY == 1U)``) joins the members and the search runs again — only a search that
+        varied every member the condition read, each over all its values, proves that no value ends the loop
+        (``non_terminating_loop``). Each probe is hypothetical (`hypothetical`): what it records is put back. (re-review
+        4) Nothing is kept from one search for another: every run searches (its steps are its own)."""
+        if cond is None or not members:
+            return "polling_flag_unmodeled", set(), ()
+        return self.polling_search_rounds(state, cond, list(members))
+
+    def polling_search_rounds(self, state, cond, members):
+        """(re-review 3 W-R3-2) `polling_search` until no new member is read (at most `_POLL_MEMBER_ROUNDS` searches)."""
+        result = None
+        for _round in range(_POLL_MEMBER_ROUNDS):
+            result = self.polling_search(state, cond, members)
+            if isinstance(result, str):
+                return result, set(), ()
+            new = [m for m in result[4] if m not in members]
+            if not new:
+                break
+            members = members + new
+        else:
+            # a member still came up in the last search: its values were not varied — no proof either way
+            return "polling_loop_exit_search_incomplete", set(), ()
+        out, undetermined, ub, exhaustive, _new = result
+        if out:
+            return "", ub, members
+        if undetermined:
+            return "polling_loop_exit_undetermined:" + undetermined, set(), ()
+        return ("non_terminating_loop" if exhaustive else "polling_loop_exit_not_found"), set(), ()
+
+    def polling_search(self, state, cond, members):
+        """One search over the values of ``members``: ``(a way out found, why undetermined, possible UB, every value
+        tried, members read that are not among them)`` — or the reason it cannot run or must refuse."""
+        choices, exhaustive = [], True
+        for root, path in members:
+            st = self.storage_member(f"{root}.{path}", world=True)
+            if st is None:
+                return "polling_flag_unmodeled:" + root
+            w = st[2]["width"]
+            if w <= 8:
+                values = list(range(1 << w))
+            else:
+                exhaustive = False
+                full = (1 << w) - 1
+                held = self.storage_value(state, root, st[1], st[2], f"{root}.{path}", observe=True)
+                # (re-review 4 I-R4-1) and the value it holds: another member varied beside it
+                values = list(dict.fromkeys([0, full] + ([held & full, ~held & full] if type(held) is int else [])))
+            choices.append((st, values))
+        total = math.prod(len(v) for _st, v in choices)
+        if total > _POLL_SEARCH_BUDGET:
+            return f"polling_loop_exit_search_budget:{total}"
+        out, undetermined, ub, new = False, "", set(), []
+        for combo in itertools.product(*(v for _st, v in choices)):
+            with self.hypothetical():
+                c = state.copy(records=False)
+                # (re-review 5 W-R5-1) undefined behaviour on a flag value raises here whatever branch chose the path (F5
+                #   `selectors`): every value is the run's own question — `polling_flag_value:` discloses it
+                c.selectors, c.ub_proven = [], ""
+                for (st, _v), value in zip(choices, combo, strict=True):
+                    self.store_bits(c, st[0], st[1], st[2], value)
+                before = _state_key(c)
+                mark = len(self.volatile_poll_members)
+                try:
+                    truth = self.truth(self.full_expression_value(c, cond, self.raw))
+                except Unsupported as exc:
+                    if str(exc) == "execution_budget":
+                        # (re-review 3 W-R3-3) the run's budget went on hypothetical polls: say so
+                        raise Unsupported("execution_budget:polling_way_out_search") from exc
+                    if str(exc).split(":", 1)[0] in _BUDGET_REASONS:
+                        raise
+                    undetermined = undetermined or str(exc)
+                    if str(exc).startswith("undefined_behavior:"):
+                        # undefined on a value the hardware may leave: possible on the run, never proven on it
+                        ub.add("polling_flag_value:" + str(exc).split(":", 1)[1])
+                    truth = _PROBE_FAILED
+                new.extend(m for m in self.volatile_poll_members[mark:] if m not in members and m not in new)
+                if truth is _PROBE_FAILED:
+                    continue
+                if _state_key(c) != before:
+                    # ``(FLW == 0U) || (g_x = 5U, 0)``: the poll that ends the loop (or one with another value of the
+                    #   flag) writes what the polls the loop kept did not — the state after it depends on the flag's values
+                    return "polling_loop_condition_changes_state"
+                if truth is None:
+                    undetermined = undetermined or "condition_unknown_for_a_flag_value"
+                elif not truth:
+                    out = True
+                    ub |= c.possible_ub - state.possible_ub
+        return out, undetermined, ub, exhaustive, new
+
+    @contextlib.contextmanager
+    def hypothetical(self):
+        """(R90 re-review 3 W-R3-1) A run that is not the program's — a probe of the polling way-out search: everything
+        it records on this activation and on the world (callee failures, effects-only and inline counts, admitted units,
+        stubs, storage and polling records, register reads, harness buffers, …) is put back after it, and no decision is
+        observed on it (as `record_decision`'s probes). A callee that fails on a hypothetical flag value has not failed
+        for the real run. The steps it spends stay spent (the budget is the run's). (re-review 4 X5) Every attribute of an
+        activation and of the world is in one of the lists or in `_HYPOTHETICAL_EXEMPT` with why it needs no putting back
+        — a structural test holds the lists to the constructors."""
+        tables = [getattr(self, a) for a in _HYPOTHETICAL_TABLES]
+        world = self.world
+        growing: list = []
+        if world is not None:
+            tables += [getattr(world, a) for a in _HYPOTHETICAL_WORLD_TABLES]
+            growing = [(d, len(d)) for d in (getattr(world, a) for a in _HYPOTHETICAL_WORLD_GROWING)]
+        saved = [_table_copy(t) for t in tables]
+        saved_watch, self.watch = self.watch, None
+        try:
+            yield
+        finally:
+            self.watch = saved_watch
+            for live, old in zip(tables, saved, strict=True):
+                _table_restore(live, old)
+            for d, n in growing:
+                if len(d) != n:
+                    for k in list(itertools.islice(d, n, None)):
+                        del d[k]
 
     def switch(self, states, n):
         raw = self.raw
@@ -1814,6 +2193,11 @@ class _Interp:
             #   through a global pointer that may hold p (the same judgment as the call's own havoc)
             return bool(self.opaque_writes(closure))
         view = self.stub_view(callee)
+        if view is None and self.volatile_register_operand(obj):
+            # (R90 re-review 4 C-R4-4) the hardware may change a register while the callee runs — it may wait on one
+            #   (a poll), or reach one the closure cannot name: beside any call but a sequence stub's, a register read is
+            #   indeterminately sequenced with the call (C11 6.5.2.2p10)
+            return True
         if view is not None:
             # (R38) a sequence stub (`stubbed_call`) writes no global or static and runs nothing — at most what a
             # pointer argument reaches
@@ -1838,6 +2222,18 @@ class _Interp:
         reachable = escaped or obj in self.arrays or obj in self.address_taken or obj in escaping or (
             obj not in self.globals and obj not in self.arrays)
         return bool(pointer and reachable)
+
+    def volatile_register_operand(self, name):
+        """(R90 re-review 4 C-R4-4) Does the operand ``name`` read a volatile union / bit-field object — the object
+        (``REG_FLW`` of ``REG_FLW.Byte``) or a macro of one of its members (``#define FLW REG_FLW.Byte``)?"""
+        if not name or self.lookup(name) is not None:
+            return False
+        if self.macro_status.get(name) == "active" and name not in self.macro_params:
+            m = re.match(r"[\s(]*([A-Za-z_]\w*)\s*\.", self.macro_bodies.get(name, ""))
+            if m is None:
+                return False
+            name = m.group(1)
+        return self.storage_volatile(name)
 
     def opaque_writes(self, closure):
         """A written name that is not a modeled scalar or array object (a pointer, a struct with pointer members) may
@@ -1947,6 +2343,9 @@ class _Interp:
             if path is not None and path in self.globals:
                 g = self.globals[path]
                 return _loaded(self.read_key(state, path, path, g["type"], g.get("volatile")), g["type"])
+            st = self.storage_member(path) if path is not None else None
+            if st is not None:
+                return self.read_storage(state, path, st)   # (R90)
             if path is not None and path in self.arrays:
                 return _Val(Unknown("array_value:" + path), None)   # decays to a pointer, as a named array does
             base = self.expression_base_effects(state, n, raw, depth)
@@ -1959,7 +2358,9 @@ class _Interp:
         if k == "pointer_expression":
             op = _text(n, raw).lstrip()[:1]
             if op == "&":
-                self.address_of(state, n.child_by_field_name("argument"), raw, depth)
+                base = self.address_of(state, n.child_by_field_name("argument"), raw, depth)
+                if base and base[0] != "@" and self.storage_root(_root_object(base), world=True) is not None:
+                    return _Val(Unknown(_STORAGE_ADDRESS + _root_object(base)), None)   # (R90 review C2)
                 return _Val(Unknown("address_value"), None)
             pt = self.pointee_target(state, n, raw)
             if pt is not None:
@@ -2155,9 +2556,296 @@ class _Interp:
 
     def plain_struct(self, name):
         """(R39) A modeled struct object with no pointer or unmodeled member: a write to it is a write to its members
-        (`havoc_base` covers ``name.*``), never one through something the members do not name."""
+        (`havoc_base` covers ``name.*``), never one through something the members do not name. (R90) A union / bit-field
+        object the storage model lays out holds integers only: the same."""
         rec = self.struct_globals.get(name)
-        return rec is not None and not rec.get("opaque_members")
+        return (rec is not None and not rec.get("opaque_members")) or self.storage_root(name) is not None
+
+    # ── (R90) union / bit-field storage objects ─────────────────────────────────────────────────────────────────────
+    # A union object (a register ``REG_X`` with ``Byte`` / ``Word`` / ``Bits.TEN`` / ``Overlap_STR…`` members) or a struct
+    # with bit-fields is one storage: its bytes are store keys ``REG_X.@order:byte`` (`_Bits` — the bits the run wrote)
+    # for each layout the target may use
+    # (`cpc.STORAGE_ORDERS` — byte order and bit-field unit; an 8-bit register has one), a member's value is read from
+    # the bits it occupies and is known only when every layout gives the same one. A bit the run did not write holds what
+    # the row's inputs set (any member, or the object's name for its whole-object member), else it is unknown. A volatile
+    # one (a register) is read as memory: the VectorCAST harness holds it as an ordinary object.
+    def storage_root(self, root, world=False):
+        """(R90) The storage layout of object ``root`` as this unit sees it — with ``world``, else as the unit of an
+        activation of this run that declares it (an observable the entry's unit does not see). None when ``root`` is
+        no such object here (a local or a macro of that name hides it, a layout the model cannot state)."""
+        if not root or root[0] == "@" or root in self.macro_status or self.lookup(root) is not None:
+            return None
+        table = self.storage
+        layout = table[root] if table is not None and root in table else None
+        if layout is None and world and self.world is not None:
+            layout = self.world.storage_layout(root)
+        if layout is not None and self.world is not None:
+            self.world.same_storage(root, layout)
+        return layout
+
+    def storage_member(self, path, world=False):
+        """(R90) ``(root, layout, leaf)`` when ``path`` names a scalar member of a storage object (``REG.Bits.TEN``)."""
+        if "." not in path or path[0] == "@" or "[" in path:
+            return None
+        root, _, rest = path.partition(".")
+        layout = self.storage_root(root, world)
+        leaf = layout["leaves"].get(rest) if layout is not None else None
+        return (root, layout, leaf) if leaf is not None else None
+
+    def storage_refusal(self, root):
+        """(R90) Why ``root`` — a union / bit-field object a unit of this run declares — has no layout, or ""."""
+        table = self.storage
+        if table is not None and root not in table:
+            why = (self.scope.get("storage_unresolved") or {}).get(root)
+            if why:
+                return why
+        return self.world.storage_refusal(root) if self.world is not None else ""
+
+    def storage_observable(self, name):
+        """(R90) What an observable names in a storage object: ``(root, layout, leaf, member path)`` — the object itself
+        is its whole-object member (``Byte`` / ``Word``) —, an Unknown with the reason when it is one the model gives no
+        value of, None when it names no union / bit-field object."""
+        root = name.split(".", 1)[0]
+        layout = self.storage_root(root, world=True)
+        if layout is None:
+            why = self.storage_refusal(root)
+            return Unknown(f"storage_layout_unmodeled:{root}:{why}") if why else None
+        if name == root:
+            path = layout.get("whole")
+            if path is None:
+                return Unknown("storage_whole_object_member_ambiguous:" + root)
+        else:
+            path = name[len(root) + 1:]
+            if path not in layout["leaves"]:
+                return Unknown("observable_not_a_storage_member:" + name)
+        return root, layout, layout["leaves"][path], path
+
+    def storage_base(self, state, root):
+        """(R90) Why the bits of ``root`` the run did not write are unknown on this path (`initial`'s judgment), or None
+        — then they hold what the row's inputs set."""
+        if self.world is not None and (root in self.world.ambiguous or root in self.world.ambiguous_roots):
+            return "object_name_ambiguous_in_project:" + root
+        if state.havoc_all:
+            return state.havoc_all
+        if state.havoc_pointer and (root in self.address_taken or root in state.escaped):
+            return state.havoc_pointer
+        for base, why in state.havoc_bases.items():
+            if base == root or base.startswith(root + "."):
+                return why   # (re-review 4) a havoc of this object names its own reason before the any-register mark
+        if _VOLATILE_STORAGE in state.havoc_bases and self.storage_volatile(root):
+            # (R90 review C2) a pointer write may have landed on any register — (re-review 4 C-R4-1) or a callee the run
+            #   did not interpret may have waited on one
+            return state.havoc_bases[_VOLATILE_STORAGE]
+        return None
+
+    def storage_volatile(self, root):
+        """(R90 review C2) Whether ``root`` is a volatile union / bit-field object (a register)."""
+        layout = self.storage_root(root, world=True) if root and root[0] != "@" else None
+        return bool(layout and layout.get("volatile"))
+
+    def havoc_volatile_storage(self, state, reason):
+        """(R90 review C2) A write through a pointer that may alias a register: every volatile union / bit-field object
+        holds an unknown value from here (its stored bytes, and through `storage_base` the ones it did not write).
+        (re-review 5 I-R5-4) Every callee the run did not interpret is named on the mark
+        (``register_read_by_callee_not_interpreted:A+B``) — the first alone named one where several left the registers
+        unknown; another cause keeps the first one's name."""
+        for key in list(state.store):
+            if ".@" in key and self.storage_volatile(_root_object(key)):
+                state.store[key] = _havocked(state.store[key], reason)
+        first = state.havoc_bases.get(_VOLATILE_STORAGE)
+        if first is None:
+            state.havoc_bases[_VOLATILE_STORAGE] = reason
+        elif first != reason and first.startswith(_CALLEE_REGISTERS) and reason.startswith(_CALLEE_REGISTERS):
+            names = first[len(_CALLEE_REGISTERS):].split("+")
+            if reason[len(_CALLEE_REGISTERS):] not in names:
+                state.havoc_bases[_VOLATILE_STORAGE] = first + "+" + reason[len(_CALLEE_REGISTERS):]
+
+    def storage_input_bits(self, root, layout):
+        """(R90) The object's bits as the row's inputs set them, per layout order: 0 / 1, a reason (a value the member
+        cannot hold, two inputs that disagree on the bit, an input naming no member) or None (no input sets it). An input
+        names a member (``REG.Bits.TEN``, ``REG.Byte``) or the object (``REG`` — its whole-object member). Two inputs may
+        set one bit (``REG.Byte`` and ``REG.Bits.TEN``): the harness sets both in an order of its own, so a bit they
+        disagree on is unknown."""
+        cached = self.storage_inputs.get(root)
+        if cached is not None:
+            return cached
+        n = layout["size"] * 8
+        bits = {o: [None] * n for o in layout["orders"]}
+        bad: dict[str, dict[int, str]] = {o: {} for o in layout["orders"]}
+        prefix = root + "."
+        for key, raw_value in (self.inputs or {}).items():
+            key = str(key)
+            if key == root:
+                path = layout.get("whole")
+                if path is None:
+                    for o in bad:
+                        for m in range(n):
+                            bad[o].setdefault(m, "storage_whole_object_member_ambiguous:" + root)
+                    continue
+            elif key.startswith(prefix):
+                path = key[len(prefix):]
+                if path not in layout["leaves"]:
+                    for o in bad:
+                        for m in range(n):
+                            bad[o].setdefault(m, "input_names_no_member:" + key)
+                    continue
+            else:
+                continue
+            leaf = layout["leaves"][path]
+            t = {**leaf["type"], "bits": leaf["width"], "signed": False} if leaf["bitfield"] else leaf["type"]
+            value = self.check_input(key, t, raw_value)
+            for o in bits:
+                for k, m in enumerate(leaf["bits"][o]):
+                    if isinstance(value, Unknown):
+                        bad[o].setdefault(m, value.reason)
+                    elif bits[o][m] is None:
+                        bits[o][m] = (value >> k) & 1
+                    elif bits[o][m] != (value >> k) & 1:
+                        bad[o].setdefault(m, "input_members_disagree:" + root)
+        for o, reasons in bad.items():
+            for m, why in reasons.items():
+                bits[o][m] = why
+        self.storage_inputs[root] = bits
+        return bits
+
+    def storage_value(self, state, root, layout, leaf, name, observe=False):
+        """(R90) The member's value: the same under every layout order (else unknown — which byte order or bit-field
+        unit the target uses decides it), each bit as the run last wrote it, or as the inputs set it. An unwritten bit
+        no input sets is an initial value the row lacks (``INITIAL_VALUE_PREFIX + name``) — a read of the object (2-c)
+        unless ``observe``."""
+        why = self.storage_base(state, root)
+        inputs = self.storage_input_bits(root, layout) if why is None else None
+        values, reason, initial = set(), "", False
+        # (R90 review C1) a signed member that is no bit-field (the model takes none) reads its bits in two's complement
+        sign = 1 << (leaf["width"] - 1) if not leaf["bitfield"] and leaf["type"].get("signed") else 0
+        store = state.store
+        for o in layout["orders"]:
+            v, bytes_ = 0, {}
+            for k, m in enumerate(leaf["bits"][o]):
+                byte, i = divmod(m, 8)
+                if byte not in bytes_:
+                    bytes_[byte] = _byte_state(store.get(f"{root}.@{o}:{byte}"))
+                written, known, value, why_written = bytes_[byte]
+                if written >> i & 1:
+                    b = (value >> i & 1) if known >> i & 1 else why_written
+                else:
+                    b = why if why is not None else inputs[o][m]   # what the object held before the run
+                if type(b) is int:
+                    if v is not None:
+                        v |= b << k
+                    continue
+                if b is None:
+                    initial = True
+                else:
+                    reason = reason or str(b)
+                v = None
+            if v is not None and v & sign:
+                v -= sign << 1
+            values.add(v)
+        if initial and not observe:
+            state.initial_reads.add(_BASE_READ + root)
+        if None in values:
+            return Unknown(reason or INITIAL_VALUE_PREFIX + name)
+        if len(values) != 1:
+            return Unknown("storage_member_layout_dependent:" + name)
+        return values.pop()
+
+    def storage_read_type(self, leaf):
+        """(R90) The type a member's value has as an operand: a bit-field narrower than ``int`` is an ``int`` (C11
+        6.3.1.1p2); one of all its type's bits (at least ``int``'s) is of its type; any other width is the
+        implementation's (None)."""
+        t = leaf["type"]
+        if not leaf["bitfield"]:
+            return t
+        w, int_bits = leaf["width"], self.int_t["bits"]
+        if w < int_bits:
+            return self.int_t
+        return t if w == t.get("bits") and w >= int_bits else None
+
+    def read_storage(self, state, key, st, observe=False, name=None):
+        """(R90) Read the member ``key`` of a storage object (``st``: `storage_member`)."""
+        root, layout, leaf = st
+        self.storage_used.add(root)
+        if layout.get("volatile"):
+            # (review W3) an observed one too: its expected value rests on the harness holding it as memory
+            self.storage_volatile_reads.add(root)
+            if not observe and leaf.get("volatile", True):
+                # (review W1) what a loop condition reads (`loop_iterations`) — (re-review W-N1) through a volatile
+                #   lvalue: a plain member of a type with a volatile one is no read the compiler must repeat
+                self.volatile_polls.append(root)
+                self.volatile_poll_members.append((root, key[len(root) + 1:]))
+        spans = self.storage_narrow.get(root)
+        if spans and root not in self.storage_unspecified:
+            # (re-review I-1) a byte of the union outside the narrow member stored through: C11 6.2.6.1p7
+            covered = {m // 8 for o in layout["orders"] for m in leaf["bits"][o]}
+            if any(uo <= b < uo + us and not mo <= b < mo + ms for mo, ms, uo, us in spans for b in covered):
+                self.storage_unspecified.add(root)
+        t = self.storage_read_type(leaf)
+        if t is None:
+            return _Val(Unknown("bit_field_promotion_implementation_defined:" + key), None)
+        value = self.storage_value(state, root, layout, leaf, name or key, observe)
+        span = (0, (1 << leaf["width"]) - 1) if leaf["bitfield"] and isinstance(value, Unknown) else None
+        return _Val(value, t, span)
+
+    def write_storage(self, state, key, st, val):
+        """(R90) Store ``val`` into the member ``key``: converted to it (a bit-field keeps its low ``width`` bits — the
+        model takes no signed one), then into the bits it occupies under every layout order — what the other members of
+        the object read from there on."""
+        root, layout, leaf = st
+        self.storage_used.add(root)
+        if leaf.get("narrow"):
+            self.storage_narrow.setdefault(root, set()).add(tuple(leaf["narrow"]))   # (re-review I-1)
+        if leaf["bitfield"]:
+            if isinstance(val.v, Unknown):
+                new = Unknown(val.v.reason)
+            elif val.t is None or cpc.is_float(val.t) or type(val.v) is not int:
+                new = Unknown("floating_point_unmodeled" if cpc.is_float(val.t) else "value_type_unresolved")
+            else:
+                new = val.v % (1 << leaf["width"])
+        else:
+            new = self.convert_to(val, leaf["type"])
+            if isinstance(new, Unknown):
+                new = Unknown(new.reason)   # a bit holds no interval
+            elif type(new) is not int:
+                new = Unknown("value_type_unresolved")
+        self.store_bits(state, root, layout, leaf, new)
+
+    def store_bits(self, state, root, layout, leaf, new):
+        """(R90) ``new`` — an int (its low bits, two's complement) or an Unknown — into the bits ``leaf`` occupies, under
+        every layout order."""
+        for o in layout["orders"]:
+            touched: dict[int, list] = {}
+            for k, m in enumerate(leaf["bits"][o]):
+                byte, i = divmod(m, 8)
+                if byte not in touched:
+                    touched[byte] = list(_byte_state(state.store.get(f"{root}.@{o}:{byte}")))
+                rec, bit = touched[byte], 1 << i
+                rec[0] |= bit
+                if type(new) is int:
+                    rec[1] |= bit
+                    rec[2] = (rec[2] & ~bit) | ((new >> k & 1) << i)
+                else:
+                    rec[1] &= ~bit
+                    rec[3] = new.reason
+            for byte, (written, known, value, reason) in touched.items():
+                state.store[f"{root}.@{o}:{byte}"] = _Bits(written, known, value, reason if written & ~known else "")
+
+    def storage_written(self, state, st):
+        """(R90) Did the run write a bit the member occupies (through it or another member of the object)?"""
+        root, layout, leaf = st[0], st[1], st[2]
+        for o in layout["orders"]:
+            for m in leaf["bits"][o]:
+                if _byte_state(state.store.get(f"{root}.@{o}:{m // 8}"))[0] >> (m % 8) & 1:
+                    return True
+        return False
+
+    def stored_value(self, state, target):
+        """The value an object holds right after a store to it (``target``: a ``key`` lvalue) — (R90) a storage
+        member's is read back from its bits."""
+        st = self.storage_member(target[1])
+        if st is not None:
+            return self.read_storage(state, target[1], st, observe=True).v
+        return state.store[target[1]]
 
     def member_path(self, n, raw):
         """(R39) ``g.a`` · ``g.s.x`` · ``(g).a`` on a struct object whose members are modeled (`struct_globals`): the
@@ -2181,8 +2869,9 @@ class _Interp:
         if not parts or n.type != "identifier":
             return None
         name = _text(n, raw)
-        if name not in self.struct_globals or name in self.macro_status or self.lookup(name) is not None:
-            return None
+        if (name not in self.struct_globals and self.storage_root(name) is None) or name in self.macro_status \
+                or self.lookup(name) is not None:
+            return None   # (R90) or a member of a union / bit-field object the storage model lays out
         return name + "." + ".".join(reversed(parts))
 
     def expression_base_effects(self, state, n, raw, depth):
@@ -2877,6 +3566,9 @@ class _Interp:
                 if path in self.globals:
                     g = self.globals[path]
                     return ("key", path, g["type"], g.get("volatile", False))
+                st = self.storage_member(path)
+                if st is not None:   # (R90) a member of a union / bit-field object: `store` writes its bits
+                    return ("key", path, self.storage_read_type(st[2]) or st[2]["type"], False)
                 # (R39) a member of a modeled struct that is no scalar member (``g.s = h`` — a nested struct, a pointer
                 # or unmodeled member): only what lies under it changes
                 return ("base", path, "field_write:" + path)
@@ -3002,6 +3694,9 @@ class _Interp:
             state.initial_reads.add(_ANY_POINTER_READ if target[0] in ("all", "ptr") else _BASE_READ + str(target[1]))
             return _Val(Unknown(target[-1] if target[0] in ("all", "ptr") else target[2]), None)
         _, key, t, volatile = target
+        st = self.storage_member(key)
+        if st is not None:
+            return self.read_storage(state, key, st)   # (R90)
         if key.startswith("@pointee:"):
             return _loaded(self.read_pointee(state, key, t, volatile), t)   # (R40)
         base = key.split("[", 1)[0]
@@ -3030,6 +3725,8 @@ class _Interp:
         target = self.lvalue(state, arg, raw, depth + 1) if arg is not None else ("all", "address_of")
         if target[0] == "key":
             base = target[1].split("[", 1)[0]
+            if self.storage_member(base) is not None:
+                base = _root_object(base)   # (R90) a member's address reaches every member of the storage object
             state.escaped.add(base)
             return base
         if target[0] == "base":
@@ -3056,7 +3753,7 @@ class _Interp:
             value = self.arith_values(op[:-1], current, right, state)
         if target[0] == "key":
             self.store(state, target, value)
-            stored = state.store[target[1]]
+            stored = self.stored_value(state, target)
             loaded = _loaded(stored, target[2])
             if mark is not None:
                 # (R79) the value replaced and the value written: deleting the assignment shows only where they differ
@@ -3194,7 +3891,7 @@ class _Interp:
         new = self.arith_values("+" if op == "++" else "-", current, one, state)
         if target[0] == "key":
             self.store(state, target, new)
-            return _loaded(state.store[target[1]], target[2]) if prefix else current
+            return _loaded(self.stored_value(state, target), target[2]) if prefix else current
         self.store(state, target, new)
         return _Val(Unknown(target[-1] if target[0] in ("all", "ptr") else target[2]), None)
 
@@ -3252,6 +3949,8 @@ class _Interp:
         # (backlog 2-c review round 2) run as its effects only: it may read what its closure names, and through a pointer
         state.initial_reads.add(_CALLEE_READS + name)
         state.initial_reads.add(_ANY_POINTER_READ)
+        # (R90 re-review 3 C-R3-1) first: a write below names its own reason where it reaches the same register
+        self.havoc_registers_read_by(state, name, info)
         writes = sorted(info.get("writes") or ())
         opaque = self.opaque_writes(info)
         if info.get("unknown_callees"):
@@ -3263,7 +3962,8 @@ class _Interp:
             if info.get("pointer_write") or opaque:
                 why = "pointer_write" if info.get("pointer_write") else "writes_through:" + opaque[0]
                 self.havoc_objects(state, self.callee_targets(name, info, arg_nodes, raw, state),
-                                   f"callee_pointer_write:{name}:{why}")
+                                   f"callee_pointer_write:{name}:{why}", direct=frozenset(writes),
+                                   through_pointer=bool(info.get("pointer_write")))
             else:
                 # (review R64 I-4) a callee it calls that this run stubs may write through what it is passed, whatever
                 #   that callee's body does — named by the flow, or (round 2 W-2) when the flow did not run or could not
@@ -3279,6 +3979,17 @@ class _Interp:
                     if stub_writes:
                         self.havoc_objects(state, stub_writes, f"callee_stub_write:{name}")
         return self.stub_return(name, info)
+
+    def havoc_registers_read_by(self, state, name, info):
+        """(R90 re-review 3 C-R3-1, re-review 4 C-R4-1) A callee this run does not interpret (its write closure stands for
+        it — a unit run, or an inline that failed: a refused polling loop, a budget, recursion) may wait on a register
+        flag: under the model (a register is memory) such a callee never returns, under the polling assumption the flag
+        changed — neither leaves the register as the row set it. Every volatile union / bit-field object is unknown after
+        the call: the closure's ``reads`` do not see a register the callee reaches through a pointer (``WaitP(&FLW)``,
+        ``*g_pFlw``) or through a ``#define`` in its body. (Unknown code, an unmodeled macro: `havoc_everything` covers
+        every object.) A sequence stub (R38) is not this: the harness replaces the body, nothing polls, and a register
+        keeps what the row set."""
+        self.havoc_volatile_storage(state, _CALLEE_REGISTERS + name)
 
     def stubbed_call(self, state, name, info, view, arg_nodes=(), raw=b""):
         """(R38) The sequence stubs F (`stub_view`): R14 — the harness replaces F's body, as VectorCAST does and the
@@ -3396,12 +4107,15 @@ class _Interp:
             return obj[3:] == self.entry_interp().function_name
         return True
 
-    def havoc_objects(self, state, targets, reason):
+    def havoc_objects(self, state, targets, reason, direct=frozenset(), through_pointer=True):
         """(R64) Make the objects a write through a pointer may reach unknown — or, when they are not known (None, an
         unknown token, a harness pointer of this run), everything a pointer may reach (`havoc_pointer_targets`).
         Objects are ``G:name`` (a global), ``L:fn:name`` (a parameter or local — of an activation this evaluation runs),
         ``?P:F:p`` (the pointee the harness passes the function under test), ``?T:F`` (a pointer the harness hands it),
-        ``?S:G`` (what a stub of G hands out — meaningful only where this run stubs G); ``F:``/``R:`` name no object."""
+        ``?S:G`` (what a stub of G hands out — meaningful only where this run stubs G); ``F:``/``R:`` name no object.
+        (R90 review C2) A register among the objects reached through a pointer — the callee writes through one
+        (``through_pointer``), or reaches a register it does not write by name (not in ``direct``) — may be offset to its
+        neighbours: every register is unknown then."""
         if targets is None:
             self.havoc_pointer_targets(state, reason)
             return
@@ -3445,6 +4159,11 @@ class _Interp:
                 return
         for g in sorted(globals_):
             self.havoc_base(state, g, reason)
+        if any(self.storage_volatile(g) and (through_pointer or g not in direct) for g in globals_) \
+                or pointer_flow.HARDWARE[2:] in globals_:
+            # (R90 review C2) a register reached: its neighbours too — (re-review 5 C-R5-1) or an integer address (the
+            #   analysis's one hardware object): where the @-placed registers are
+            self.havoc_volatile_storage(state, reason)
         for b in sorted(buffers):
             self.havoc_base(state, b, reason)   # (R82) its elements only — the struct holding the pointer stays
         if locals_ or pointees:
@@ -3641,8 +4360,10 @@ def _linkage_entries(scope, cache):
     if hit is not None and hit[0] is scope:
         return hit[1]
     unit = str(scope.get("path") or "")
+    # (R90) and the union / bit-field objects the unit may lay out (`storage_candidates`): one object per name too
     entries = tuple((name, unit if rec.get("static") else "", kind, rec)
-                    for kind, table in (("global", scope.get("globals") or {}), ("array", scope.get("arrays") or {}))
+                    for kind, table in (("global", scope.get("globals") or {}), ("array", scope.get("arrays") or {}),
+                                        ("storage", scope.get("storage_candidates") or {}))
                     for name, rec in table.items())
     cache[id(scope)] = (scope, entries)
     return entries
@@ -3685,6 +4406,10 @@ class _World:
         self.kept: list[bytes] = []          # macro-expansion buffers of finished activations (their ids are in keys)
         self.pointer_havocs = 0
         self.all_havocs = 0
+        # (R90) union / bit-field objects: the first admitted unit declaring each (its layout answers an observation the
+        #   entry's unit cannot) and the layout signature every unit that uses one must agree with
+        self.storage_scopes: dict[str, dict] = {}
+        self.storage_signatures: dict[str, tuple] = {}
         cache = getattr(provider, "linkage_cache", None)
         self.linkage_cache = cache if isinstance(cache, dict) else {}
         ambiguous_for = getattr(provider, "ambiguous_for", None)
@@ -3708,12 +4433,34 @@ class _World:
                 return name   # ``extern U8 g`` here, ``U16 g`` there: not one object as far as this model can tell
         for name, owner, kind, rec in entries:
             self.linkage[name] = owner
-            self.objects.setdefault(name, (kind, rec))
-            (self.array_names if kind == "array" else self.global_names).add(name)
             if not owner:
                 self.types.setdefault(name, str(rec.get("typename") or ""))
+            if kind == "storage":
+                self.storage_scopes.setdefault(name, scope)   # (R90) laid out when an activation asks
+                continue
+            self.objects.setdefault(name, (kind, rec))
+            (self.array_names if kind == "array" else self.global_names).add(name)
         self.admitted.add(id(scope))
         return None
+
+    def storage_layout(self, root):
+        """(R90) The layout of union / bit-field object ``root`` in the first admitted unit declaring it, or None."""
+        scope = self.storage_scopes.get(root)
+        table = scope.get("storage_globals") if scope is not None else None
+        return table[root] if table is not None and root in table else None
+
+    def storage_refusal(self, root):
+        """(R90) Why the admitted unit declaring ``root`` gives it no layout, or ""."""
+        scope = self.storage_scopes.get(root)
+        if scope is None or self.storage_layout(root) is not None:
+            return ""
+        return str((scope.get("storage_unresolved") or {}).get(root) or "")
+
+    def same_storage(self, root, layout):
+        """(R90) Every unit of this run lays ``root`` out alike — the bits one writes are the bits another reads."""
+        seen = self.storage_signatures.setdefault(root, layout["signature"])
+        if seen != layout["signature"]:
+            raise Unsupported("storage_layout_differs_between_units:" + root)
 
     def ambiguous_root(self, base):
         """(R39 review C3) A struct member whose struct names more than one object in the project."""
@@ -3787,9 +4534,19 @@ class _World:
         finally:
             self.stack.pop()
             self.kept.extend(sub.kept_raws)   # their ids are in local keys (review I2)
+            # (R90 re-review 3 C-R3-2) the registers the callee read are the caller's reads too — a loop body (or
+            #   condition) that reads its flag through a callee reads it (`loop_iterations`); aligned lists
+            caller.volatile_polls.extend(sub.volatile_polls)
+            caller.volatile_poll_members.extend(sub.volatile_poll_members)
         caller.steps = sub.steps
         caller.stubs_used |= sub.stubs_used
         caller.linked_reads |= sub.linked_reads
+        caller.storage_used |= sub.storage_used   # (R90)
+        caller.storage_volatile_reads |= sub.storage_volatile_reads
+        caller.polling_assumed.extend(sub.polling_assumed)   # (R90 review W1)
+        for root, spans in sub.storage_narrow.items():   # (R90 re-review I-1)
+            caller.storage_narrow.setdefault(root, set()).update(spans)
+        caller.storage_unspecified |= sub.storage_unspecified
         # (R17 review W2) the callee's unit text rests on its own #if verdicts too
         caller.assumed_undefined |= sub.assumed_undefined | set(scope.get("assumed_undefined") or ())
         caller.assumed_undefined |= set((getattr(self.provider, "binding_assumptions", None) or {}).get(
@@ -3831,6 +4588,9 @@ class _World:
                 differing = set().union(*(s.store for s in finals))
             for key in differing:
                 values = [s.store.get(key, _MISSING) for s in finals]
+                if ".@" in key:
+                    merged.store[key] = _join_bytes(values, why)   # (R90) a union / bit-field object's byte
+                    continue
                 first = values[0]
                 if first is _MISSING or isinstance(first, Unknown) or any(
                         v is _MISSING or isinstance(v, Unknown) or v != first for v in values[1:]):
@@ -4167,6 +4927,14 @@ def _observe_value(interp, state, name, reads=None, escaped=None):
         key = f"{base}[{int(index)}]"
         return _unwritten(lambda: interp.read_target(state, ("key", key, a["type"], a.get("volatile", False))).v, key, key,
                           state, interp, reads, escaped)
+    storage = interp.storage_observable(base) if index is None and hasattr(interp, "storage_observable") else None
+    if isinstance(storage, Unknown):
+        return storage   # (R90) a union / bit-field object the model gives no value of here — why
+    if storage is not None:
+        # (R90) a member of a union / bit-field object (the object itself: its whole-object member) — from its bits
+        key = f"{storage[0]}.{storage[3]}"
+        return _unwritten(lambda: interp.read_storage(state, key, storage[:3], observe=True, name=base).v, key, base,
+                          state, interp, reads, escaped)
     if base in (interp.scope.get("unresolved_globals") or {}):
         return Unknown(f"global_unmodeled:{base}:{interp.scope['unresolved_globals'][base]}")
     return Unknown("observable_not_a_modeled_object:" + base)
@@ -4203,6 +4971,9 @@ def _object_prefixes(base):
 
 def _written(state, name, interp=None):
     key = str(name).strip()
+    storage = interp.storage_observable(key) if interp is not None and hasattr(interp, "storage_observable") else None
+    if storage is not None and not isinstance(storage, Unknown):
+        return interp.storage_written(state, storage)   # (R90) a bit it occupies, through any member of the object
     pointee = _pointee_key(interp, key) if interp is not None else None
     return (pointee[0] if pointee is not None else key) in state.store
 
@@ -4353,6 +5124,7 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
     results = []
     for inputs, outs in zip(sequences_inputs, outputs, strict=True):
         record = dict(base)
+        interp = None
         try:
             interp = _Interp(fn, raw, scope, dict(inputs or {}), parser, shared)
             interp.function_name = str(unit.get("name") or "")
@@ -4369,6 +5141,14 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
             _every_path_undefined(finals)   # (R90 review C1)
             values = _final_outputs(interp, finals, outs)
             possible = sorted({k for s in finals for k in s.possible_ub})
+            if interp.storage_used:
+                record["assumptions"] = _storage_assumptions(record["assumptions"], interp)   # (R90)
+                record["storage_objects"] = sorted(interp.storage_used)
+                if interp.storage_volatile_reads:
+                    # (re-review W-N3) registers the run read as harness memory (`STORAGE_VOLATILE_ASSUMPTION`)
+                    record["storage_registers"] = sorted(interp.storage_volatile_reads)
+                if interp.polling_assumed:
+                    record["polling_loops_assumed"] = list(interp.polling_assumed)   # (R90 review W1)
             if interp.stubs_used:
                 record["assumptions"] = list(record["assumptions"]) + [
                     "stubbed by the sequence: " + ", ".join(
@@ -4452,6 +5232,9 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
                     record["written_error"] = f"oracle_exception:{type(exc).__name__}"
         except Unsupported as exc:
             record.update(status="unsupported", reason=str(exc), outputs={o: {"reason": str(exc)} for o in outs})
+            if interp is not None and interp.storage_used:
+                # (R90 re-review 4 W-R4-4) refused, but on the storage model: a UB-probe claim on it is not clang-checked
+                record["storage_objects"] = sorted(interp.storage_used)
         except Exception as exc:  # noqa: BLE001 — never raise into the generator; recorded as the reason below
             reason = f"oracle_exception:{type(exc).__name__}"
             record.update(status="unsupported", reason=reason, outputs={o: {"reason": reason} for o in outs})
@@ -4465,6 +5248,63 @@ def _every_path_undefined(finals):
     else { y = 20U / 0U; }`` is no run without undefined behaviour."""
     if finals and all(s.ub_proven for s in finals):
         raise Unsupported("undefined_behavior:" + finals[0].ub_proven)
+
+
+STORAGE_ASSUMPTION = (
+    "(R90) a union / bit-field object is one storage of its size every member reads and writes: members at their "
+    "offsets (a layout padding could change is not modeled), bit-fields allocated from the end of their unit the "
+    "bit-field allocation below names (a layout the header's NAME_MASK / NAME_BITNUM macros contradict is dropped), a "
+    "signed member that is no bit-field in two's complement; a value is given only where every byte order, bit-field "
+    "unit and allocation end kept gives the same one; a bit the run did not write holds the value the row sets for a member (or for the object, read as its "
+    "whole-object member) — two members the row sets that disagree on a bit leave it unknown; a write through a pointer "
+    "that may reach a register (one whose address is taken, offset to its neighbours) leaves every register unknown, "
+    "as does a callee the run does not interpret (it may wait on one; a sequence stub does not), and a register read "
+    "beside any call but a sequence stub's in one expression is refused as unsequenced")
+STORAGE_VOLATILE_ASSUMPTION = (
+    "(R90) a volatile union / bit-field object (a register) is memory in the test harness: it reads what the run "
+    "last wrote to it, else what the row sets — hardware does not change it during the run")
+STORAGE_POLLING_ASSUMPTION = (
+    "(R90) polling loop on a hardware flag assumed to terminate — the harness must stub or simulate the flag (under the "
+    "model the register keeps its value and the loop never ends): taken only where a value of the flag ends the loop "
+    "and a poll changes nothing else (body, update and condition — the state after it is the same after any number of "
+    "polls); after the loop the polled register is unknown")
+# (R90 re-review I-1) C11 6.2.6.1p7 — a store through a union member leaves the union's bytes that member does not cover
+#   unspecified; the model keeps what they held
+STORAGE_NARROW_ASSUMPTION = (
+    "(R90) a store through a union member narrower than its union leaves the union's other bytes holding what they "
+    "held (C11 6.2.6.1p7 leaves them unspecified) — read through a wider member")
+
+
+def _storage_assumptions(assumptions, interp):
+    """(R90) The record's assumptions with what its values on union / bit-field objects rest on (`STORAGE_ASSUMPTION`,
+    the byte order of each object's layout — review W2 —, the harness memory of registers, the polling loops assumed to
+    end — review W1). Never contradictory: the blanket "volatile reads are unknown" names its exceptions."""
+    used = sorted(interp.storage_used)
+    out = [a for a in assumptions]
+    layouts = [interp.storage_root(r, world=True) or {} for r in used]
+    bases = sorted({str(lay.get("byte_order_basis") or "none assumed") for lay in layouts})
+    # (re-review W-N2) and the end of a unit bit-fields are allocated from
+    ends = sorted({str(lay.get("bit_order_basis") or "unrecorded") for lay in layouts})
+    out.append(STORAGE_ASSUMPTION + "; byte order: " + " / ".join(bases) + "; bit-field allocation: " + " / ".join(ends)
+               + ": " + ", ".join(used[:12]) + (f" (+{len(used) - 12})" if len(used) > 12 else ""))
+    if interp.storage_unspecified:
+        narrow = sorted(interp.storage_unspecified)
+        out.append(STORAGE_NARROW_ASSUMPTION + ": " + ", ".join(narrow[:12])
+                   + (f" (+{len(narrow) - 12})" if len(narrow) > 12 else ""))
+    if interp.storage_volatile_reads or interp.polling_assumed:
+        vol = sorted(interp.storage_volatile_reads)
+        exception = "registers (R90)" + (" and polled flags assumed to clear" if interp.polling_assumed else "")
+        out = [a.replace("do not change objects during the run (volatile reads are unknown)",
+                         "do not change objects during the run, except as stated for " + exception
+                         + " (other volatile reads are unknown)") for a in out]
+        if vol:
+            out.append(STORAGE_VOLATILE_ASSUMPTION + ": " + ", ".join(vol[:12])
+                       + (f" (+{len(vol) - 12})" if len(vol) > 12 else ""))
+    if interp.polling_assumed:
+        loops = list(dict.fromkeys(interp.polling_assumed))
+        out.append(STORAGE_POLLING_ASSUMPTION + f" — {len(loops)} loop(s): " + ", ".join(loops[:8])
+                   + (f" (+{len(loops) - 8})" if len(loops) > 8 else ""))
+    return out
 
 
 def _final_outputs(interp, finals, outs):
@@ -4754,6 +5594,10 @@ def observe_decisions(unit: dict[str, Any], vectors: list[dict[str, Any]],
                 # Undefined behaviour that depends on an unknown value may happen on this run *after* the decision (an
                 # observation with it before is ``undetermined``): disclosed, as for outputs.
                 record["possible_undefined_behavior"] = possible
+            if interp.storage_used:
+                # (R90 re-review 4 W-R4-4) the run rests on the union / bit-field storage model: a decision claim on it
+                #   is not one the clang checks can reproduce (`unchecked:storage_model`)
+                record["storage_objects"] = sorted(interp.storage_used)
         except Unsupported as exc:
             record.update(status="unsupported", reason=str(exc), steps=interp.steps if interp is not None else 0)
         except Exception as exc:  # noqa: BLE001 — never raise into the generator; recorded as the reason

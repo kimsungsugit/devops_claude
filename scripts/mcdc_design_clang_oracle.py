@@ -152,6 +152,8 @@ def _path_claims(unit, report):
                 expr = decision_claim(index, pair[f"truth_{side}"], pair[f"observed_{side}"], pair[f"decision_{side}"])
                 claims.append({"unit": unit, "inputs": pair[f"inputs_{side}"], "outputs": {expr: 1},
                                "possible_ub": pair.get(f"possible_ub_{side}") or [],
+                               # (R90 re-review 4 W-R4-4) a run on the storage model: `unchecked:storage_model`
+                               "storage_objects": pair.get(f"storage_objects_{side}") or [],
                                "instrument": instrument, "label": f"{report['function']}:{pair['pair_id']}:{side}",
                                "stub": bool(pair.get("stub_inputs"))})
     return claims

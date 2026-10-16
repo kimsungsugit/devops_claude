@@ -31,7 +31,9 @@ _BUDGET_REASONS = frozenset({"execution_budget", "constant_condition_loop_unfini
 def _refused_for_budget(sub: dict[str, Any]) -> bool:
     """Every cell of the sub-case is unknown because the whole run exceeded the oracle's step budget."""
     evidence = sub.get("expected_evidence") or {}
-    return bool(evidence) and all(ev.get("status") != "derived" and str(ev.get("reason") or "") in _BUDGET_REASONS
+    # (R90 re-review 3 W-R3-3) by the reason's head: ``execution_budget:polling_way_out_search`` says what spent it
+    return bool(evidence) and all(ev.get("status") != "derived"
+                                  and str(ev.get("reason") or "").split(":", 1)[0] in _BUDGET_REASONS
                                   for ev in evidence.values())
 
 
@@ -78,9 +80,11 @@ class CalleeProvider:
         roots: dict[tuple[str, str], set[str]] = {}
         modeled_roots: set[tuple[str, str]] = set()
         for unit, scope in scopes.items():
-            for name, rec in (scope.get("struct_globals") or {}).items():
-                roots.setdefault((build_of(unit), name), set()).add(unit if rec.get("static") else "")
-                modeled_roots.add((build_of(unit), name))
+            # (R90) a union / bit-field object the storage model may lay out is a root of members (``REG.Bits.TEN``) too
+            for table in (scope.get("struct_globals") or {}, scope.get("storage_candidates") or {}):
+                for name, rec in table.items():
+                    roots.setdefault((build_of(unit), name), set()).add(unit if rec.get("static") else "")
+                    modeled_roots.add((build_of(unit), name))
             for name, static in (scope.get("unmodeled_object_linkage") or {}).items():
                 # (review round 2 C3') an external-linkage object counts too (owner "": one object for every unit)
                 roots.setdefault((build_of(unit), name), set()).add(unit if static else "")
@@ -307,6 +311,14 @@ def attach_integration_evidence(itcs: list[dict[str, Any]], report_data: dict[st
                 if ev.get("status") == "derived":
                     derived_here += 1
                     stats["derived"] += 1
+                    if ev.get("polling_loops_assumed"):
+                        # (R90 review W1) the value rests on a polling loop on a register flag assumed to end
+                        stats["derived_on_assumed_polling_exit"] = stats.get("derived_on_assumed_polling_exit", 0) + 1
+                    # (R90 re-review W-N3) ... on the union / bit-field storage model, on a register read as memory
+                    if ev.get("storage_objects"):
+                        stats["derived_on_storage_model"] = stats.get("derived_on_storage_model", 0) + 1
+                    if ev.get("storage_registers"):
+                        stats["derived_on_register_memory"] = stats.get("derived_on_register_memory", 0) + 1
                     stats["derived_unchanged_input" if ev.get("basis") == "unchanged_input" else "derived_assigned"] += 1
                     if ev.get("possible_ub_on_forked_path"):
                         stats["derived_with_possible_ub_on_forked_path"] += 1

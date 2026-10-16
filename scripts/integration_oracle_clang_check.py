@@ -88,6 +88,7 @@ from scripts.source_oracle_clang_check import (  # noqa: E402
     _IDENT,
     _KEYWORDS,
     _REAL_EVAL_ERROR,
+    _STORAGE_MARK,
     _base_type,
     _disclosure_explains,
     _fill_for,
@@ -1171,6 +1172,10 @@ def _read_claims(xlsm):
                             # (review R3 W3-1) and the ones it read as effects at some call site (None: not recorded)
                             "effects_only": set() if "Callees effects-only" in header else None}
         grouped[key]["outputs"][str(d["Observable"])] = int(d["Expected"])
+        if _STORAGE_MARK in str(d.get("Assumptions") or ""):
+            # (R90 review W-R3-4) the run used the union / bit-field storage model — this harness has no union
+            #   overlap either (a register object it cannot place is not compiled): not checked here
+            grouped[key]["storage_model"] = True
         for field, column in (("interpreted", "Callees interpreted"), ("effects_only", "Callees effects-only")):
             if grouped[key][field] is not None:
                 grouped[key][field] |= {c.strip() for c in str(d.get(column) or "").split(",") if c.strip()}
@@ -1235,7 +1240,11 @@ def main(argv=None) -> int:
     by_norm = {os.path.normcase(os.path.abspath(p)): p for p in scopes}   # the sheet's path as the OS names it (I8)
     by_entry: dict[tuple, list] = {}
     skipped = Counter(unreadable)
+    storage_model = 0
     for (path, entry, tc, case), g in grouped.items():
+        if g.get("storage_model"):
+            storage_model += len(g["outputs"])   # (R90 review W-R3-4) ``unchecked:storage_model``
+            continue
         real = by_norm.get(os.path.normcase(os.path.abspath(path)))
         if real is None:
             skipped["source_missing"] += len(g["outputs"])
@@ -1263,6 +1272,10 @@ def main(argv=None) -> int:
               "claims": 0, "verdicts": Counter(), "unchecked_reasons": Counter(), "group_failures": Counter(),
               "mismatches": [], "eval_errors": [], "cut": Counter(), "cut_messages": Counter(), "unbound": Counter(),
               "limit_notes": Counter(), "unsequenced_functions": Counter(), "entries": {}, "skipped": dict(skipped)}
+    if storage_model:
+        report["claims"] += storage_model
+        report["verdicts"]["unchecked"] += storage_model
+        report["unchecked_reasons"]["storage_model"] += storage_model
     done, groups_checked, canary_failures = 0, 0, 0
     # (thread pool) the work is clang subprocesses; the Python side builds under `_PY_LOCK`
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:

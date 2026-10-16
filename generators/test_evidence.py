@@ -88,6 +88,15 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
                 if evaluated.get("observed_only_pointees"):
                     # (R81 review I-R2-3) pointees set up only because the row observes them (it sets no value there)
                     item["observed_only_pointees"] = list(evaluated["observed_only_pointees"])
+                if evaluated.get("polling_loops_assumed"):
+                    # (R90 review W1) polling loops on a register flag the run assumed to end (the harness must too)
+                    item["polling_loops_assumed"] = list(evaluated["polling_loops_assumed"])
+                if evaluated.get("storage_objects"):
+                    # (R90 re-review W-N3) union / bit-field objects the run read or wrote through the storage model,
+                    #   and the registers among them it read as harness memory
+                    item["storage_objects"] = list(evaluated["storage_objects"])
+                if evaluated.get("storage_registers"):
+                    item["storage_registers"] = list(evaluated["storage_registers"])
                 if (evaluated.get("interprocedural") or {}).get("inlined"):
                     # (R16) the value rests on these callees' interpreted bodies (integration reading, not stubs)
                     item["callees_interpreted"] = sorted(evaluated["interprocedural"]["inlined"])
@@ -152,7 +161,12 @@ def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, in
               # (R83) derived in a function that names an exact-width typedef read past its `#ifndef` guard
               "derived_on_exact_width_guard": 0,
               # (R90 review W1) derived in a run with undefined behaviour proven on a path an unknown branch chose
-              "derived_with_possible_ub_on_forked_path": 0}
+              "derived_with_possible_ub_on_forked_path": 0,
+              # (R90 review W1) derived on a run that assumed a polling loop on a register flag ends
+              "derived_on_assumed_polling_exit": 0,
+              # (R90 re-review W-N3) derived on a run that used the union / bit-field storage model — and that read a
+              #   register as harness memory (row-level upper bounds, like the others)
+              "derived_on_storage_model": 0, "derived_on_register_memory": 0}
     for seq in sequences:
         for var in set(seq.get("expected") or {}) | set(seq.get("expected_evidence") or {}):
             item = seq.get("expected_evidence", {}).get(var) or {}
@@ -173,4 +187,10 @@ def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, in
                 counts["derived_with_possible_ub_on_forked_path"] += 1
             if status == "derived" and item.get("observed_only_pointees"):
                 counts["derived_on_observed_only_pointee"] += 1
+            if status == "derived" and item.get("polling_loops_assumed"):
+                counts["derived_on_assumed_polling_exit"] += 1
+            if status == "derived" and item.get("storage_objects"):
+                counts["derived_on_storage_model"] += 1
+            if status == "derived" and item.get("storage_registers"):
+                counts["derived_on_register_memory"] += 1
     return counts

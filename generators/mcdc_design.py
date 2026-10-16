@@ -2440,7 +2440,8 @@ def _path_design(unit, report, candidates, row_names, domains, scope, selected, 
                     tallies[index][s["state"] + (":" + s["reason"].split(":", 1)[0] if s.get("reason") else "")] += 1
                     if s["state"] == "evaluated":
                         for inst in s["instances"]:
-                            pairers[index].add(v, inst, r.get("possible_undefined_behavior") or [])
+                            pairers[index].add(v, inst, r.get("possible_undefined_behavior") or [],
+                                               r.get("storage_objects") or [])
         if len(added) < len(todo):
             # (R71 review W1) the budget stopped this call before every vector ran (todo: distinct, none cached)
             left_out[0] = True
@@ -2817,10 +2818,13 @@ class _Pairer:
     def complete(self):
         return len(self.pairs) == self.n
 
-    def add(self, inputs, inst, possible_ub=()):
+    def add(self, inputs, inst, possible_ub=(), storage_objects=()):
         # ``possible_ub``: undefined behaviour the run may have *after* the decision (disclosed, as for outputs)
         row = {"inputs": inputs, "truth": inst["truth"], "decision": inst["decision"], "observed": inst["observed"],
                "possible_ub": list(possible_ub)}
+        if storage_objects:
+            # (R90 re-review 4 W-R4-4) the run rests on the union / bit-field storage model (``storage_objects_a/b``)
+            row["storage_objects"] = list(storage_objects)
         pattern = tuple(t if o else "*" for t, o in zip(inst["truth"], inst["observed"], strict=True))
         for i in range(self.n):
             if i in self.pairs or not inst["observed"][i]:
