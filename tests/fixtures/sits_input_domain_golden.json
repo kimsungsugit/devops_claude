@@ -1,0 +1,3681 @@
+{
+ "flows": [
+  {
+   "call_chain": "Ap_Run -> Drv_Write -> Io_Set -> Ap_Help",
+   "cross_calls": [
+    "Drv_Write"
+   ],
+   "entry_fn": "Ap_Run",
+   "expected_raws": [
+    "[OUT] return U8",
+    "[INOUT] UINT8 * pData (idx: 1) (range: 0x00000000 ~ 0xFFFFFFFF)",
+    "[OUT] u16g_Out",
+    "[INDIRECT] g_Mode",
+    "[INDIRECT] g_DoorState",
+    "[IN] u8g_Help",
+    "[IN] s16g_Pos"
+   ],
+   "expected_vars": [
+    "return",
+    "pData",
+    "u16g_Out",
+    "g_Mode",
+    "g_DoorState",
+    "u8g_Help",
+    "s16g_Pos"
+   ],
+   "functions": [
+    "Ap_Run",
+    "Drv_Write",
+    "Io_Set",
+    "Ap_Help"
+   ],
+   "indirect_types": [
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "SwUDS",
+     "values": [
+      34,
+      65
+     ]
+    },
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "SwUDS",
+     "values": [
+      0,
+      2,
+      4
+     ]
+    }
+   ],
+   "indirect_vars": [
+    "g_Mode",
+    "g_DoorState"
+   ],
+   "input_domain_sources": [
+    "declared_type",
+    "declared_type",
+    "unknown",
+    "documented_range",
+    "documented_range",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "unknown",
+    "unknown",
+    "documented_range",
+    "declared_type",
+    "documented_range",
+    "declared_type",
+    "documented_range"
+   ],
+   "input_raws": [
+    "[IN] UINT8 ReProg_Opt",
+    "[IN] e_CODE e_Err",
+    "[INOUT] UINT8 * pData (idx: 1) (range: 0x00000000 ~ 0xFFFFFFFF)",
+    "[IN] u8g_Speed",
+    "[IN] g_DoorState",
+    "[IN] REG_FSTAT.Bits.CCIF",
+    "[INOUT] BackupArray (size: 2) (idx: ( ( ( U32 )AddrIn ) %0x04U ) / 2U)",
+    "[INOUT] BackupArray (size: 2) (idx: ( ( ( U32 )AddrIn ) %0x04U ) / 2U)",
+    "[IN] s_State",
+    "[IN] g_ptr",
+    "[IN] REG_FSTAT",
+    "[IN] g_Unk",
+    "[IN] u8g_Help",
+    "[INDIRECT] g_Mode",
+    "[IN] u16g_Out",
+    "[IN] s16g_Pos"
+   ],
+   "input_types": [
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "parameter_declaration",
+     "values": [
+      0,
+      1,
+      2,
+      15
+     ]
+    },
+    null,
+    {
+     "hi": 255,
+     "kind": "documented",
+     "lo": 0,
+     "source": "SwUDS",
+     "type_known": true,
+     "values": null,
+     "vhi": 20,
+     "vlo": 10
+    },
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "SwUDS",
+     "values": [
+      0,
+      2,
+      4
+     ]
+    },
+    {
+     "bits": 1,
+     "hi": 1,
+     "kind": "range",
+     "lo": 0,
+     "source": "member_declaration"
+    },
+    {
+     "key": "uint16",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint16",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "enum_values_unknown": true,
+     "hi": 127,
+     "kind": "range",
+     "lo": 0,
+     "source": "global_declaration"
+    },
+    null,
+    null,
+    {
+     "hi": 3,
+     "kind": "documented",
+     "lo": 0,
+     "source": "SwUDS",
+     "type_known": false,
+     "values": null,
+     "vhi": 3,
+     "vlo": 0
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "SwUDS",
+     "values": [
+      34,
+      65
+     ]
+    },
+    {
+     "key": "uint16",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "hi": 32767,
+     "kind": "documented",
+     "lo": -32768,
+     "source": "SwUDS",
+     "type_known": true,
+     "values": null,
+     "vhi": 2672,
+     "vlo": 2253
+    }
+   ],
+   "input_vars": [
+    "ReProg_Opt",
+    "e_Err",
+    "pData",
+    "u8g_Speed",
+    "g_DoorState",
+    "REG_FSTAT.Bits.CCIF",
+    "BackupArray[0]",
+    "BackupArray[1]",
+    "s_State",
+    "g_ptr",
+    "REG_FSTAT",
+    "g_Unk",
+    "u8g_Help",
+    "g_Mode",
+    "u16g_Out",
+    "s16g_Pos"
+   ],
+   "module_name": "Ap"
+  },
+  {
+   "call_chain": "Big_Entry -> Drv_Write -> Io_Set",
+   "cross_calls": [
+    "Drv_Write"
+   ],
+   "entry_fn": "Big_Entry",
+   "expected_raws": [
+    "[OUT] u8g_O00",
+    "[OUT] u8g_O01",
+    "[OUT] u8g_O02",
+    "[OUT] u8g_O03",
+    "[OUT] u8g_O04",
+    "[OUT] u8g_O05",
+    "[OUT] u8g_O06",
+    "[OUT] u8g_O07",
+    "[OUT] u8g_O08",
+    "[OUT] u8g_O09",
+    "[OUT] u16g_Out",
+    "[INDIRECT] g_Mode",
+    "[INDIRECT] g_DoorState",
+    "[IN] s16g_Pos"
+   ],
+   "expected_vars": [
+    "u8g_O00",
+    "u8g_O01",
+    "u8g_O02",
+    "u8g_O03",
+    "u8g_O04",
+    "u8g_O05",
+    "u8g_O06",
+    "u8g_O07",
+    "u8g_O08",
+    "u8g_O09",
+    "u16g_Out",
+    "g_Mode",
+    "g_DoorState",
+    "s16g_Pos"
+   ],
+   "functions": [
+    "Big_Entry",
+    "Drv_Write",
+    "Io_Set"
+   ],
+   "indirect_types": [
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "SwUDS",
+     "values": [
+      34,
+      65
+     ]
+    },
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "global_declaration",
+     "values": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+     ]
+    }
+   ],
+   "indirect_vars": [
+    "g_Mode",
+    "g_DoorState"
+   ],
+   "input_domain_sources": [
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "declared_type",
+    "documented_range",
+    "declared_type",
+    "declared_type",
+    "documented_range"
+   ],
+   "input_raws": [
+    "[IN] U8 p00",
+    "[IN] U8 p01",
+    "[IN] U8 p02",
+    "[IN] U8 p03",
+    "[IN] U8 p04",
+    "[IN] U8 p05",
+    "[IN] U8 p06",
+    "[IN] U8 p07",
+    "[IN] U8 p08",
+    "[IN] U8 p09",
+    "[IN] U8 p10",
+    "[IN] U8 p11",
+    "[IN] U8 p12",
+    "[IN] U8 p13",
+    "[IN] U8 p14",
+    "[IN] U8 p15",
+    "[IN] U8 p16",
+    "[IN] U8 p17",
+    "[IN] U8 p18",
+    "[IN] U8 p19",
+    "[IN] u8g_B00",
+    "[IN] u8g_B01",
+    "[IN] u8g_B02",
+    "[IN] u8g_B03",
+    "[IN] u8g_B04",
+    "[IN] u8g_B05",
+    "[IN] u8g_B06",
+    "[IN] u8g_B07",
+    "[IN] u8g_B08",
+    "[IN] u8g_B09",
+    "[IN] u8g_B10",
+    "[IN] u8g_B11",
+    "[IN] u8g_B12",
+    "[IN] u8g_B13",
+    "[IN] u8g_B14",
+    "[INDIRECT] g_Mode",
+    "[INDIRECT] g_DoorState",
+    "[IN] u16g_Out",
+    "[IN] s16g_Pos"
+   ],
+   "input_types": [
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "SwUDS",
+     "values": [
+      34,
+      65
+     ]
+    },
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "global_declaration",
+     "values": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+     ]
+    },
+    {
+     "key": "uint16",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "hi": 32767,
+     "kind": "documented",
+     "lo": -32768,
+     "source": "SwUDS",
+     "type_known": true,
+     "values": null,
+     "vhi": 2672,
+     "vlo": 2253
+    }
+   ],
+   "input_vars": [
+    "p00",
+    "p01",
+    "p02",
+    "p03",
+    "p04",
+    "p05",
+    "p06",
+    "p07",
+    "p08",
+    "p09",
+    "p10",
+    "p11",
+    "p12",
+    "p13",
+    "p14",
+    "p15",
+    "p16",
+    "p17",
+    "p18",
+    "p19",
+    "u8g_B00",
+    "u8g_B01",
+    "u8g_B02",
+    "u8g_B03",
+    "u8g_B04",
+    "u8g_B05",
+    "u8g_B06",
+    "u8g_B07",
+    "u8g_B08",
+    "u8g_B09",
+    "u8g_B10",
+    "u8g_B11",
+    "u8g_B12",
+    "u8g_B13",
+    "u8g_B14",
+    "g_Mode",
+    "g_DoorState",
+    "u16g_Out",
+    "s16g_Pos"
+   ],
+   "module_name": "Big"
+  },
+  {
+   "call_chain": "Drv_Write -> Io_Set",
+   "cross_calls": [
+    "Io_Set"
+   ],
+   "entry_fn": "Drv_Write",
+   "expected_raws": [
+    "[OUT] u16g_Out",
+    "[IN] s16g_Pos"
+   ],
+   "expected_vars": [
+    "u16g_Out",
+    "s16g_Pos"
+   ],
+   "functions": [
+    "Drv_Write",
+    "Io_Set"
+   ],
+   "indirect_types": [
+    {
+     "hi": 32767,
+     "kind": "documented",
+     "lo": -32768,
+     "source": "SwUDS",
+     "type_known": true,
+     "values": null,
+     "vhi": 2672,
+     "vlo": 2253
+    }
+   ],
+   "indirect_vars": [
+    "s16g_Pos"
+   ],
+   "input_domain_sources": [
+    "documented_range",
+    "documented_range",
+    "declared_type",
+    "declared_type",
+    "documented_range"
+   ],
+   "input_raws": [
+    "[IN] U16 u16_val",
+    "[INDIRECT] g_Mode",
+    "[INDIRECT] g_DoorState",
+    "[IN] u16g_Out",
+    "[IN] s16g_Pos"
+   ],
+   "input_types": [
+    {
+     "hi": 65535,
+     "kind": "documented",
+     "lo": 0,
+     "source": "SwUDS",
+     "type_known": true,
+     "values": null,
+     "vhi": 200,
+     "vlo": 100
+    },
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "SwUDS",
+     "values": [
+      34,
+      65
+     ]
+    },
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "global_declaration",
+     "values": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+     ]
+    },
+    {
+     "key": "uint16",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "hi": 32767,
+     "kind": "documented",
+     "lo": -32768,
+     "source": "SwUDS",
+     "type_known": true,
+     "values": null,
+     "vhi": 2672,
+     "vlo": 2253
+    }
+   ],
+   "input_vars": [
+    "u16_val",
+    "g_Mode",
+    "g_DoorState",
+    "u16g_Out",
+    "s16g_Pos"
+   ],
+   "module_name": "Drv"
+  },
+  {
+   "call_chain": "Io_Main -> Drv_Write -> Io_Set",
+   "cross_calls": [
+    "Drv_Write"
+   ],
+   "entry_fn": "Io_Main",
+   "expected_raws": [
+    "[OUT] u16g_Out",
+    "[INDIRECT] g_Mode",
+    "[INDIRECT] g_DoorState",
+    "[IN] s16g_Pos"
+   ],
+   "expected_vars": [
+    "u16g_Out",
+    "g_Mode",
+    "g_DoorState",
+    "s16g_Pos"
+   ],
+   "functions": [
+    "Io_Main",
+    "Drv_Write",
+    "Io_Set"
+   ],
+   "indirect_types": [
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "SwUDS",
+     "values": [
+      34,
+      65
+     ]
+    },
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "global_declaration",
+     "values": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+     ]
+    }
+   ],
+   "indirect_vars": [
+    "g_Mode",
+    "g_DoorState"
+   ],
+   "input_domain_sources": [
+    "documented_range",
+    "documented_range",
+    "declared_type",
+    "declared_type",
+    "documented_range"
+   ],
+   "input_raws": [
+    "[IN] U16 u16_val",
+    "[INDIRECT] g_Mode",
+    "[INDIRECT] g_DoorState",
+    "[IN] u16g_Out",
+    "[IN] s16g_Pos"
+   ],
+   "input_types": [
+    {
+     "hi": 65535,
+     "kind": "documented",
+     "lo": 0,
+     "source": "SwUDS",
+     "type_known": true,
+     "values": null,
+     "vhi": 200,
+     "vlo": 100
+    },
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "SwUDS",
+     "values": [
+      34,
+      65
+     ]
+    },
+    {
+     "hi": 127,
+     "kind": "enum",
+     "lo": 0,
+     "source": "global_declaration",
+     "values": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+     ]
+    },
+    {
+     "key": "uint16",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    {
+     "hi": 32767,
+     "kind": "documented",
+     "lo": -32768,
+     "source": "SwUDS",
+     "type_known": true,
+     "values": null,
+     "vhi": 2672,
+     "vlo": 2253
+    }
+   ],
+   "input_vars": [
+    "u16_val",
+    "g_Mode",
+    "g_DoorState",
+    "u16g_Out",
+    "s16g_Pos"
+   ],
+   "module_name": "IoMain"
+  },
+  {
+   "call_chain": "Odd_Entry -> Odd_Drv",
+   "cross_calls": [
+    "Odd_Drv"
+   ],
+   "entry_fn": "Odd_Entry",
+   "expected_raws": [
+    "[INDIRECT] g_ptr2",
+    "[INDIRECT] REG_ODD",
+    "[INDIRECT] f32g_Gain2"
+   ],
+   "expected_vars": [
+    "g_ptr2",
+    "REG_ODD",
+    "f32g_Gain2"
+   ],
+   "functions": [
+    "Odd_Entry",
+    "Odd_Drv"
+   ],
+   "indirect_types": [
+    null,
+    {
+     "hi": 7,
+     "kind": "documented",
+     "lo": 0,
+     "source": "SwUDS",
+     "type_known": false,
+     "values": null,
+     "vhi": 7,
+     "vlo": 0
+    },
+    {
+     "key": "float",
+     "kind": "table",
+     "source": "global_declaration"
+    }
+   ],
+   "indirect_vars": [
+    "g_ptr2",
+    "REG_ODD",
+    "f32g_Gain2"
+   ],
+   "input_domain_sources": [
+    "declared_type",
+    "unknown",
+    "unknown",
+    "declared_type",
+    "unknown",
+    "documented_range",
+    "declared_type"
+   ],
+   "input_raws": [
+    "[IN] U8 u8_odd",
+    "[IN] REG_FSTAT.Bits.NOPE",
+    "[IN] tl_status",
+    "[IN] f32g_Gain",
+    "[INDIRECT] g_ptr2",
+    "[INDIRECT] REG_ODD",
+    "[INDIRECT] f32g_Gain2"
+   ],
+   "input_types": [
+    {
+     "key": "uint8",
+     "kind": "table",
+     "source": "parameter_declaration"
+    },
+    null,
+    null,
+    {
+     "key": "float",
+     "kind": "table",
+     "source": "global_declaration"
+    },
+    null,
+    {
+     "hi": 7,
+     "kind": "documented",
+     "lo": 0,
+     "source": "SwUDS",
+     "type_known": false,
+     "values": null,
+     "vhi": 7,
+     "vlo": 0
+    },
+    {
+     "key": "float",
+     "kind": "table",
+     "source": "global_declaration"
+    }
+   ],
+   "input_vars": [
+    "u8_odd",
+    "REG_FSTAT.Bits.NOPE",
+    "tl_status",
+    "f32g_Gain",
+    "g_ptr2",
+    "REG_ODD",
+    "f32g_Gain2"
+   ],
+   "module_name": "Odd"
+  }
+ ],
+ "itcs": [
+  {
+   "entry_fn": "Ap_Run",
+   "expected_vars": [
+    "return",
+    "pData",
+    "u16g_Out",
+    "g_Mode",
+    "g_DoorState",
+    "u8g_Help",
+    "s16g_Pos"
+   ],
+   "gen_method": "ABV, AEC",
+   "input_vars": [
+    "ReProg_Opt",
+    "e_Err",
+    "pData",
+    "u8g_Speed",
+    "g_DoorState",
+    "REG_FSTAT.Bits.CCIF",
+    "BackupArray[0]",
+    "BackupArray[1]",
+    "s_State",
+    "g_ptr",
+    "REG_FSTAT",
+    "g_Unk",
+    "u8g_Help",
+    "g_Mode",
+    "u16g_Out",
+    "s16g_Pos"
+   ],
+   "sub_cases": [
+    {
+     "case_label": "1 [EC1:무효-하한]",
+     "case_num": 1,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 1,
+      "BackupArray[1]": 1,
+      "REG_FSTAT": -1,
+      "REG_FSTAT.Bits.CCIF": 1,
+      "ReProg_Opt": 1,
+      "e_Err": 3,
+      "g_DoorState": 1,
+      "g_Mode": 33,
+      "g_Unk": 1,
+      "g_ptr": -1,
+      "pData": -1,
+      "s16g_Pos": 2252,
+      "s_State": 1,
+      "u16g_Out": 1,
+      "u8g_Help": 1,
+      "u8g_Speed": 9
+     },
+     "precondition": "1",
+     "type_bounded": [
+      "ReProg_Opt",
+      "e_Err",
+      "g_DoorState",
+      "REG_FSTAT.Bits.CCIF",
+      "BackupArray[0]",
+      "BackupArray[1]",
+      "s_State",
+      "g_Unk",
+      "u8g_Help",
+      "u16g_Out"
+     ],
+     "type_bounded_gap": [
+      "e_Err",
+      "g_DoorState"
+     ]
+    },
+    {
+     "case_label": "2 [EC2:유효-하한]",
+     "case_num": 2,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 0,
+      "BackupArray[1]": 0,
+      "REG_FSTAT": 0,
+      "REG_FSTAT.Bits.CCIF": 0,
+      "ReProg_Opt": 0,
+      "e_Err": 0,
+      "g_DoorState": 0,
+      "g_Mode": 34,
+      "g_Unk": 0,
+      "g_ptr": 0,
+      "pData": 0,
+      "s16g_Pos": 2253,
+      "s_State": 0,
+      "u16g_Out": 0,
+      "u8g_Help": 0,
+      "u8g_Speed": 10
+     },
+     "precondition": "2"
+    },
+    {
+     "case_label": "3 [EC3:유효-정상-L]",
+     "case_num": 3,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 16383,
+      "BackupArray[1]": 16383,
+      "REG_FSTAT": 63,
+      "REG_FSTAT.Bits.CCIF": 0,
+      "ReProg_Opt": 63,
+      "e_Err": 1,
+      "g_DoorState": 0,
+      "g_Mode": 34,
+      "g_Unk": 0,
+      "g_ptr": 63,
+      "pData": 63,
+      "s16g_Pos": 2357,
+      "s_State": 31,
+      "u16g_Out": 16383,
+      "u8g_Help": 63,
+      "u8g_Speed": 12
+     },
+     "precondition": "3"
+    },
+    {
+     "case_label": "4 [EC4:유효-중간]",
+     "case_num": 4,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 32767,
+      "BackupArray[1]": 32767,
+      "REG_FSTAT": 127,
+      "REG_FSTAT.Bits.CCIF": 0,
+      "ReProg_Opt": 127,
+      "e_Err": 2,
+      "g_DoorState": 2,
+      "g_Mode": 65,
+      "g_Unk": 1,
+      "g_ptr": 127,
+      "pData": 127,
+      "s16g_Pos": 2462,
+      "s_State": 63,
+      "u16g_Out": 32767,
+      "u8g_Help": 127,
+      "u8g_Speed": 15
+     },
+     "precondition": "4"
+    },
+    {
+     "case_label": "5 [EC5:유효-정상-H]",
+     "case_num": 5,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 49151,
+      "BackupArray[1]": 49151,
+      "REG_FSTAT": 191,
+      "REG_FSTAT.Bits.CCIF": 0,
+      "ReProg_Opt": 191,
+      "e_Err": 15,
+      "g_DoorState": 4,
+      "g_Mode": 65,
+      "g_Unk": 2,
+      "g_ptr": 191,
+      "pData": 191,
+      "s16g_Pos": 2567,
+      "s_State": 95,
+      "u16g_Out": 49151,
+      "u8g_Help": 191,
+      "u8g_Speed": 17
+     },
+     "precondition": "5"
+    },
+    {
+     "case_label": "6 [EC6:유효-상한]",
+     "case_num": 6,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 65535,
+      "BackupArray[1]": 65535,
+      "REG_FSTAT": 255,
+      "REG_FSTAT.Bits.CCIF": 1,
+      "ReProg_Opt": 255,
+      "e_Err": 15,
+      "g_DoorState": 4,
+      "g_Mode": 65,
+      "g_Unk": 3,
+      "g_ptr": 255,
+      "pData": 255,
+      "s16g_Pos": 2672,
+      "s_State": 127,
+      "u16g_Out": 65535,
+      "u8g_Help": 255,
+      "u8g_Speed": 20
+     },
+     "precondition": "6"
+    },
+    {
+     "case_label": "7 [EC7:무효-상한]",
+     "case_num": 7,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 65534,
+      "BackupArray[1]": 65534,
+      "REG_FSTAT": 256,
+      "REG_FSTAT.Bits.CCIF": 0,
+      "ReProg_Opt": 254,
+      "e_Err": 16,
+      "g_DoorState": 5,
+      "g_Mode": 66,
+      "g_Unk": 2,
+      "g_ptr": 256,
+      "pData": 256,
+      "s16g_Pos": 2673,
+      "s_State": 126,
+      "u16g_Out": 65534,
+      "u8g_Help": 254,
+      "u8g_Speed": 21
+     },
+     "precondition": "7",
+     "type_bounded": [
+      "ReProg_Opt",
+      "REG_FSTAT.Bits.CCIF",
+      "BackupArray[0]",
+      "BackupArray[1]",
+      "s_State",
+      "g_Unk",
+      "u8g_Help",
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "COND_1 [ReProg_Opt=최솟값]",
+     "case_num": 8,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 32767,
+      "BackupArray[1]": 32767,
+      "REG_FSTAT": 127,
+      "REG_FSTAT.Bits.CCIF": 0,
+      "ReProg_Opt": 0,
+      "e_Err": 2,
+      "g_DoorState": 2,
+      "g_Mode": 65,
+      "g_Unk": 1,
+      "g_ptr": 127,
+      "pData": 127,
+      "s16g_Pos": 2462,
+      "s_State": 63,
+      "u16g_Out": 32767,
+      "u8g_Help": 127,
+      "u8g_Speed": 15
+     },
+     "precondition": "조건 조합: ReProg_Opt=최솟값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_2 [e_Err=최댓값]",
+     "case_num": 9,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 32767,
+      "BackupArray[1]": 32767,
+      "REG_FSTAT": 127,
+      "REG_FSTAT.Bits.CCIF": 0,
+      "ReProg_Opt": 127,
+      "e_Err": 15,
+      "g_DoorState": 2,
+      "g_Mode": 65,
+      "g_Unk": 1,
+      "g_ptr": 127,
+      "pData": 127,
+      "s16g_Pos": 2462,
+      "s_State": 63,
+      "u16g_Out": 32767,
+      "u8g_Help": 127,
+      "u8g_Speed": 15
+     },
+     "precondition": "조건 조합: e_Err=최댓값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_3 [pData=최솟값]",
+     "case_num": 10,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 32767,
+      "BackupArray[1]": 32767,
+      "REG_FSTAT": 127,
+      "REG_FSTAT.Bits.CCIF": 0,
+      "ReProg_Opt": 127,
+      "e_Err": 2,
+      "g_DoorState": 2,
+      "g_Mode": 65,
+      "g_Unk": 1,
+      "g_ptr": 127,
+      "pData": 0,
+      "s16g_Pos": 2462,
+      "s_State": 63,
+      "u16g_Out": 32767,
+      "u8g_Help": 127,
+      "u8g_Speed": 15
+     },
+     "precondition": "조건 조합: pData=최솟값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_4 [u8g_Speed=최댓값]",
+     "case_num": 11,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 32767,
+      "BackupArray[1]": 32767,
+      "REG_FSTAT": 127,
+      "REG_FSTAT.Bits.CCIF": 0,
+      "ReProg_Opt": 127,
+      "e_Err": 2,
+      "g_DoorState": 2,
+      "g_Mode": 65,
+      "g_Unk": 1,
+      "g_ptr": 127,
+      "pData": 127,
+      "s16g_Pos": 2462,
+      "s_State": 63,
+      "u16g_Out": 32767,
+      "u8g_Help": 127,
+      "u8g_Speed": 20
+     },
+     "precondition": "조건 조합: u8g_Speed=최댓값, 나머지=중간값"
+    },
+    {
+     "case_label": "ERR_PROP_1 [하한 초과]",
+     "case_num": 12,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 1,
+      "BackupArray[1]": 1,
+      "REG_FSTAT": -1,
+      "REG_FSTAT.Bits.CCIF": 1,
+      "ReProg_Opt": 1,
+      "e_Err": 3,
+      "g_DoorState": 1,
+      "g_Mode": 33,
+      "g_Unk": 1,
+      "g_ptr": -1,
+      "pData": -1,
+      "s16g_Pos": 2252,
+      "s_State": 1,
+      "u16g_Out": 1,
+      "u8g_Help": 1,
+      "u8g_Speed": 9
+     },
+     "precondition": "에러 전파: 입력 하한 초과 → 콜체인 방어 처리 확인",
+     "type_bounded": [
+      "ReProg_Opt",
+      "e_Err",
+      "g_DoorState",
+      "REG_FSTAT.Bits.CCIF",
+      "BackupArray[0]",
+      "BackupArray[1]",
+      "s_State",
+      "g_Unk",
+      "u8g_Help",
+      "u16g_Out"
+     ],
+     "type_bounded_gap": [
+      "e_Err",
+      "g_DoorState"
+     ]
+    },
+    {
+     "case_label": "ERR_PROP_2 [상한 초과]",
+     "case_num": 13,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 65534,
+      "BackupArray[1]": 65534,
+      "REG_FSTAT": 256,
+      "REG_FSTAT.Bits.CCIF": 0,
+      "ReProg_Opt": 254,
+      "e_Err": 16,
+      "g_DoorState": 5,
+      "g_Mode": 66,
+      "g_Unk": 2,
+      "g_ptr": 256,
+      "pData": 256,
+      "s16g_Pos": 2673,
+      "s_State": 126,
+      "u16g_Out": 65534,
+      "u8g_Help": 254,
+      "u8g_Speed": 21
+     },
+     "precondition": "에러 전파: 입력 상한 초과 → 콜체인 방어 처리 확인",
+     "type_bounded": [
+      "ReProg_Opt",
+      "REG_FSTAT.Bits.CCIF",
+      "BackupArray[0]",
+      "BackupArray[1]",
+      "s_State",
+      "g_Unk",
+      "u8g_Help",
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "GLOBAL_1 [g_Mode=min]",
+     "case_num": 14,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 32767,
+      "BackupArray[1]": 32767,
+      "REG_FSTAT": 127,
+      "REG_FSTAT.Bits.CCIF": 0,
+      "ReProg_Opt": 127,
+      "e_Err": 2,
+      "g_DoorState": 2,
+      "g_Mode": 34,
+      "g_Unk": 1,
+      "g_ptr": 127,
+      "pData": 127,
+      "s16g_Pos": 2462,
+      "s_State": 63,
+      "u16g_Out": 32767,
+      "u8g_Help": 127,
+      "u8g_Speed": 15
+     },
+     "precondition": "글로벌 상태: g_Mode=최솟값, 입력=중간값 → 상태 의존 분기 커버"
+    },
+    {
+     "case_label": "GLOBAL_2 [g_DoorState=min]",
+     "case_num": 15,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "pData": "[검증 필요] unsupported_output_binding",
+      "return": "[검증 필요] authoritative_source_missing",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_Help": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "BackupArray[0]": 32767,
+      "BackupArray[1]": 32767,
+      "REG_FSTAT": 127,
+      "REG_FSTAT.Bits.CCIF": 0,
+      "ReProg_Opt": 127,
+      "e_Err": 2,
+      "g_DoorState": 0,
+      "g_Mode": 65,
+      "g_Unk": 1,
+      "g_ptr": 127,
+      "pData": 127,
+      "s16g_Pos": 2462,
+      "s_State": 63,
+      "u16g_Out": 32767,
+      "u8g_Help": 127,
+      "u8g_Speed": 15
+     },
+     "precondition": "글로벌 상태: g_DoorState=최솟값, 입력=중간값 → 상태 의존 분기 커버"
+    }
+   ],
+   "tc_id": "SwITC_01",
+   "test_method": "REQ, IFT"
+  },
+  {
+   "entry_fn": "Big_Entry",
+   "expected_vars": [
+    "u8g_O00",
+    "u8g_O01",
+    "u8g_O02",
+    "u8g_O03",
+    "u8g_O04",
+    "u8g_O05",
+    "u8g_O06",
+    "u8g_O07",
+    "u8g_O08",
+    "u8g_O09",
+    "u16g_Out",
+    "g_Mode",
+    "g_DoorState",
+    "s16g_Pos"
+   ],
+   "gen_method": "ABV, AEC",
+   "input_vars": [
+    "p00",
+    "p01",
+    "p02",
+    "p03",
+    "p04",
+    "p05",
+    "p06",
+    "p07",
+    "p08",
+    "p09",
+    "p10",
+    "p11",
+    "p12",
+    "p13",
+    "p14",
+    "p15",
+    "p16",
+    "p17",
+    "p18",
+    "p19",
+    "u8g_B00",
+    "u8g_B01",
+    "u8g_B02",
+    "u8g_B03",
+    "u8g_B04",
+    "u8g_B05",
+    "u8g_B06",
+    "u8g_B07",
+    "u8g_B08",
+    "u8g_B09",
+    "u8g_B10",
+    "u8g_B11",
+    "u8g_B12",
+    "u8g_B13",
+    "u8g_B14",
+    "g_Mode",
+    "g_DoorState",
+    "u16g_Out",
+    "s16g_Pos"
+   ],
+   "sub_cases": [
+    {
+     "case_label": "1 [EC1:무효-하한]",
+     "case_num": 1,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 1,
+      "g_Mode": 33,
+      "p00": 1,
+      "p01": 1,
+      "p02": 1,
+      "p03": 1,
+      "p04": 1,
+      "p05": 1,
+      "p06": 1,
+      "p07": 1,
+      "p08": 1,
+      "p09": 1,
+      "p10": 1,
+      "p11": 1,
+      "p12": 1,
+      "p13": 1,
+      "p14": 1,
+      "p15": 1,
+      "p16": 1,
+      "p17": 1,
+      "p18": 1,
+      "p19": 1,
+      "s16g_Pos": 2252,
+      "u16g_Out": 1,
+      "u8g_B00": 1,
+      "u8g_B01": 1,
+      "u8g_B02": 1,
+      "u8g_B03": 1,
+      "u8g_B04": 1,
+      "u8g_B05": 1,
+      "u8g_B06": 1,
+      "u8g_B07": 1,
+      "u8g_B08": 1,
+      "u8g_B09": 1,
+      "u8g_B10": 1,
+      "u8g_B11": 1,
+      "u8g_B12": 1,
+      "u8g_B13": 1,
+      "u8g_B14": 1
+     },
+     "precondition": "1",
+     "type_bounded": [
+      "p00",
+      "p01",
+      "p02",
+      "p03",
+      "p04",
+      "p05",
+      "p06",
+      "p07",
+      "p08",
+      "p09",
+      "p10",
+      "p11",
+      "p12",
+      "p13",
+      "p14",
+      "p15",
+      "p16",
+      "p17",
+      "p18",
+      "p19",
+      "u8g_B00",
+      "u8g_B01",
+      "u8g_B02",
+      "u8g_B03",
+      "u8g_B04",
+      "u8g_B05",
+      "u8g_B06",
+      "u8g_B07",
+      "u8g_B08",
+      "u8g_B09",
+      "u8g_B10",
+      "u8g_B11",
+      "u8g_B12",
+      "u8g_B13",
+      "u8g_B14",
+      "g_DoorState",
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "2 [EC2:유효-하한]",
+     "case_num": 2,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 0,
+      "g_Mode": 34,
+      "p00": 0,
+      "p01": 0,
+      "p02": 0,
+      "p03": 0,
+      "p04": 0,
+      "p05": 0,
+      "p06": 0,
+      "p07": 0,
+      "p08": 0,
+      "p09": 0,
+      "p10": 0,
+      "p11": 0,
+      "p12": 0,
+      "p13": 0,
+      "p14": 0,
+      "p15": 0,
+      "p16": 0,
+      "p17": 0,
+      "p18": 0,
+      "p19": 0,
+      "s16g_Pos": 2253,
+      "u16g_Out": 0,
+      "u8g_B00": 0,
+      "u8g_B01": 0,
+      "u8g_B02": 0,
+      "u8g_B03": 0,
+      "u8g_B04": 0,
+      "u8g_B05": 0,
+      "u8g_B06": 0,
+      "u8g_B07": 0,
+      "u8g_B08": 0,
+      "u8g_B09": 0,
+      "u8g_B10": 0,
+      "u8g_B11": 0,
+      "u8g_B12": 0,
+      "u8g_B13": 0,
+      "u8g_B14": 0
+     },
+     "precondition": "2"
+    },
+    {
+     "case_label": "3 [EC3:유효-정상-L]",
+     "case_num": 3,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 3,
+      "g_Mode": 34,
+      "p00": 63,
+      "p01": 63,
+      "p02": 63,
+      "p03": 63,
+      "p04": 63,
+      "p05": 63,
+      "p06": 63,
+      "p07": 63,
+      "p08": 63,
+      "p09": 63,
+      "p10": 63,
+      "p11": 63,
+      "p12": 63,
+      "p13": 63,
+      "p14": 63,
+      "p15": 63,
+      "p16": 63,
+      "p17": 63,
+      "p18": 63,
+      "p19": 63,
+      "s16g_Pos": 2357,
+      "u16g_Out": 16383,
+      "u8g_B00": 63,
+      "u8g_B01": 63,
+      "u8g_B02": 63,
+      "u8g_B03": 63,
+      "u8g_B04": 63,
+      "u8g_B05": 63,
+      "u8g_B06": 63,
+      "u8g_B07": 63,
+      "u8g_B08": 63,
+      "u8g_B09": 63,
+      "u8g_B10": 63,
+      "u8g_B11": 63,
+      "u8g_B12": 63,
+      "u8g_B13": 63,
+      "u8g_B14": 63
+     },
+     "precondition": "3"
+    },
+    {
+     "case_label": "4 [EC4:유효-중간]",
+     "case_num": 4,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "p00": 127,
+      "p01": 127,
+      "p02": 127,
+      "p03": 127,
+      "p04": 127,
+      "p05": 127,
+      "p06": 127,
+      "p07": 127,
+      "p08": 127,
+      "p09": 127,
+      "p10": 127,
+      "p11": 127,
+      "p12": 127,
+      "p13": 127,
+      "p14": 127,
+      "p15": 127,
+      "p16": 127,
+      "p17": 127,
+      "p18": 127,
+      "p19": 127,
+      "s16g_Pos": 2462,
+      "u16g_Out": 32767,
+      "u8g_B00": 127,
+      "u8g_B01": 127,
+      "u8g_B02": 127,
+      "u8g_B03": 127,
+      "u8g_B04": 127,
+      "u8g_B05": 127,
+      "u8g_B06": 127,
+      "u8g_B07": 127,
+      "u8g_B08": 127,
+      "u8g_B09": 127,
+      "u8g_B10": 127,
+      "u8g_B11": 127,
+      "u8g_B12": 127,
+      "u8g_B13": 127,
+      "u8g_B14": 127
+     },
+     "precondition": "4"
+    },
+    {
+     "case_label": "5 [EC5:유효-정상-H]",
+     "case_num": 5,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 9,
+      "g_Mode": 65,
+      "p00": 191,
+      "p01": 191,
+      "p02": 191,
+      "p03": 191,
+      "p04": 191,
+      "p05": 191,
+      "p06": 191,
+      "p07": 191,
+      "p08": 191,
+      "p09": 191,
+      "p10": 191,
+      "p11": 191,
+      "p12": 191,
+      "p13": 191,
+      "p14": 191,
+      "p15": 191,
+      "p16": 191,
+      "p17": 191,
+      "p18": 191,
+      "p19": 191,
+      "s16g_Pos": 2567,
+      "u16g_Out": 49151,
+      "u8g_B00": 191,
+      "u8g_B01": 191,
+      "u8g_B02": 191,
+      "u8g_B03": 191,
+      "u8g_B04": 191,
+      "u8g_B05": 191,
+      "u8g_B06": 191,
+      "u8g_B07": 191,
+      "u8g_B08": 191,
+      "u8g_B09": 191,
+      "u8g_B10": 191,
+      "u8g_B11": 191,
+      "u8g_B12": 191,
+      "u8g_B13": 191,
+      "u8g_B14": 191
+     },
+     "precondition": "5"
+    },
+    {
+     "case_label": "6 [EC6:유효-상한]",
+     "case_num": 6,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 11,
+      "g_Mode": 65,
+      "p00": 255,
+      "p01": 255,
+      "p02": 255,
+      "p03": 255,
+      "p04": 255,
+      "p05": 255,
+      "p06": 255,
+      "p07": 255,
+      "p08": 255,
+      "p09": 255,
+      "p10": 255,
+      "p11": 255,
+      "p12": 255,
+      "p13": 255,
+      "p14": 255,
+      "p15": 255,
+      "p16": 255,
+      "p17": 255,
+      "p18": 255,
+      "p19": 255,
+      "s16g_Pos": 2672,
+      "u16g_Out": 65535,
+      "u8g_B00": 255,
+      "u8g_B01": 255,
+      "u8g_B02": 255,
+      "u8g_B03": 255,
+      "u8g_B04": 255,
+      "u8g_B05": 255,
+      "u8g_B06": 255,
+      "u8g_B07": 255,
+      "u8g_B08": 255,
+      "u8g_B09": 255,
+      "u8g_B10": 255,
+      "u8g_B11": 255,
+      "u8g_B12": 255,
+      "u8g_B13": 255,
+      "u8g_B14": 255
+     },
+     "precondition": "6"
+    },
+    {
+     "case_label": "7 [EC7:무효-상한]",
+     "case_num": 7,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 12,
+      "g_Mode": 66,
+      "p00": 254,
+      "p01": 254,
+      "p02": 254,
+      "p03": 254,
+      "p04": 254,
+      "p05": 254,
+      "p06": 254,
+      "p07": 254,
+      "p08": 254,
+      "p09": 254,
+      "p10": 254,
+      "p11": 254,
+      "p12": 254,
+      "p13": 254,
+      "p14": 254,
+      "p15": 254,
+      "p16": 254,
+      "p17": 254,
+      "p18": 254,
+      "p19": 254,
+      "s16g_Pos": 2673,
+      "u16g_Out": 65534,
+      "u8g_B00": 254,
+      "u8g_B01": 254,
+      "u8g_B02": 254,
+      "u8g_B03": 254,
+      "u8g_B04": 254,
+      "u8g_B05": 254,
+      "u8g_B06": 254,
+      "u8g_B07": 254,
+      "u8g_B08": 254,
+      "u8g_B09": 254,
+      "u8g_B10": 254,
+      "u8g_B11": 254,
+      "u8g_B12": 254,
+      "u8g_B13": 254,
+      "u8g_B14": 254
+     },
+     "precondition": "7",
+     "type_bounded": [
+      "p00",
+      "p01",
+      "p02",
+      "p03",
+      "p04",
+      "p05",
+      "p06",
+      "p07",
+      "p08",
+      "p09",
+      "p10",
+      "p11",
+      "p12",
+      "p13",
+      "p14",
+      "p15",
+      "p16",
+      "p17",
+      "p18",
+      "p19",
+      "u8g_B00",
+      "u8g_B01",
+      "u8g_B02",
+      "u8g_B03",
+      "u8g_B04",
+      "u8g_B05",
+      "u8g_B06",
+      "u8g_B07",
+      "u8g_B08",
+      "u8g_B09",
+      "u8g_B10",
+      "u8g_B11",
+      "u8g_B12",
+      "u8g_B13",
+      "u8g_B14",
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "COND_1 [p00=최솟값]",
+     "case_num": 8,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "p00": 0,
+      "p01": 127,
+      "p02": 127,
+      "p03": 127,
+      "p04": 127,
+      "p05": 127,
+      "p06": 127,
+      "p07": 127,
+      "p08": 127,
+      "p09": 127,
+      "p10": 127,
+      "p11": 127,
+      "p12": 127,
+      "p13": 127,
+      "p14": 127,
+      "p15": 127,
+      "p16": 127,
+      "p17": 127,
+      "p18": 127,
+      "p19": 127,
+      "s16g_Pos": 2462,
+      "u16g_Out": 32767,
+      "u8g_B00": 127,
+      "u8g_B01": 127,
+      "u8g_B02": 127,
+      "u8g_B03": 127,
+      "u8g_B04": 127,
+      "u8g_B05": 127,
+      "u8g_B06": 127,
+      "u8g_B07": 127,
+      "u8g_B08": 127,
+      "u8g_B09": 127,
+      "u8g_B10": 127,
+      "u8g_B11": 127,
+      "u8g_B12": 127,
+      "u8g_B13": 127,
+      "u8g_B14": 127
+     },
+     "precondition": "조건 조합: p00=최솟값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_2 [p01=최댓값]",
+     "case_num": 9,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "p00": 127,
+      "p01": 255,
+      "p02": 127,
+      "p03": 127,
+      "p04": 127,
+      "p05": 127,
+      "p06": 127,
+      "p07": 127,
+      "p08": 127,
+      "p09": 127,
+      "p10": 127,
+      "p11": 127,
+      "p12": 127,
+      "p13": 127,
+      "p14": 127,
+      "p15": 127,
+      "p16": 127,
+      "p17": 127,
+      "p18": 127,
+      "p19": 127,
+      "s16g_Pos": 2462,
+      "u16g_Out": 32767,
+      "u8g_B00": 127,
+      "u8g_B01": 127,
+      "u8g_B02": 127,
+      "u8g_B03": 127,
+      "u8g_B04": 127,
+      "u8g_B05": 127,
+      "u8g_B06": 127,
+      "u8g_B07": 127,
+      "u8g_B08": 127,
+      "u8g_B09": 127,
+      "u8g_B10": 127,
+      "u8g_B11": 127,
+      "u8g_B12": 127,
+      "u8g_B13": 127,
+      "u8g_B14": 127
+     },
+     "precondition": "조건 조합: p01=최댓값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_3 [p02=최솟값]",
+     "case_num": 10,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "p00": 127,
+      "p01": 127,
+      "p02": 0,
+      "p03": 127,
+      "p04": 127,
+      "p05": 127,
+      "p06": 127,
+      "p07": 127,
+      "p08": 127,
+      "p09": 127,
+      "p10": 127,
+      "p11": 127,
+      "p12": 127,
+      "p13": 127,
+      "p14": 127,
+      "p15": 127,
+      "p16": 127,
+      "p17": 127,
+      "p18": 127,
+      "p19": 127,
+      "s16g_Pos": 2462,
+      "u16g_Out": 32767,
+      "u8g_B00": 127,
+      "u8g_B01": 127,
+      "u8g_B02": 127,
+      "u8g_B03": 127,
+      "u8g_B04": 127,
+      "u8g_B05": 127,
+      "u8g_B06": 127,
+      "u8g_B07": 127,
+      "u8g_B08": 127,
+      "u8g_B09": 127,
+      "u8g_B10": 127,
+      "u8g_B11": 127,
+      "u8g_B12": 127,
+      "u8g_B13": 127,
+      "u8g_B14": 127
+     },
+     "precondition": "조건 조합: p02=최솟값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_4 [p03=최댓값]",
+     "case_num": 11,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "p00": 127,
+      "p01": 127,
+      "p02": 127,
+      "p03": 255,
+      "p04": 127,
+      "p05": 127,
+      "p06": 127,
+      "p07": 127,
+      "p08": 127,
+      "p09": 127,
+      "p10": 127,
+      "p11": 127,
+      "p12": 127,
+      "p13": 127,
+      "p14": 127,
+      "p15": 127,
+      "p16": 127,
+      "p17": 127,
+      "p18": 127,
+      "p19": 127,
+      "s16g_Pos": 2462,
+      "u16g_Out": 32767,
+      "u8g_B00": 127,
+      "u8g_B01": 127,
+      "u8g_B02": 127,
+      "u8g_B03": 127,
+      "u8g_B04": 127,
+      "u8g_B05": 127,
+      "u8g_B06": 127,
+      "u8g_B07": 127,
+      "u8g_B08": 127,
+      "u8g_B09": 127,
+      "u8g_B10": 127,
+      "u8g_B11": 127,
+      "u8g_B12": 127,
+      "u8g_B13": 127,
+      "u8g_B14": 127
+     },
+     "precondition": "조건 조합: p03=최댓값, 나머지=중간값"
+    },
+    {
+     "case_label": "ERR_PROP_1 [하한 초과]",
+     "case_num": 12,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 1,
+      "g_Mode": 33,
+      "p00": 1,
+      "p01": 1,
+      "p02": 1,
+      "p03": 1,
+      "p04": 1,
+      "p05": 1,
+      "p06": 1,
+      "p07": 1,
+      "p08": 1,
+      "p09": 1,
+      "p10": 1,
+      "p11": 1,
+      "p12": 1,
+      "p13": 1,
+      "p14": 1,
+      "p15": 1,
+      "p16": 1,
+      "p17": 1,
+      "p18": 1,
+      "p19": 1,
+      "s16g_Pos": 2252,
+      "u16g_Out": 1,
+      "u8g_B00": 1,
+      "u8g_B01": 1,
+      "u8g_B02": 1,
+      "u8g_B03": 1,
+      "u8g_B04": 1,
+      "u8g_B05": 1,
+      "u8g_B06": 1,
+      "u8g_B07": 1,
+      "u8g_B08": 1,
+      "u8g_B09": 1,
+      "u8g_B10": 1,
+      "u8g_B11": 1,
+      "u8g_B12": 1,
+      "u8g_B13": 1,
+      "u8g_B14": 1
+     },
+     "precondition": "에러 전파: 입력 하한 초과 → 콜체인 방어 처리 확인",
+     "type_bounded": [
+      "p00",
+      "p01",
+      "p02",
+      "p03",
+      "p04",
+      "p05",
+      "p06",
+      "p07",
+      "p08",
+      "p09",
+      "p10",
+      "p11",
+      "p12",
+      "p13",
+      "p14",
+      "p15",
+      "p16",
+      "p17",
+      "p18",
+      "p19",
+      "u8g_B00",
+      "u8g_B01",
+      "u8g_B02",
+      "u8g_B03",
+      "u8g_B04",
+      "u8g_B05",
+      "u8g_B06",
+      "u8g_B07",
+      "u8g_B08",
+      "u8g_B09",
+      "u8g_B10",
+      "u8g_B11",
+      "u8g_B12",
+      "u8g_B13",
+      "u8g_B14",
+      "g_DoorState",
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "ERR_PROP_2 [상한 초과]",
+     "case_num": 13,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 12,
+      "g_Mode": 66,
+      "p00": 254,
+      "p01": 254,
+      "p02": 254,
+      "p03": 254,
+      "p04": 254,
+      "p05": 254,
+      "p06": 254,
+      "p07": 254,
+      "p08": 254,
+      "p09": 254,
+      "p10": 254,
+      "p11": 254,
+      "p12": 254,
+      "p13": 254,
+      "p14": 254,
+      "p15": 254,
+      "p16": 254,
+      "p17": 254,
+      "p18": 254,
+      "p19": 254,
+      "s16g_Pos": 2673,
+      "u16g_Out": 65534,
+      "u8g_B00": 254,
+      "u8g_B01": 254,
+      "u8g_B02": 254,
+      "u8g_B03": 254,
+      "u8g_B04": 254,
+      "u8g_B05": 254,
+      "u8g_B06": 254,
+      "u8g_B07": 254,
+      "u8g_B08": 254,
+      "u8g_B09": 254,
+      "u8g_B10": 254,
+      "u8g_B11": 254,
+      "u8g_B12": 254,
+      "u8g_B13": 254,
+      "u8g_B14": 254
+     },
+     "precondition": "에러 전파: 입력 상한 초과 → 콜체인 방어 처리 확인",
+     "type_bounded": [
+      "p00",
+      "p01",
+      "p02",
+      "p03",
+      "p04",
+      "p05",
+      "p06",
+      "p07",
+      "p08",
+      "p09",
+      "p10",
+      "p11",
+      "p12",
+      "p13",
+      "p14",
+      "p15",
+      "p16",
+      "p17",
+      "p18",
+      "p19",
+      "u8g_B00",
+      "u8g_B01",
+      "u8g_B02",
+      "u8g_B03",
+      "u8g_B04",
+      "u8g_B05",
+      "u8g_B06",
+      "u8g_B07",
+      "u8g_B08",
+      "u8g_B09",
+      "u8g_B10",
+      "u8g_B11",
+      "u8g_B12",
+      "u8g_B13",
+      "u8g_B14",
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "GLOBAL_1 [g_Mode=min]",
+     "case_num": 14,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 34,
+      "p00": 127,
+      "p01": 127,
+      "p02": 127,
+      "p03": 127,
+      "p04": 127,
+      "p05": 127,
+      "p06": 127,
+      "p07": 127,
+      "p08": 127,
+      "p09": 127,
+      "p10": 127,
+      "p11": 127,
+      "p12": 127,
+      "p13": 127,
+      "p14": 127,
+      "p15": 127,
+      "p16": 127,
+      "p17": 127,
+      "p18": 127,
+      "p19": 127,
+      "s16g_Pos": 2462,
+      "u16g_Out": 32767,
+      "u8g_B00": 127,
+      "u8g_B01": 127,
+      "u8g_B02": 127,
+      "u8g_B03": 127,
+      "u8g_B04": 127,
+      "u8g_B05": 127,
+      "u8g_B06": 127,
+      "u8g_B07": 127,
+      "u8g_B08": 127,
+      "u8g_B09": 127,
+      "u8g_B10": 127,
+      "u8g_B11": 127,
+      "u8g_B12": 127,
+      "u8g_B13": 127,
+      "u8g_B14": 127
+     },
+     "precondition": "글로벌 상태: g_Mode=최솟값, 입력=중간값 → 상태 의존 분기 커버"
+    },
+    {
+     "case_label": "GLOBAL_2 [g_DoorState=min]",
+     "case_num": 15,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding",
+      "u8g_O00": "[검증 필요] unsupported_output_binding",
+      "u8g_O01": "[검증 필요] unsupported_output_binding",
+      "u8g_O02": "[검증 필요] unsupported_output_binding",
+      "u8g_O03": "[검증 필요] unsupported_output_binding",
+      "u8g_O04": "[검증 필요] unsupported_output_binding",
+      "u8g_O05": "[검증 필요] unsupported_output_binding",
+      "u8g_O06": "[검증 필요] unsupported_output_binding",
+      "u8g_O07": "[검증 필요] unsupported_output_binding",
+      "u8g_O08": "[검증 필요] unsupported_output_binding",
+      "u8g_O09": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 0,
+      "g_Mode": 65,
+      "p00": 127,
+      "p01": 127,
+      "p02": 127,
+      "p03": 127,
+      "p04": 127,
+      "p05": 127,
+      "p06": 127,
+      "p07": 127,
+      "p08": 127,
+      "p09": 127,
+      "p10": 127,
+      "p11": 127,
+      "p12": 127,
+      "p13": 127,
+      "p14": 127,
+      "p15": 127,
+      "p16": 127,
+      "p17": 127,
+      "p18": 127,
+      "p19": 127,
+      "s16g_Pos": 2462,
+      "u16g_Out": 32767,
+      "u8g_B00": 127,
+      "u8g_B01": 127,
+      "u8g_B02": 127,
+      "u8g_B03": 127,
+      "u8g_B04": 127,
+      "u8g_B05": 127,
+      "u8g_B06": 127,
+      "u8g_B07": 127,
+      "u8g_B08": 127,
+      "u8g_B09": 127,
+      "u8g_B10": 127,
+      "u8g_B11": 127,
+      "u8g_B12": 127,
+      "u8g_B13": 127,
+      "u8g_B14": 127
+     },
+     "precondition": "글로벌 상태: g_DoorState=최솟값, 입력=중간값 → 상태 의존 분기 커버"
+    }
+   ],
+   "tc_id": "SwITC_02",
+   "test_method": "REQ, IFT"
+  },
+  {
+   "entry_fn": "Drv_Write",
+   "expected_vars": [
+    "u16g_Out",
+    "s16g_Pos"
+   ],
+   "gen_method": "ABV, AEC",
+   "input_vars": [
+    "u16_val",
+    "g_Mode",
+    "g_DoorState",
+    "u16g_Out",
+    "s16g_Pos"
+   ],
+   "sub_cases": [
+    {
+     "case_label": "1 [EC1:무효-하한]",
+     "case_num": 1,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 1,
+      "g_Mode": 33,
+      "s16g_Pos": 2252,
+      "u16_val": 99,
+      "u16g_Out": 1
+     },
+     "precondition": "1",
+     "type_bounded": [
+      "g_DoorState",
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "2 [EC2:유효-하한]",
+     "case_num": 2,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 0,
+      "g_Mode": 34,
+      "s16g_Pos": 2253,
+      "u16_val": 100,
+      "u16g_Out": 0
+     },
+     "precondition": "2"
+    },
+    {
+     "case_label": "3 [EC3:유효-정상-L]",
+     "case_num": 3,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 3,
+      "g_Mode": 34,
+      "s16g_Pos": 2357,
+      "u16_val": 125,
+      "u16g_Out": 16383
+     },
+     "precondition": "3"
+    },
+    {
+     "case_label": "4 [EC4:유효-중간]",
+     "case_num": 4,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "s16g_Pos": 2462,
+      "u16_val": 150,
+      "u16g_Out": 32767
+     },
+     "precondition": "4"
+    },
+    {
+     "case_label": "5 [EC5:유효-정상-H]",
+     "case_num": 5,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 9,
+      "g_Mode": 65,
+      "s16g_Pos": 2567,
+      "u16_val": 175,
+      "u16g_Out": 49151
+     },
+     "precondition": "5"
+    },
+    {
+     "case_label": "6 [EC6:유효-상한]",
+     "case_num": 6,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 11,
+      "g_Mode": 65,
+      "s16g_Pos": 2672,
+      "u16_val": 200,
+      "u16g_Out": 65535
+     },
+     "precondition": "6"
+    },
+    {
+     "case_label": "7 [EC7:무효-상한]",
+     "case_num": 7,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 12,
+      "g_Mode": 66,
+      "s16g_Pos": 2673,
+      "u16_val": 201,
+      "u16g_Out": 65534
+     },
+     "precondition": "7",
+     "type_bounded": [
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "COND_1 [u16_val=최솟값]",
+     "case_num": 8,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "s16g_Pos": 2462,
+      "u16_val": 100,
+      "u16g_Out": 32767
+     },
+     "precondition": "조건 조합: u16_val=최솟값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_2 [g_Mode=최댓값]",
+     "case_num": 9,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "s16g_Pos": 2462,
+      "u16_val": 150,
+      "u16g_Out": 32767
+     },
+     "precondition": "조건 조합: g_Mode=최댓값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_3 [g_DoorState=최솟값]",
+     "case_num": 10,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 0,
+      "g_Mode": 65,
+      "s16g_Pos": 2462,
+      "u16_val": 150,
+      "u16g_Out": 32767
+     },
+     "precondition": "조건 조합: g_DoorState=최솟값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_4 [u16g_Out=최댓값]",
+     "case_num": 11,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "s16g_Pos": 2462,
+      "u16_val": 150,
+      "u16g_Out": 65535
+     },
+     "precondition": "조건 조합: u16g_Out=최댓값, 나머지=중간값"
+    },
+    {
+     "case_label": "ERR_PROP_1 [하한 초과]",
+     "case_num": 12,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 1,
+      "g_Mode": 33,
+      "s16g_Pos": 2252,
+      "u16_val": 99,
+      "u16g_Out": 1
+     },
+     "precondition": "에러 전파: 입력 하한 초과 → 콜체인 방어 처리 확인",
+     "type_bounded": [
+      "g_DoorState",
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "ERR_PROP_2 [상한 초과]",
+     "case_num": 13,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 12,
+      "g_Mode": 66,
+      "s16g_Pos": 2673,
+      "u16_val": 201,
+      "u16g_Out": 65534
+     },
+     "precondition": "에러 전파: 입력 상한 초과 → 콜체인 방어 처리 확인",
+     "type_bounded": [
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "GLOBAL_1 [s16g_Pos=min]",
+     "case_num": 14,
+     "expected": {
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "s16g_Pos": 2253,
+      "u16_val": 150,
+      "u16g_Out": 32767
+     },
+     "precondition": "글로벌 상태: s16g_Pos=최솟값, 입력=중간값 → 상태 의존 분기 커버"
+    }
+   ],
+   "tc_id": "SwITC_03",
+   "test_method": "REQ, IFT"
+  },
+  {
+   "entry_fn": "Io_Main",
+   "expected_vars": [
+    "u16g_Out",
+    "g_Mode",
+    "g_DoorState",
+    "s16g_Pos"
+   ],
+   "gen_method": "ABV, AEC",
+   "input_vars": [
+    "u16_val",
+    "g_Mode",
+    "g_DoorState",
+    "u16g_Out",
+    "s16g_Pos"
+   ],
+   "sub_cases": [
+    {
+     "case_label": "1 [EC1:무효-하한]",
+     "case_num": 1,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 1,
+      "g_Mode": 33,
+      "s16g_Pos": 2252,
+      "u16_val": 99,
+      "u16g_Out": 1
+     },
+     "precondition": "1",
+     "type_bounded": [
+      "g_DoorState",
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "2 [EC2:유효-하한]",
+     "case_num": 2,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 0,
+      "g_Mode": 34,
+      "s16g_Pos": 2253,
+      "u16_val": 100,
+      "u16g_Out": 0
+     },
+     "precondition": "2"
+    },
+    {
+     "case_label": "3 [EC3:유효-정상-L]",
+     "case_num": 3,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 3,
+      "g_Mode": 34,
+      "s16g_Pos": 2357,
+      "u16_val": 125,
+      "u16g_Out": 16383
+     },
+     "precondition": "3"
+    },
+    {
+     "case_label": "4 [EC4:유효-중간]",
+     "case_num": 4,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "s16g_Pos": 2462,
+      "u16_val": 150,
+      "u16g_Out": 32767
+     },
+     "precondition": "4"
+    },
+    {
+     "case_label": "5 [EC5:유효-정상-H]",
+     "case_num": 5,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 9,
+      "g_Mode": 65,
+      "s16g_Pos": 2567,
+      "u16_val": 175,
+      "u16g_Out": 49151
+     },
+     "precondition": "5"
+    },
+    {
+     "case_label": "6 [EC6:유효-상한]",
+     "case_num": 6,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 11,
+      "g_Mode": 65,
+      "s16g_Pos": 2672,
+      "u16_val": 200,
+      "u16g_Out": 65535
+     },
+     "precondition": "6"
+    },
+    {
+     "case_label": "7 [EC7:무효-상한]",
+     "case_num": 7,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 12,
+      "g_Mode": 66,
+      "s16g_Pos": 2673,
+      "u16_val": 201,
+      "u16g_Out": 65534
+     },
+     "precondition": "7",
+     "type_bounded": [
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "COND_1 [u16_val=최솟값]",
+     "case_num": 8,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "s16g_Pos": 2462,
+      "u16_val": 100,
+      "u16g_Out": 32767
+     },
+     "precondition": "조건 조합: u16_val=최솟값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_2 [g_Mode=최댓값]",
+     "case_num": 9,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "s16g_Pos": 2462,
+      "u16_val": 150,
+      "u16g_Out": 32767
+     },
+     "precondition": "조건 조합: g_Mode=최댓값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_3 [g_DoorState=최솟값]",
+     "case_num": 10,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 0,
+      "g_Mode": 65,
+      "s16g_Pos": 2462,
+      "u16_val": 150,
+      "u16g_Out": 32767
+     },
+     "precondition": "조건 조합: g_DoorState=최솟값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_4 [u16g_Out=최댓값]",
+     "case_num": 11,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 65,
+      "s16g_Pos": 2462,
+      "u16_val": 150,
+      "u16g_Out": 65535
+     },
+     "precondition": "조건 조합: u16g_Out=최댓값, 나머지=중간값"
+    },
+    {
+     "case_label": "ERR_PROP_1 [하한 초과]",
+     "case_num": 12,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 1,
+      "g_Mode": 33,
+      "s16g_Pos": 2252,
+      "u16_val": 99,
+      "u16g_Out": 1
+     },
+     "precondition": "에러 전파: 입력 하한 초과 → 콜체인 방어 처리 확인",
+     "type_bounded": [
+      "g_DoorState",
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "ERR_PROP_2 [상한 초과]",
+     "case_num": 13,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 12,
+      "g_Mode": 66,
+      "s16g_Pos": 2673,
+      "u16_val": 201,
+      "u16g_Out": 65534
+     },
+     "precondition": "에러 전파: 입력 상한 초과 → 콜체인 방어 처리 확인",
+     "type_bounded": [
+      "u16g_Out"
+     ]
+    },
+    {
+     "case_label": "GLOBAL_1 [g_Mode=min]",
+     "case_num": 14,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 6,
+      "g_Mode": 34,
+      "s16g_Pos": 2462,
+      "u16_val": 150,
+      "u16g_Out": 32767
+     },
+     "precondition": "글로벌 상태: g_Mode=최솟값, 입력=중간값 → 상태 의존 분기 커버"
+    },
+    {
+     "case_label": "GLOBAL_2 [g_DoorState=min]",
+     "case_num": 15,
+     "expected": {
+      "g_DoorState": "[검증 필요] unsupported_output_binding",
+      "g_Mode": "[검증 필요] unsupported_output_binding",
+      "s16g_Pos": "[검증 필요] unsupported_output_binding",
+      "u16g_Out": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "g_DoorState": 0,
+      "g_Mode": 65,
+      "s16g_Pos": 2462,
+      "u16_val": 150,
+      "u16g_Out": 32767
+     },
+     "precondition": "글로벌 상태: g_DoorState=최솟값, 입력=중간값 → 상태 의존 분기 커버"
+    }
+   ],
+   "tc_id": "SwITC_04",
+   "test_method": "REQ, IFT"
+  },
+  {
+   "entry_fn": "Odd_Entry",
+   "expected_vars": [
+    "g_ptr2",
+    "REG_ODD",
+    "f32g_Gain2"
+   ],
+   "gen_method": "ABV, AEC",
+   "input_vars": [
+    "u8_odd",
+    "REG_FSTAT.Bits.NOPE",
+    "tl_status",
+    "f32g_Gain",
+    "g_ptr2",
+    "REG_ODD",
+    "f32g_Gain2"
+   ],
+   "sub_cases": [
+    {
+     "case_label": "1 [EC1:무효-하한]",
+     "case_num": 1,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": -1,
+      "REG_ODD": 1,
+      "f32g_Gain": -1.0,
+      "f32g_Gain2": -1.0,
+      "g_ptr2": -1,
+      "tl_status": -1,
+      "u8_odd": 1
+     },
+     "precondition": "1",
+     "type_bounded": [
+      "u8_odd",
+      "REG_ODD"
+     ]
+    },
+    {
+     "case_label": "2 [EC2:유효-하한]",
+     "case_num": 2,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 0,
+      "REG_ODD": 0,
+      "f32g_Gain": 0.0,
+      "f32g_Gain2": 0.0,
+      "g_ptr2": 0,
+      "tl_status": 0,
+      "u8_odd": 0
+     },
+     "precondition": "2"
+    },
+    {
+     "case_label": "3 [EC3:유효-정상-L]",
+     "case_num": 3,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 63,
+      "REG_ODD": 1,
+      "f32g_Gain": 0.25,
+      "f32g_Gain2": 0.25,
+      "g_ptr2": 63,
+      "tl_status": 63,
+      "u8_odd": 63
+     },
+     "precondition": "3"
+    },
+    {
+     "case_label": "4 [EC4:유효-중간]",
+     "case_num": 4,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 127,
+      "REG_ODD": 3,
+      "f32g_Gain": 0.5,
+      "f32g_Gain2": 0.5,
+      "g_ptr2": 127,
+      "tl_status": 127,
+      "u8_odd": 127
+     },
+     "precondition": "4"
+    },
+    {
+     "case_label": "5 [EC5:유효-정상-H]",
+     "case_num": 5,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 191,
+      "REG_ODD": 5,
+      "f32g_Gain": 0.75,
+      "f32g_Gain2": 0.75,
+      "g_ptr2": 191,
+      "tl_status": 191,
+      "u8_odd": 191
+     },
+     "precondition": "5"
+    },
+    {
+     "case_label": "6 [EC6:유효-상한]",
+     "case_num": 6,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 255,
+      "REG_ODD": 7,
+      "f32g_Gain": 1.0,
+      "f32g_Gain2": 1.0,
+      "g_ptr2": 255,
+      "tl_status": 255,
+      "u8_odd": 255
+     },
+     "precondition": "6"
+    },
+    {
+     "case_label": "7 [EC7:무효-상한]",
+     "case_num": 7,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 256,
+      "REG_ODD": 6,
+      "f32g_Gain": 1.001,
+      "f32g_Gain2": 1.001,
+      "g_ptr2": 256,
+      "tl_status": 256,
+      "u8_odd": 254
+     },
+     "precondition": "7",
+     "type_bounded": [
+      "u8_odd",
+      "REG_ODD"
+     ]
+    },
+    {
+     "case_label": "COND_1 [u8_odd=최솟값]",
+     "case_num": 8,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 127,
+      "REG_ODD": 3,
+      "f32g_Gain": 0.5,
+      "f32g_Gain2": 0.5,
+      "g_ptr2": 127,
+      "tl_status": 127,
+      "u8_odd": 0
+     },
+     "precondition": "조건 조합: u8_odd=최솟값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_2 [REG_FSTAT.Bits.NOPE=최댓값]",
+     "case_num": 9,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 255,
+      "REG_ODD": 3,
+      "f32g_Gain": 0.5,
+      "f32g_Gain2": 0.5,
+      "g_ptr2": 127,
+      "tl_status": 127,
+      "u8_odd": 127
+     },
+     "precondition": "조건 조합: REG_FSTAT.Bits.NOPE=최댓값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_3 [tl_status=최솟값]",
+     "case_num": 10,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 127,
+      "REG_ODD": 3,
+      "f32g_Gain": 0.5,
+      "f32g_Gain2": 0.5,
+      "g_ptr2": 127,
+      "tl_status": 0,
+      "u8_odd": 127
+     },
+     "precondition": "조건 조합: tl_status=최솟값, 나머지=중간값"
+    },
+    {
+     "case_label": "COND_4 [f32g_Gain=최댓값]",
+     "case_num": 11,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 127,
+      "REG_ODD": 3,
+      "f32g_Gain": 1.0,
+      "f32g_Gain2": 0.5,
+      "g_ptr2": 127,
+      "tl_status": 127,
+      "u8_odd": 127
+     },
+     "precondition": "조건 조합: f32g_Gain=최댓값, 나머지=중간값"
+    },
+    {
+     "case_label": "ERR_PROP_1 [하한 초과]",
+     "case_num": 12,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": -1,
+      "REG_ODD": 1,
+      "f32g_Gain": -1.0,
+      "f32g_Gain2": -1.0,
+      "g_ptr2": -1,
+      "tl_status": -1,
+      "u8_odd": 1
+     },
+     "precondition": "에러 전파: 입력 하한 초과 → 콜체인 방어 처리 확인",
+     "type_bounded": [
+      "u8_odd",
+      "REG_ODD"
+     ]
+    },
+    {
+     "case_label": "ERR_PROP_2 [상한 초과]",
+     "case_num": 13,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 256,
+      "REG_ODD": 6,
+      "f32g_Gain": 1.001,
+      "f32g_Gain2": 1.001,
+      "g_ptr2": 256,
+      "tl_status": 256,
+      "u8_odd": 254
+     },
+     "precondition": "에러 전파: 입력 상한 초과 → 콜체인 방어 처리 확인",
+     "type_bounded": [
+      "u8_odd",
+      "REG_ODD"
+     ]
+    },
+    {
+     "case_label": "GLOBAL_1 [g_ptr2=min]",
+     "case_num": 14,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 127,
+      "REG_ODD": 3,
+      "f32g_Gain": 0.5,
+      "f32g_Gain2": 0.5,
+      "g_ptr2": 0,
+      "tl_status": 127,
+      "u8_odd": 127
+     },
+     "precondition": "글로벌 상태: g_ptr2=최솟값, 입력=중간값 → 상태 의존 분기 커버"
+    },
+    {
+     "case_label": "GLOBAL_2 [REG_ODD=min]",
+     "case_num": 15,
+     "expected": {
+      "REG_ODD": "[검증 필요] unsupported_output_binding",
+      "f32g_Gain2": "[검증 필요] unsupported_output_binding",
+      "g_ptr2": "[검증 필요] unsupported_output_binding"
+     },
+     "inputs": {
+      "REG_FSTAT.Bits.NOPE": 127,
+      "REG_ODD": 0,
+      "f32g_Gain": 0.5,
+      "f32g_Gain2": 0.5,
+      "g_ptr2": 127,
+      "tl_status": 127,
+      "u8_odd": 127
+     },
+     "precondition": "글로벌 상태: REG_ODD=최솟값, 입력=중간값 → 상태 의존 분기 커버"
+    }
+   ],
+   "tc_id": "SwITC_05",
+   "test_method": "REQ, IFT"
+  }
+ ],
+ "stats": {
+  "array_elements_emitted": 1,
+  "array_expanded_expected": 0,
+  "array_expanded_inputs": 1,
+  "array_size_map_entries": 33,
+  "array_skipped_budget": 0,
+  "array_struct_types": 0,
+  "chain_max_nodes": 100,
+  "chain_truncated_flows": 0,
+  "cross_reach_hops": 3,
+  "design_id_ambiguous_builds": 0,
+  "design_id_hits": 0,
+  "design_id_lookups": 5,
+  "design_id_map_entries": 0,
+  "dropped_asil_distribution": {},
+  "dropped_entry_fns": [],
+  "dropped_in_design_doc_count": 0,
+  "dropped_safety_related_count": 0,
+  "fi_emitted": 0,
+  "fi_requested": 0,
+  "flow_emit_pct": 100.0,
+  "flows_dropped": 0,
+  "flows_emitted": 5,
+  "input_documented_range_type_unknown": 2,
+  "input_documented_range_unused": {
+   "documented_outside_type": 1,
+   "documented_range_unread:digit_count_differs": 1,
+   "documented_ranges_disagree": 1,
+   "float_not_ranged": 2,
+   "pointer_address_range": 2
+  },
+  "input_domain_source": {
+   "declared_type": 52,
+   "documented_range": 14,
+   "unknown": 6
+  },
+  "input_type_bounded_values": 202,
+  "input_type_resolution": {
+   "typed": 64,
+   "unresolved": {
+    "member_type_unresolved": 1,
+    "no_declaration": 1,
+    "pointer_object": 3,
+    "struct_object": 2,
+    "type_unresolved": 1
+   }
+  },
+  "max_flows": null,
+  "related_chain_depth": 2,
+  "related_chain_flows": 0,
+  "related_chain_ids": 0,
+  "related_truncated_ids": 0,
+  "req_id_flows": 0,
+  "req_id_total": 0,
+  "sds_key_hits": 0,
+  "sds_lookups": 5,
+  "sds_map_entries": 0,
+  "sds_source": "none",
+  "sds_swcom_hits": 0,
+  "total_flows_found": 5,
+  "transitive_entries": 0,
+  "transitive_entries_emitted": 0,
+  "uds_swcom_hits": 0,
+  "uds_swcom_ids": 0,
+  "uds_swcom_lookups": 5,
+  "uds_swcom_map_entries": 0,
+  "var_budget_cut_expected": 0,
+  "var_budget_cut_input": 0,
+  "var_candidates_expected": 30,
+  "var_candidates_input": 71,
+  "var_scan_depth": 2,
+  "var_scan_nodes_max": 200,
+  "var_selection_basis": "static_call_graph"
+ }
+}

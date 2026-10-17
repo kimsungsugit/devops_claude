@@ -9,17 +9,115 @@
  * 우선순위(병합): 각 섹션의 per-section 저장값(non-empty) > 공유 기본값(non-empty)
  *                > 컴포넌트 DEFAULT_FORM. (사용자가 입력한 값은 절대 덮지 않음)
  *
- * 문서 경로(srs/sds/uds/... + UDS 템플릿)는 기존 키 'devops_v2_doc_paths'를
- * 그대로 사용한다(DocGenSection이 이미 읽음). 본 모듈은 Sw* 양식/로그/메타 전용.
+ * 문서 경로(srs/sds/uds/... + UDS 템플릿)는 기존 키 'devops_v2_doc_paths'를 쓴다.
+ *
+ * ⚠ 2026-08-05: 예전엔 여기에 "본 모듈은 Sw* 양식/로그/메타 전용"이라고 적어 두고
+ *   문서 경로를 **이 모듈 밖에** 두었다. 그 결과 문서 경로만 아래 라이브 동기화
+ *   메커니즘을 못 받아서, Settings 에서 저장해도 프로젝트 탭이 옛 경로를 계속
+ *   썼다(사용자 보고). 원인은 세 겹이다:
+ *     ① Settings 의 setDoc/fillFromScm 이 localStorage 에 쓰기만 하고 통지 없음
+ *     ② 소비처가 mount 시 1회만 읽음(useState(()=>…) / useMemo(…,[]))
+ *     ③ App·Detail 이 **양쪽 다 keep-alive**(display:none)라 재마운트가 없음
+ *   → 전체 새로고침 전까지 갱신 안 됨. 그래서 문서 경로도 같은 메커니즘 안으로 들인다.
  */
 
 import { useEffect } from 'react';
 
 export const SHARED_KEY = 'devops_v2_shared_inputs';
+export const DOC_PATHS_KEY = 'devops_v2_doc_paths';
+// 생성 상한(캡). 자료 부족이 아니라 **사용자 결정**이라 문서 경로와 따로 둔다.
+export const DOCGEN_CAPS_KEY = 'devops_v2_docgen_caps';
 
-// 공유 입력이 같은 탭에서 바뀌었음을 알리는 커스텀 이벤트(다른 탭은 'storage' 이벤트).
-// 열려있는(keep-alive) 생성 섹션이 이를 구독해 미변경 필드를 즉시 갱신한다.
+// 같은 탭에서 값이 바뀌었음을 알리는 커스텀 이벤트(다른 탭은 'storage' 이벤트).
+// 열려있는(keep-alive) 섹션이 이를 구독해 즉시 갱신한다.
+// ⚠ 둘을 **별도 이벤트**로 둔다 — 하나로 합치면 문서 경로 저장이 Sw* 폼 재sync 를
+//   유발하고(그 반대도) 무관한 필드가 흔들린다.
 export const SHARED_EVENT = 'aria-shared-inputs-changed';
+export const DOC_PATHS_EVENT = 'aria-doc-paths-changed';
+// 생성 상한/선택지 변경. 위 둘과 **또 따로** 둔다 — 상한 저장이 Sw* 폼이나 문서 경로
+// 재sync 를 유발하면 무관한 필드가 흔들린다(같은 이유로 위 두 개도 분리돼 있다).
+export const DOCGEN_CAPS_EVENT = 'aria-docgen-caps-changed';
+
+/**
+ * 상한 저장 칸의 키 — **프로젝트마다 따로**.
+ *
+ * ⚠ 오래 평면 키 하나였다. 그래서 A 프로젝트에서 `max_sequences` 를 낮추거나
+ *   `suts_scope='source'` 로 바꾸면, 프로젝트를 B 로 바꿔도 그 값이 그대로 따라가
+ *   **B 의 문서가 조용히 다른 규칙으로 만들어졌다**. 상한은 소스 규모에 따라 정하는
+ *   값이라 프로젝트를 넘어가는 순간 근거를 잃는다.
+ *
+ * `scope` 가 비면 평면 키(현행) — 프로젝트가 아직 안 정해진 화면에서 값을 잃지 않는다.
+ */
+export function capsKeyFor(scope) {
+  const s = String(scope || '').trim();
+  return s ? `${DOCGEN_CAPS_KEY}::${s}` : DOCGEN_CAPS_KEY;
+}
+
+function readCaps(key) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key) || '{}');
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch (_e) { return {}; }
+}
+
+/**
+ * 평면 키 → 스코프 키 **1회 이관**.
+ *
+ * ⚠ 옮긴 뒤 평면 키를 **지운다**. 남겨 두면 다음 프로젝트가 첫 조회에서 또 같은 값을
+ *   상속받아 원래 결함이 그대로 되살아난다. 이관 시점의 활성 프로젝트가 값을 가져가는
+ *   것은 의도다 — 그 값은 그 화면에서 입력된 것이 거의 확실하다.
+ */
+function migrateFlatCaps(key) {
+  if (key === DOCGEN_CAPS_KEY) return;
+  try {
+    if (localStorage.getItem(key) != null) return;          // 이미 스코프 값이 있다
+    const flat = localStorage.getItem(DOCGEN_CAPS_KEY);
+    if (flat == null) return;
+    if (Object.keys(readCaps(DOCGEN_CAPS_KEY)).length === 0) return;
+    localStorage.setItem(key, flat);
+    localStorage.removeItem(DOCGEN_CAPS_KEY);
+  } catch (_e) { /* 스토리지 접근 불가 — 이관 없이 진행 */ }
+}
+
+/**
+ * 생성 상한 로드 — `{max_flows: 200, ...}`. 항상 객체.
+ *
+ * ⚠ **미설정과 0 을 구분한다.** 키가 없으면 서버에 아무것도 보내지 않아 생성기 기본값이
+ * 쓰인다. `0` 을 보내면 "흐름을 하나도 만들지 마라" 가 되어 뜻이 정반대다.
+ */
+export function loadDocGenCaps(scope) {
+  const key = capsKeyFor(scope);
+  migrateFlatCaps(key);
+  return readCaps(key);
+}
+
+function writeCaps(key, caps) {
+  try { localStorage.setItem(key, JSON.stringify(caps)); } catch (_e) { /* 용량 초과 */ }
+  notifyDocGenCapsChange();
+  return caps;
+}
+
+/** 상한 하나 저장. 빈 값이면 **키를 지운다**(= 생성기 기본값으로 되돌린다). */
+export function saveDocGenCap(name, value, scope) {
+  const caps = loadDocGenCaps(scope);
+  const n = Number(value);
+  if (value === '' || value == null || !Number.isFinite(n) || n <= 0) delete caps[name];
+  else caps[name] = Math.trunc(n);
+  return writeCaps(capsKeyFor(scope), caps);
+}
+
+/** 문자열 선택지 하나 저장(예: SUTS 시험 범위, 템플릿 출처). 빈 값이면 키를 지운다 = 서버 기본값.
+ *
+ * ⚠ `saveDocGenCap` 은 숫자 전용이라(`Number()` 로 접는다) 문자열을 넣으면 조용히
+ *   버려진다 — 같은 스토어를 쓰되 함수를 나눈다.
+ */
+export function saveDocGenChoice(name, value, scope) {
+  const caps = loadDocGenCaps(scope);
+  const v = String(value ?? '').trim();
+  if (!v) delete caps[name];
+  else caps[name] = v;
+  return writeCaps(capsKeyFor(scope), caps);
+}
 
 /** 공유 입력 객체 로드 (항상 객체 반환). */
 export function loadSharedInputs() {
@@ -33,19 +131,99 @@ export function loadSharedInputs() {
 
 // 쓰기는 즉시(loadSavedForm은 항상 최신 localStorage를 읽음) 하되, 같은 탭 구독자 알림은
 // 디바운스 — Settings 키스트로크 폭주 시 마운트된 N개 섹션이 매 입력마다 재sync하는 낭비 완화.
-let _notifyTimer = null;
-function notifySharedChange() {
-  if (_notifyTimer) clearTimeout(_notifyTimer);
-  _notifyTimer = setTimeout(() => {
-    _notifyTimer = null;
-    try { window.dispatchEvent(new Event(SHARED_EVENT)); } catch { /* no-window */ }
-  }, 150);
+// ⚠ 이벤트별로 **타이머를 따로** 둔다. 하나를 공유하면 문서 경로 저장이 직전 Sw* 알림을
+//   clearTimeout 으로 지워 그쪽 통지가 통째로 유실된다(그 반대도).
+function makeNotifier(eventName) {
+  let timer = null;
+  return () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      try { window.dispatchEvent(new Event(eventName)); } catch { /* no-window */ }
+    }, 150);
+  };
 }
+
+const notifySharedChange = makeNotifier(SHARED_EVENT);
+const notifyDocPathsChange = makeNotifier(DOC_PATHS_EVENT);
+const notifyDocGenCapsChange = makeNotifier(DOCGEN_CAPS_EVENT);
 
 /** 공유 입력 전체 저장 + 같은 탭 구독자에게 변경 알림(디바운스). */
 export function saveSharedInputs(obj) {
   localStorage.setItem(SHARED_KEY, JSON.stringify(obj || {}));
   notifySharedChange();
+}
+
+/** 문서 경로 객체 로드 (항상 객체 반환). */
+export function loadDocPaths() {
+  try {
+    const v = JSON.parse(localStorage.getItem(DOC_PATHS_KEY) || '{}');
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 문서 경로 저장 + 같은 탭 구독자에게 알림. **문서 경로를 쓰는 모든 입구는 여기를 거친다.**
+ *
+ * 한 곳이라도 직접 `localStorage.setItem(DOC_PATHS_KEY, …)` 를 하면 그 경로로 저장한
+ * 값만 프로젝트 탭에 반영되지 않는다 — 사용자에게는 "어떤 건 되고 어떤 건 안 된다" 로
+ * 보이는, 원인을 짚기 가장 어려운 형태다.
+ *
+ * ⚠ 실패 원인을 **삼키지 않는다.** 첫 판은 `catch { return false }` 였는데, 그러면
+ * 호출처가 사용자에게 보여줄 사유(QuotaExceededError 등)를 잃는다 — 기존 가드가
+ * 바로 그걸 잡았다. 예외 객체는 `onError` 로 넘긴다.
+ *
+ * @param {object} obj 저장할 경로 맵
+ * @param {(e: Error) => void} [onError] 저장 실패 시 원인 전달
+ * @returns {boolean} 저장 성공 여부(쿼터 초과 등은 false).
+ */
+export function saveDocPaths(obj, onError) {
+  try {
+    localStorage.setItem(DOC_PATHS_KEY, JSON.stringify(obj || {}));
+  } catch (e) {
+    if (typeof onError === 'function') onError(e);
+    return false;
+  }
+  notifyDocPathsChange();
+  return true;
+}
+
+/**
+ * 경로 비교용 정규화 — 슬래시 방향과 끝 슬래시만 흡수하고 대소문자는 접는다(Windows).
+ * 선두 `//`(UNC)는 보존한다 — 거기까지 접으면 서로 다른 서버 경로가 같아 보인다.
+ */
+export function normDocPath(p) {
+  return String(p || '').trim()
+    .replace(/\\/g, '/')
+    .replace(/(?!^)\/{2,}/g, '/')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+}
+
+/**
+ * 설정(localStorage `doc_paths`)이 SCM 레지스트리 최신본을 **가리고 있는** 키 목록.
+ *
+ * 문서 경로의 우선순위는 `설정값 > SCM linked_docs` 다(의도된 정책 — 직접 입력을 덮지
+ * 않는다). 문제는 그게 **화면에 안 보인다**는 것이다. 설정의 '빈 칸 채우기'는 SCM 값을
+ * localStorage 로 **복사**하는데, 그 순간부터 그 키는 설정값으로 굳어 SCM 을 아무리 고쳐도
+ * 화면이 안 바뀐다. 게다가 그 행에는 `SCM` 배지도 안 붙어 직접 입력과 구분되지 않는다.
+ * 사용자에게는 "설정에서 저장했는데 안 바뀐다"로만 보인다 — 실제 재보고 사유.
+ *
+ * @param {object} local  loadDocPaths() 결과
+ * @param {object} scm    SCM linked_docs
+ * @param {string[]} keys 비교할 문서 키
+ * @returns {string[]} 양쪽 다 값이 있고 **서로 다른** 키들
+ */
+export function docPathsOverridingScm(local, scm, keys) {
+  const out = [];
+  for (const k of keys || []) {
+    const l = normDocPath(local?.[k]);
+    const s = normDocPath(scm?.[k]);
+    if (l && s && l !== s) out.push(k);
+  }
+  return out;
 }
 
 /** 공유 입력 단일 키 갱신 후 갱신된 객체 반환. */
@@ -241,6 +419,47 @@ export function applySharedDefaults(base, touched, mapped) {
  * @param {Function} setForm 섹션 form setState
  * @param {string} storageKey 섹션 per-section localStorage 키 (예: 'devops_v2_swut_form')
  */
+export function useDocPathsSync(onChange) {
+  useEffect(() => {
+    if (typeof onChange !== 'function') return undefined;
+    const sync = () => onChange(loadDocPaths());
+    // 다른 탭의 storage 이벤트는 DOC_PATHS_KEY 변경(또는 clear, key=null)일 때만 반응.
+    const onStorage = (e) => { if (!e || e.key === DOC_PATHS_KEY || e.key == null) sync(); };
+    window.addEventListener(DOC_PATHS_EVENT, sync);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(DOC_PATHS_EVENT, sync);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [onChange]);
+}
+
+/**
+ * 상한/선택지가 바뀌면 알려 준다 — 준비 게이트가 **바뀐 값으로 다시 판정**해야 한다.
+ *
+ * ⚠ 오래 통지가 없었다. 패널 안의 입력칸은 `onSaved` 콜백으로 그 행만 재조회했지만,
+ *   같은 보드의 **다른 문서 행**과 생성 버튼은 옛 값을 그대로 보고 있었다. 상한 하나가
+ *   여러 문서의 판정에 걸리는 경우(같은 소스를 재는 행들)에 두 행이 다른 말을 한다.
+ *
+ * 다른 탭에서 바뀐 경우까지 잡으려면 `storage` 도 본다 — 다만 키가 스코프별이라
+ * 접두사로 판정한다(`capsKeyFor`).
+ */
+export function useDocGenCapsSync(onChange) {
+  useEffect(() => {
+    if (typeof onChange !== 'function') return undefined;
+    const sync = () => onChange();
+    const onStorage = (e) => {
+      if (!e || e.key == null || String(e.key).startsWith(DOCGEN_CAPS_KEY)) sync();
+    };
+    window.addEventListener(DOCGEN_CAPS_EVENT, sync);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(DOCGEN_CAPS_EVENT, sync);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [onChange]);
+}
+
 export function useSharedInputSync(sectionKey, setForm, storageKey) {
   useEffect(() => {
     const sync = () => {

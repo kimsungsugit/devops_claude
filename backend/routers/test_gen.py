@@ -1,18 +1,15 @@
 """Auto-generated router: test_gen"""
-from fastapi import APIRouter, HTTPException, Request, Query
-from fastapi.responses import FileResponse, HTMLResponse
-from typing import Any, Dict, List, Optional
 import json
-import re
-import traceback
 import logging
-from pathlib import Path
+import re
+from typing import Any, Dict
 
+from fastapi import APIRouter, HTTPException
+
+from backend.helpers import _build_test_cases_for_signature, _get_source_sections_cached, _safe_int
 from backend.schemas import (
     TestGenerateRequest,
 )
-from backend.helpers import _build_test_cases_for_signature, _get_source_sections_cached, _safe_int
-
 
 router = APIRouter()
 _logger = logging.getLogger("devops_api")

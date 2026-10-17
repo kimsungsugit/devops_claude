@@ -1,11 +1,9 @@
 """Unit tests for backend/helpers/session.py session/profile management."""
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -13,26 +11,25 @@ _repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from backend.helpers.session import (
+from backend.helpers.session import (  # noqa: E402
     _augment_path,
-    _default_base_report_dir,
     _exports_dir,
     _invalidate_session_cache,
     _load_raw_profiles,
+    _load_session_meta,
     _local_reports_dir,
+    _local_sits_dir,
     _local_sts_dir,
     _local_suts_dir,
-    _local_sits_dir,
     _normalize_profile,
     _resolve_base_dir,
     _save_raw_profiles,
+    _save_session_meta,
     _session_dir,
     _session_meta_path,
-    _load_session_meta,
-    _save_session_meta,
     _track_process,
 )
-from backend.state import session_list_cache, running_processes
+from backend.state import running_processes, session_list_cache  # noqa: E402
 
 
 class TestSessionDir:

@@ -1,7 +1,7 @@
 ---
 name: doc-quality
 description: "생성된 규격서(UDS/STS/SUTS/SITS)의 품질을 검증하는 에이전트"
-model: sonnet
+model: opus
 ---
 
 You are a document quality validation agent for auto-generated specification documents.

@@ -34,7 +34,6 @@
       "Bash(npm install *)",
       "Bash(npm i *)",
       "Bash(npx playwright *)",
-      "Bash(taskkill //IM excel_rename_gui_v2.exe *)",
       "Bash(taskkill //PID *)",
       "Bash(where *)",
       "Bash(choco *)",
@@ -47,6 +46,14 @@
       "Bash(.venv/Scripts/python *)",
       "Bash(.venv/bin/python *)",
       "Bash(.venv/bin/python3 *)",
+      "Bash(py *)",
+      "Bash(powershell *)",
+      "Bash(powershell.exe *)",
+      "Bash(dir *)",
+      "Bash(findstr *)",
+      "Bash(start *)",
+      "Bash(rg *)",
+      "Bash(backend/.venv/Scripts/python.exe *)",
       "Bash(svn info *)",
       "Bash(svn ls *)",
       "Bash(svn log *)",
@@ -78,9 +85,13 @@
       "Bash(rm -rf /)",
       "Bash(rm -rf ~)",
       "Bash(git push --force *)",
+      "Bash(git push --force)",
+      "Bash(git push -f *)",
+      "Bash(git push -f)",
+      "Bash(git push --force-with-lease *)",
+      "Bash(git push --force-with-lease)",
       "Bash(git reset --hard *)",
-      "Bash(drop database *)",
-      "Bash(DROP TABLE *)"
+      "Bash(git reset --hard)"
     ]
   },
   "hooks": {
@@ -101,7 +112,7 @@
           },
           {
             "type": "command",
-            "command": "echo '{\"systemMessage\":\"reminder: settings/hooks 변경 시 .bak 백업 + python -c json.load() parse 검증 의무 (CLAUDE.md L70)\"}'",
+            "command": "echo '{\"systemMessage\":\"reminder: settings/hooks 변경 시 .bak 백업 + python -c json.load() parse 검증 의무 (.claude/rules/autonomous-operation.md 참조)\"}'",
             "timeout": 2,
             "statusMessage": "Policy reminder..."
           }
@@ -128,7 +139,7 @@
             "type": "command",
             "command": "python scripts/posttoolbatch_report.py 2>/dev/null || true",
             "timeout": 10,
-            "statusMessage": "Batch report (X1~X8 trigger)..."
+            "statusMessage": "Batch report (X1~X9 trigger)..."
           }
         ]
       }
@@ -139,7 +150,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -c \"import sys,json,re; d=json.load(sys.stdin); f=d.get('tool_input',{}).get('file_path',''); warn=''; exts=('.c','.h'); do_check=any(f.endswith(e) for e in exts); content=open(f,'r',encoding='utf-8',errors='ignore').read() if do_check and __import__('os').path.isfile(f) else ''; asil=re.search(r'@asil\\s+(C|D)',content,re.IGNORECASE) if content else None; warn=f'WARNING: ASIL {asil.group(1)} file — reviewer approval required before modifying: {f}' if asil else ''; print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':warn}})) if warn else None\" 2>/dev/null || true",
+            "command": "python scripts/pretool_asil_check.py 2>/dev/null || true",
             "timeout": 5,
             "statusMessage": "ASIL safety check..."
           }
@@ -152,7 +163,7 @@
           {
             "type": "command",
             "command": "python scripts/quality_check.py 2>/dev/null || true",
-            "timeout": 180,
+            "timeout": 300,
             "statusMessage": "Quality check (tests + lint + patterns)..."
           }
         ]
@@ -164,7 +175,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -c \"import sys,json,subprocess,os; status=subprocess.run(['git','status','--porcelain'],capture_output=True,text=True).stdout[:500]; diff_stat=subprocess.run(['git','diff','--stat'],capture_output=True,text=True).stdout[:500]; os.makedirs('.codex_tmp',exist_ok=True); open('.codex_tmp/precompact_context.json','w').write(json.dumps({'git_status':status,'git_diff_stat':diff_stat},ensure_ascii=False)); print(json.dumps({'systemMessage':'PreCompact: preserved git status + diff stat to .codex_tmp/precompact_context.json. Changed: '+status[:150]}))\" 2>/dev/null || echo '{\"systemMessage\":\"PreCompact: preserve task progress, file paths, error context, test results, MCP patterns\"}'",
+            "command": "python scripts/precompact_context.py 2>/dev/null || echo '{\"systemMessage\":\"PreCompact: preserve task progress, file paths, error context, test results, MCP patterns\"}'",
+            "timeout": 15,
             "statusMessage": "Preserving context to file..."
           }
         ]

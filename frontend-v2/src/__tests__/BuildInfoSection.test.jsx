@@ -161,4 +161,49 @@ describe('BuildInfoSection', () => {
     expect(screen.getByText(/빌드 단계/)).toBeInTheDocument();
     expect(screen.getByText('Checkout')).toBeInTheDocument();
   });
+
+  // STS-BUILDINFO-009: 빌드 이력에 per-build SVN 리비전 컬럼이 표시된다
+  it('빌드 이력: SVN 리비전 컬럼과 빌드별 r{revision}이 표시된다', async () => {
+    const { post: mockPost } = await import('../api.js');
+    mockPost.mockResolvedValue({ builds: [
+      { number: 124, result: 'SUCCESS', timestamp: 1784692812771, duration: 1000, revision: '1077' },
+      { number: 122, result: 'SUCCESS', timestamp: 1782360015971, duration: 2000, revision: '1053' },
+    ] });
+
+    render(<BuildInfoSection job={mockJob} analysisResult={{ matchedScm: { id: 'kjpds02_pv' } }} />);
+
+    expect(await screen.findByText('리비전')).toBeInTheDocument();       // 컬럼 헤더
+    expect(await screen.findByText('r1077')).toBeInTheDocument();
+    expect(screen.getByText('r1053')).toBeInTheDocument();
+    // scm_id가 백엔드로 전달되어야 revision 해석이 붙는다
+    expect(mockPost).toHaveBeenCalledWith('/api/jenkins/builds', expect.objectContaining({ scm_id: 'kjpds02_pv' }));
+  });
+
+  // STS-BUILDINFO-010: 결과 서머리 롤업(리비전 범위·고유 종수)
+  it('빌드 이력: 결과 서머리 롤업에 리비전 범위와 고유 종수가 표시된다', async () => {
+    const { post: mockPost } = await import('../api.js');
+    mockPost.mockResolvedValue({ builds: [
+      { number: 124, result: 'SUCCESS', timestamp: 3, revision: '1077' },
+      { number: 122, result: 'SUCCESS', timestamp: 2, revision: '1053' },
+      { number: 121, result: 'FAILURE', timestamp: 1, revision: '1052' },
+    ] });
+
+    render(<BuildInfoSection job={mockJob} analysisResult={null} />);
+
+    // 리비전 범위 r1052→r1077 · 고유 3종
+    expect(await screen.findByText(/리비전 r1052→r1077 · 고유 3종/)).toBeInTheDocument();
+  });
+
+  // STS-BUILDINFO-011: 모든 빌드가 같은 리비전(distinct=1)이면 경고 — 리비전 해석 버그 재발 감시
+  it('빌드 이력: 모든 빌드 리비전이 동일하면 경고를 표시한다', async () => {
+    const { post: mockPost } = await import('../api.js');
+    mockPost.mockResolvedValue({ builds: [
+      { number: 124, result: 'SUCCESS', timestamp: 2, revision: '1075' },
+      { number: 122, result: 'SUCCESS', timestamp: 1, revision: '1075' },
+    ] });
+
+    render(<BuildInfoSection job={mockJob} analysisResult={null} />);
+
+    expect(await screen.findByText(/모든 빌드가 같은 리비전/)).toBeInTheDocument();
+  });
 });

@@ -220,7 +220,7 @@ describe('PathPickerDialog', () => {
 
   it('calls add-allowed-prefix endpoint when user confirms 403 prompt (39차)', async () => {
     let callCount = 0;
-    vi.spyOn(global, 'fetch').mockImplementation(async (url, opts) => {
+    vi.spyOn(global, 'fetch').mockImplementation(async (url, _opts) => {
       callCount++;
       // 첫 호출: browse 403, 두번째: add-prefix 200, 세번째: browse 200
       if (callCount === 1) {

@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 import io
-from pathlib import Path
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -140,6 +140,79 @@ class TestSwUTSExcelParser:
         result = parse_swuts_xlsm(xlsm)
         assert not result.ok
         assert any("TC 시트 미발견" in w for w in result.parse_warnings)
+
+    def test_customer_sts_sheet_now_parses(self):
+        """고객 STS 시트 '3.SW Test Spec'(Unit/Integration 없음)도 파싱된다 — _TC_SHEET_RE에 SW 추가."""
+        xlsm = _build_swuts_xlsm(
+            sheet_name="3.SW Test Spec",
+            header_row=6,
+            headers=[
+                "Index", "Test Case ID", "Title", "Safety Related", "Test Environment",
+                "Test Method", "Test Case Generation Method", "FS_REQ",
+                "Description", "Pre-condition", "Test Action(Sequence)",
+                "Expected Result", "SRS",
+            ],
+            data_rows=[
+                [None, "SwTC_SwEI_01_01", "Battery 전압 모니터", None, None,
+                 "FNCT", None, None, "Battery 전압을 주기적으로 모니터한다", "TRACE 연결", None, None, "SwEI_01"],
+            ],
+        )
+        result = parse_swuts_xlsm(xlsm)
+        assert result.ok, result.parse_warnings
+        e = result.by_tc_id["SwTC_SwEI_01_01"]
+        assert e.description.startswith("Battery 전압")
+        assert e.precondition == "TRACE 연결"
+        assert e.test_method == "FNCT"
+
+    def test_sts_test_action_and_expected_extracted(self):
+        """STS 'Test Action(Sequence)'/'Expected Result' → entry.test_action/expected 채움(라운드 후속).
+
+        기존엔 _LABEL_MAP에 없어 raw_inputs(디버그)로만 흘러 콘텐츠 카드에 미표시였다."""
+        xlsm = _build_swuts_xlsm(
+            sheet_name="3.SW Test Spec",
+            header_row=6,
+            headers=[
+                "Index", "Test Case ID", "Title", "Safety Related", "Test Environment",
+                "Test Method", "Test Case Generation Method", "FS_REQ",
+                "Description", "Pre-condition", "Test Action(Sequence)",
+                "Expected Result", "SRS",
+            ],
+            data_rows=[
+                [None, "SwTC_SwEI_02_01", "과전압 차단", None, None,
+                 "FNCT", None, None, "과전압 시 릴레이 차단", "정상 전압 상태",
+                 "1) 전압을 5.5V로 인가한다 2) 100ms 대기", "릴레이 OFF, DTC 0xC101 set", "SwEI_02"],
+            ],
+        )
+        result = parse_swuts_xlsm(xlsm)
+        assert result.ok, result.parse_warnings
+        e = result.by_tc_id["SwTC_SwEI_02_01"]
+        assert e.test_action.startswith("1) 전압을 5.5V")
+        assert e.expected == "릴레이 OFF, DTC 0xC101 set"
+        # 기존 필드 회귀 없음
+        assert e.description.startswith("과전압")
+        assert e.precondition == "정상 전압 상태"
+
+    def test_sequence_still_maps_sub_index_not_test_action(self):
+        """plain 'Sequence' 헤더는 여전히 sub_index로 매핑 — test_action이 탈취하지 않음(순회순서+break)."""
+        xlsm = _build_swuts_xlsm(
+            sheet_name="2.SW Unit Test Spec",
+            headers=["TC_ID", "Description", "Test Method", "Sequence"],
+            data_rows=[["SwUTC_0009", "desc here now", "REQ", "2"]],
+        )
+        result = parse_swuts_xlsm(xlsm)
+        assert result.ok, result.parse_warnings
+        e = result.by_tc_id["SwUTC_0009"]
+        assert e.sub_index == "2"
+        assert e.test_action == ""   # 'Sequence'가 test_action으로 새지 않음
+
+    def test_sheet_regex_widen_no_false_positive(self):
+        """SW 추가로 STS는 잡되 SITS/SUTS 매칭 불변 + Strategy/Environment 오탐 없음."""
+        from backend.services.swuts_excel_parser import _TC_SHEET_RE
+        assert _TC_SHEET_RE.search("3.SW Test Spec")               # 신규(STS)
+        assert _TC_SHEET_RE.search("3.SW Integration Test Spec")   # SITS(Integration)
+        assert _TC_SHEET_RE.search("2.SW Unit Test Spec")          # SUTS(Unit)
+        assert not _TC_SHEET_RE.search("2.SW Integration Strategy")  # Test Spec 없음
+        assert not _TC_SHEET_RE.search("2.Test Environment")       # Test Spec 없음
 
     def test_header_label_variants_normalized(self):
         """'TC ID' / 'TC_ID' / 'tc id' 모두 동일 라벨로 매칭."""

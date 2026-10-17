@@ -1,9 +1,15 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { post, api, defaultCacheRoot } from '../api.js';
 import { useToast, useJenkinsCfg, useJob } from '../App.jsx';
+import { pickScmForJobWithSource, loadProjectFromCache } from '../projectLoader.js';
+import { pollImpactJob, throwIfAborted, isAbortError } from '../impactPoll.js';
 import JobCard from '../components/JobCard.jsx';
 import ResultPanel from '../components/ResultPanel.jsx';
 import AggregateCharts from '../components/AggregateCharts.jsx';
+
+// pickScmForJob 은 projectLoader 로 이관됐다. 예전엔 여기서 re-export 했으나 소비처가
+// 레거시 테스트 1곳뿐이라 그쪽을 정본 경로로 돌리고 제거했다(컴포넌트 외 export 는
+// react-refresh 를 깨뜨린다 — react-refresh/only-export-components).
 
 /* ── Step definitions ─────────────────────────────────────────────── */
 const STEPS = [
@@ -14,74 +20,32 @@ const STEPS = [
 ];
 
 function stepIcon(state) {
-  if (state === 'done')  return '✓';
-  if (state === 'error') return '✕';
+  if (state === 'done')    return '✓';
+  if (state === 'error')   return '✕';
+  if (state === 'aborted') return '⏹';   // 사용자가 의도적으로 멈춤 — 실패(✕)와 구분
   return '○';
 }
 
 /** Poll jenkins progress until done or error */
 async function pollJenkinsProgress(jobUrl, buildSelector, jobId, action, { onMsg, signal }) {
   while (true) {
-    if (signal?.aborted) throw new Error('AbortError');
+    throwIfAborted(signal);
     await new Promise(r => setTimeout(r, 2000));
+    throwIfAborted(signal);  // 대기 중 도착한 '중단'
     const data = await api(
       `/api/jenkins/progress?action=${encodeURIComponent(action)}` +
       `&job_url=${encodeURIComponent(jobUrl)}` +
       `&build_selector=${encodeURIComponent(buildSelector)}` +
       `&job_id=${encodeURIComponent(jobId)}`
     );
+    throwIfAborted(signal);  // 요청 왕복 중 도착한 '중단'
     const p = data?.progress || {};
     if (p.message || p.stage) onMsg(p.message || p.stage);
     if (p.done || p.error) return p;
   }
 }
 
-/**
- * Pick the most likely SCM registry entry for the given Jenkins job URL.
- *
- * Why this matters: the backend resolver treats `scm_id` as an authoritative
- * override (it short-circuits URL auto-matching). If we blindly send
- * `scmList[0]` when multiple projects are registered, a wrong entry's
- * credentials would be used for checkout. So we only assert a match when we
- * have reasonable confidence; otherwise we omit `scm_id` and let the backend
- * auto-resolve by repo_url.
- */
-export function pickScmForJob(scmList, jobUrl) {
-  if (!Array.isArray(scmList) || scmList.length === 0) return null;
-  if (scmList.length === 1) return scmList[0];
-  const jobStr = String(jobUrl || '').toLowerCase();
-  for (const entry of scmList) {
-    const tokens = [entry.id, entry.name]
-      .filter(Boolean)
-      .map(s => String(s).toLowerCase())
-      .filter(s => s.length >= 3);
-    if (tokens.some(t => jobStr.includes(t))) return entry;
-  }
-  return null;
-}
-
-/** Poll impact job until completed or failed */
-async function pollImpactJob(jobId, { onMsg, signal }) {
-  const t0 = Date.now();
-  while (true) {
-    if (signal?.aborted) throw new Error('AbortError');
-    await new Promise(r => setTimeout(r, 3000));
-    const data = await api(`/api/scm/impact-job/${encodeURIComponent(jobId)}`);
-    const job = data?.job || {};
-    const elapsed = Math.round((Date.now() - t0) / 1000);
-    const timeStr = elapsed > 60 ? `${Math.floor(elapsed / 60)}분 ${elapsed % 60}초` : `${elapsed}초`;
-    const msg = job.message || job.stage || '';
-    onMsg(`${msg} (${timeStr} 경과)`);
-    if (job.status === 'completed') {
-      const resultData = await api(`/api/scm/impact-job/${encodeURIComponent(jobId)}/result`);
-      return resultData?.result || {};
-    }
-    if (job.status === 'failed') {
-      const err = job.error?.title || job.error?.detail || '영향도 분석 실패';
-      throw new Error(err);
-    }
-  }
-}
+/* pollImpactJob은 impactPoll.js로 이관 — '변경 영향 평가' 탭의 빌드별 재실행과 공유한다. */
 
 /* ── Dashboard ────────────────────────────────────────────────────── */
 export default function Dashboard({ onGoDetail }) {
@@ -94,7 +58,12 @@ export default function Dashboard({ onGoDetail }) {
   const [aggStats, setAggStats] = useState(null);
   const [aggLoading, setAggLoading] = useState(false);
   const [filter, setFilter] = useState('');
-  const filterInputName = useRef(`job-filter-${Math.random().toString(36).slice(2, 10)}`).current;
+  const [offlineUrl, setOfflineUrl] = useState('');   // 오프라인 캐시 보기 Job URL 입력
+  // ⚠ 자동완성 방지용 — **마운트마다 달라야** 브라우저가 이 필드를 학습하지 못한다.
+  //   useRef(expr) 는 expr 을 매 렌더 재평가하면서 첫 값만 쓰므로 낭비 + 렌더 순수성
+  //   위반이다. useState 지연 초기화는 마운트당 1회만 평가한다. (useId 는 트리 위치
+  //   기준으로 **고정**이라 자동완성 방지 목적에 못 쓴다.)
+  const [filterInputName] = useState(() => `job-filter-${Math.random().toString(36).slice(2, 10)}`);
   const [favorites, setFavorites] = useState(() => {
     try { return JSON.parse(localStorage.getItem('devops_fav_jobs') || '[]'); } catch { return []; }
   });
@@ -150,6 +119,13 @@ export default function Dashboard({ onGoDetail }) {
   const [checkoutStatus, setCheckoutStatus] = useState(null);
   const abortRef = useRef(null);
   const autoRunRef = useRef(null);
+  // 실행 세대(generation). runAnalysis 는 여러 개가 겹쳐 돌 수 있는데(job 전환·재실행),
+  // 서버측 취소 endpoint가 없어 선행 실행은 abort 후에도 진행 중인 fetch 를 완주한다.
+  // 그때 구 실행이 setAnalysisResult/setStep/setRunning 을 그대로 호출하면 늦게 끝난 쪽이
+  // 이기는 last-writer-wins 가 되어, 다른 프로젝트의 영향분석 결과가 현재 화면에 실린다
+  // (SrsSdsSection·ScmSection 은 이를 검출할 수단이 없어 그대로 표시 — ISO 26262 오보고).
+  // 그래서 상태를 쓰기 전에 '내가 아직 최신 실행인가'를 매번 확인한다.
+  const runIdRef = useRef(0);
 
   /* Load Jenkins job list */
   const loadJobs = useCallback(async () => {
@@ -182,9 +158,28 @@ export default function Dashboard({ onGoDetail }) {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const setStep = (id, state, msg = '') => {
+  // 무가드 원본 적용자. runAnalysis 안에서는 세대 가드를 씌운 setStep 으로 감싸 쓴다.
+  const applyStep = (id, state, msg = '') => {
     setStepStates(p => ({ ...p, [id]: state }));
     if (msg) setStepMsgs(p => ({ ...p, [id]: msg }));
+  };
+
+  /** 진행 중이던 단계만 '중단됨'으로 확정한다.
+   *
+   * 실행을 끊는 경로가 둘이라(stopAnalysis / loadFromCache) 한쪽만 마킹하면 그쪽에서만
+   * 스피너가 고착된다. **active 만** 바꾸고 done/error 는 보존한다 — 스테퍼는 어느
+   * 단계까지 끝났는지에 대한 사용자의 유일한 기록이라, 완료분까지 중단됨으로 덮으면
+   * 정보가 사라진다.
+   */
+  const markActiveAborted = () => {
+    setStepStates(p => {
+      const next = { ...p };
+      let touched = false;
+      for (const k of Object.keys(next)) {
+        if (next[k] === 'active') { next[k] = 'aborted'; touched = true; }
+      }
+      return touched ? next : p;
+    });
   };
 
   /* Analysis result cache keyed by jobUrl + buildNumber */
@@ -207,17 +202,30 @@ export default function Dashboard({ onGoDetail }) {
     const cacheRoot = defaultCacheRoot(jobUrl) || cfg.cacheRoot;
     const buildSelector = cfg.buildSelector || 'lastSuccessfulBuild';
 
+    // 선행 실행이 남아 있으면 그 컨트롤러 참조를 잃기 직전에 취소한다. 이 한 줄이 없으면
+    // 바로 아래 대입이 이전 컨트롤러를 덮어써 선행 실행은 '중단' 버튼으로도 취소할 수 없다.
+    abortRef.current?.abort();
     abortRef.current = new AbortController();
     const { signal } = abortRef.current;
+
+    // 이 실행의 세대 번호. 이후 더 새로운 실행이 시작되면 runIdRef 가 증가해
+    // isCurrent() 가 false 가 되고, 이 실행의 모든 상태 쓰기가 무시된다.
+    const runId = ++runIdRef.current;
+    const isCurrent = () => runIdRef.current === runId;
+    const setStep = (id, state, msg = '') => { if (isCurrent()) applyStep(id, state, msg); };
 
     let artifacts = [];
     let reportData = null;
     let scmList = [];
     let matchedScm = null;
+    // matchedScm 을 '무엇을 근거로' 골랐는지. 소비자(영향 탭 provenance 게이트)는 이게 없으면
+    // 수동 지정과 '후보가 하나뿐이라 job URL 도 안 보고 승인'을 구분할 수 없다.
+    let matchedScmSource = null;
     let impactData = null;
 
     const updateResult = () => {
-      const current = { artifacts, reportData, scmList, matchedScm, impactData, jobUrl, cacheRoot };
+      if (!isCurrent()) return;
+      const current = { artifacts, reportData, scmList, matchedScm, matchedScmSource, impactData, jobUrl, cacheRoot };
       setResult(current);
       setAnalysisResult(current);
     };
@@ -233,14 +241,24 @@ export default function Dashboard({ onGoDetail }) {
       } catch (_prefetchErr) {
         scmList = [];
       }
-      setScmChoices(scmList);
+      if (isCurrent()) setScmChoices(scmList);
       // Manual override wins; otherwise fall back to the heuristic.
       const manual = manualScmId ? scmList.find(e => e.id === manualScmId) : null;
-      matchedScm = manual || pickScmForJob(scmList, jobUrl);
+      if (manual) {
+        matchedScm = manual;
+        matchedScmSource = 'manual';   // 사용자가 직접 고름 — 가장 강한 근거
+      } else {
+        const picked = pickScmForJobWithSource(scmList, jobUrl);
+        matchedScm = picked.entry;
+        matchedScmSource = picked.source;
+      }
 
       /* Step 1: Artifact sync */
+      // trigger-async와 같은 이유로 발사 직전에 확인한다 — sync-async는 아티팩트 다운로드 +
+      // SVN 체크아웃을 수행하는 부작용 요청이고, 서버측 취소 endpoint가 없어 한번 뜨면 완주한다.
+      throwIfAborted(signal);
       setStep('sync', 'active', '동기화 시작 중...');
-      setCheckoutStatus(null);
+      if (isCurrent()) setCheckoutStatus(null);
       const syncRes = await post('/api/jenkins/sync-async', {
         job_url: jobUrl,
         username: cfg.username,
@@ -266,10 +284,12 @@ export default function Dashboard({ onGoDetail }) {
       // progress event — surface that so a "sync done 100%" with an empty
       // source dir doesn't pass silently.
       const checkoutOk = syncProgress.checkout_ok !== false;
-      setCheckoutStatus({
-        ok: checkoutOk,
-        error: checkoutOk ? '' : (syncProgress.checkout_error || 'unknown'),
-      });
+      if (isCurrent()) {
+        setCheckoutStatus({
+          ok: checkoutOk,
+          error: checkoutOk ? '' : (syncProgress.checkout_error || 'unknown'),
+        });
+      }
       setStep('sync', 'done', checkoutOk ? '동기화 완료' : `동기화 완료 (SCM 실패: ${syncProgress.checkout_error || 'unknown'})`);
 
       /* Cache check */
@@ -295,10 +315,12 @@ export default function Dashboard({ onGoDetail }) {
           setStep('report', 'done', `빌드 #${currentBuild} (캐시)`);
           setStep('scm', 'done', '캐시 사용');
           setStep('impact', 'done', '캐시 사용');
-          setResult(cached.result);
-          setAnalysisResult(cached.result);
-          toast('success', `빌드 #${currentBuild} 변경 없음 — 캐시된 결과를 불러왔습니다.`);
-          setRunning(false);
+          if (isCurrent()) {
+            setResult(cached.result);
+            setAnalysisResult(cached.result);
+            toast('success', `빌드 #${currentBuild} 변경 없음 — 캐시된 결과를 불러왔습니다.`);
+            setRunning(false);
+          }
           return;
         }
       } catch (e) {
@@ -359,6 +381,10 @@ export default function Dashboard({ onGoDetail }) {
          would silently analyse the wrong project whenever multiple registries
          exist. When the heuristic can't pick one, skip rather than guess. */
       if (matchedScm) {
+        // '중단' 이후에 트리거가 나가면 서버는 체크아웃·문서생성·커버리지 baseline 갱신·감사기록을
+        // 모두 수행하는데 화면엔 아무 것도 안 뜬다(취소 후 침묵 실행). 부작용을 만드는 요청이므로
+        // 발사 직전에 반드시 확인한다.
+        throwIfAborted(signal);
         setStep('impact', 'active', '영향도 분석 시작 중...');
         try {
           const triggerRes = await post('/api/jenkins/impact/trigger-async', {
@@ -375,11 +401,25 @@ export default function Dashboard({ onGoDetail }) {
             signal,
             onMsg: msg => setStep('impact', 'active', msg),
           });
+          // 실행 식별자 — 영향 탭의 영속/하이드레이트가 '같은 실행인지'를 확정하는 근거이자,
+          // localStorage quota로 본문이 빠졌을 때 백엔드에서 재조회할 열쇠(impactStore 참조).
+          impactData._job_id = triggerRes.job_id;
           impactData._linked_docs = matchedScm.linked_docs || {};
           impactData._scm_name = matchedScm.name || matchedScm.id;
-          setStep('impact', 'done', '완료');
+          // 부분 실패(분석은 성공, 일부 문서 자동 생성 실패)를 '완료'로 위장하지 않는다.
+          // 백엔드가 job을 completed로 내려주되 partial_failure/actions[t].status='failed'로 표시.
+          const _failedDocs = Object.entries(impactData.actions || {})
+            .filter(([, a]) => a && a.status === 'failed')
+            .map(([t]) => t.toUpperCase());
+          if (impactData.partial_failure || _failedDocs.length) {
+            const _list = _failedDocs.join(', ') || '일부 대상';
+            setStep('impact', 'done', `분석 완료 · ${_list} 문서 생성 실패`);
+            if (isCurrent()) toast('warning', `영향 분석은 완료했으나 ${_list} 문서 자동 생성에 실패했습니다. 분석 결과는 유효합니다.`);
+          } else {
+            setStep('impact', 'done', '완료');
+          }
         } catch (e) {
-          if (e.message === 'AbortError') throw e;
+          if (isAbortError(e)) throw e;
           setStep('impact', 'error', e.message);
           impactData = null;
         }
@@ -392,28 +432,88 @@ export default function Dashboard({ onGoDetail }) {
       updateResult();
 
       const bn = reportData?.build_number;
-      if (bn) {
+      // isCurrent() 필수. matchedScm 이 없으면 impact 블록이 통째로 스킵돼 throwIfAborted 에
+      // 도달하지 못하고 여기까지 흘러온다 → 중단된 실행의 부분 결과(impactData:null)가
+      // 캐시에 박히고, 이후 같은 build+scmId 재실행이 그걸 "변경 없음 — 캐시된 결과"
+      // 성공 토스트와 함께 재생한다(중단이 성공으로 위장되는 또 하나의 경로).
+      if (bn && isCurrent()) {
         cacheRef.current[jobUrl] = {
           buildNumber: bn,
           scmId: matchedScm?.id || '',
-          result: { artifacts, reportData, scmList, matchedScm, impactData, jobUrl, cacheRoot },
+          result: { artifacts, reportData, scmList, matchedScm, matchedScmSource, impactData, jobUrl, cacheRoot },
           timestamp: Date.now(),
         };
       }
-      toast('success', '분석이 완료되었습니다.');
+      // 부분 실패는 위에서 warning 토스트로 이미 알렸다 — 성공으로 덮어쓰지 않는다(위장 방지).
+      if (!impactData?.partial_failure && isCurrent()) {
+        toast('success', '분석이 완료되었습니다.');
+      }
     } catch (e) {
-      if (e.message !== 'AbortError') {
+      if (!isAbortError(e) && isCurrent()) {
         toast('error', `분석 중 오류: ${e.message}`);
       }
     } finally {
-      setRunning(false);
+      // 세대 가드 필수. 이게 없으면 늦게 끝난 구 실행이 진행 중인 신 실행의 running 을 꺼서
+      // '중단' 버튼이 사라지고(= 신 실행을 취소할 UI 가 없어짐) 스테퍼도 완료된 것처럼 보인다.
+      if (isCurrent()) setRunning(false);
     }
   }, [selectedJob, cfg, toast, setAnalysisResult, manualScmId]);
 
-  autoRunRef.current = runAnalysis;
+  // 오프라인 캐시 보기 — Jenkins 미연결/다운 시, 이전에 분석돼 캐시된 빌드를 sync 없이 report/summary로 바로 조회한다.
+  // 분석 흐름(sync→report)의 sync(Jenkins 의존) 단계를 건너뛰고 캐시된 리포트만 읽으므로 Jenkins 라이브 연결이 불필요하다.
+  const loadFromCache = useCallback(async (rawUrl) => {
+    if (!rawUrl || !rawUrl.trim()) { toast('info', 'Job URL을 입력하세요.'); return; }
+    // 진행 중인 분석을 취소하고 세대를 올린다 — 그러지 않으면 나중에 끝난 분석의
+    // updateResult() 가 방금 로드한 캐시 결과를 Context 에서 덮어쓴다(last-writer-wins).
+    // 세대를 올리면 구 실행의 finally 가 running 을 못 끄므로 여기서 명시적으로 내린다.
+    abortRef.current?.abort();
+    setRunning(false);
+    // stopAnalysis 와 같은 이유로 진행 중이던 단계를 '중단됨'으로 확정한다. 이게 없으면
+    // 스테퍼 렌더 조건(stepStates 비어있지 않음)은 참인데 active 세그먼트가 스피너를
+    // 계속 돌리고, running=false 라 중단 버튼도 없어 멈춘 건지 도는 건지 알 수 없다.
+    markActiveAborted();
+    // 이 로드도 하나의 '실행'이다. 남의 세대만 올리고 자기 쓰기를 무가드로 두면 같은
+    // last-writer-wins 가 그대로 남는다 — 캐시 로드 두 건이 겹치면(즐겨찾기 연타) 늦게
+    // 끝난 쪽이 이긴다. 게다가 이 결과는 impactData:null 이라 impactConflict 가
+    // no_impact 로 통과시켜 화면에 경고조차 안 뜬다(침묵 오귀속). 그래서 자기 세대를
+    // 발급받고 쓰기 직전에 확인한다.
+    const runId = ++runIdRef.current;
+    const isCurrent = () => runIdRef.current === runId;
+    const jobUrl = rawUrl.trim().replace(/\/+$/, '') + '/';
+    const name = jobUrl.split('/').filter(Boolean).pop();
+    setSelectedJob({ name, url: jobUrl });
+    try {
+      toast('info', `캐시에서 '${name}' 불러오는 중...`);
+      // 캐시 로드 로직은 projectLoader.loadProjectFromCache로 단일화(Detail 브레드크럼 전환과 공유).
+      const result = await loadProjectFromCache(jobUrl, cfg);
+      if (!isCurrent()) return;
+      setAnalysisResult(result);
+      toast('success', `캐시 로드 완료 — 빌드 #${result.reportData?.build_number ?? '?'} (Jenkins 미연결)`);
+      onGoDetail?.();
+    } catch (e) {
+      if (isCurrent()) toast('error', `캐시 로드 실패: ${e.message} — 이 Job의 캐시가 없을 수 있습니다.`);
+    }
+  }, [cfg, toast, setSelectedJob, setAnalysisResult, onGoDetail]);
+
+  // 렌더가 아니라 **커밋 후**에 쓴다. React 는 커밋하지 않고 렌더할 수 있어
+  // (StrictMode 이중 렌더·동시성 중단·Suspense) 렌더 중 쓰기는 버려진 렌더의
+  // 함수를 ref 에 남길 수 있다. 읽는 곳은 job 클릭 → setTimeout(100ms) 이라
+  // 커밋 후 대입으로도 항상 최신이다.
+  useEffect(() => { autoRunRef.current = runAnalysis; }, [runAnalysis]);
 
   const stopAnalysis = () => {
     abortRef.current?.abort();
+    // 진행 중이던 단계를 '중단됨'으로 확정한다. 이게 없으면 active 세그먼트가 스피너를
+    // 계속 돌린 채 남고, running=false 라 중단 버튼마저 사라져 사용자는 "멈췄는지 도는지"를
+    // 알 수 없다 — 중단이 무반응처럼 보인다.
+    markActiveAborted();
+    toast('info', '분석을 중단했습니다.');
+    // 세대를 올려 그 실행의 이후 쓰기를 전부 무효화한다. abort 만으로는 부족하다 —
+    // signal 을 안 받는 raw post(report/summary 등)는 완주하고, 그 직후 setStep·
+    // updateResult 에는 abort 검사 지점이 없어 '중단'을 눌러도 스테퍼가 계속 전진하고
+    // 부분 결과가 전역 Context 에 실린다. 세대를 올리면 running 은 여기서 직접 내린다
+    // (구 실행의 finally 가 isCurrent() 로 막히므로).
+    runIdRef.current += 1;
     setRunning(false);
   };
 
@@ -487,6 +587,38 @@ export default function Dashboard({ onGoDetail }) {
         <AggregateCharts projects={aggStats.projects} buildStats={{ successCount, failCount, unstableCount, disabledCount, total: statsPool.length, recentBuilds: recentBuilds.length, recentSuccess }} />
       )}
 
+      {/* 오프라인 캐시 보기 — Jenkins 목록을 못 불러온 경우(미연결/다운) 캐시된 빌드를 sync 없이 직접 조회 */}
+      {!jobsLoading && jobs.length === 0 && (
+        <div className="panel" style={{ marginBottom: 12, borderLeft: '3px solid var(--color-warning)' }}>
+          <div className="panel-header"><span className="panel-title">⚡ 오프라인 캐시 보기</span></div>
+          <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
+            Jenkins 프로젝트 목록을 불러오지 못했습니다(미연결/다운). 이전에 분석돼 <b>캐시된 빌드</b>는 Jenkins 없이 바로 볼 수 있습니다 —
+            동기화를 건너뛰고 캐시된 리포트만 읽어 프로젝트 결과 화면을 엽니다.
+          </div>
+          {favorites.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>★ 즐겨찾기에서 바로 보기</div>
+              <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                {favorites.map((url) => (
+                  <button key={url} className="btn-sm" onClick={() => loadFromCache(url)}>
+                    {url.split('/').filter(Boolean).pop()}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+            <input type="text" value={offlineUrl} onChange={e => setOfflineUrl(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && offlineUrl.trim()) loadFromCache(offlineUrl); }}
+              placeholder="Job URL (예: http://192.168.110.40:7000/job/HDPDM01_PDS64_RD/)"
+              style={{ flex: 1, minWidth: 260, padding: '6px 10px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6 }} />
+            <button className="btn-primary" onClick={() => loadFromCache(offlineUrl)} disabled={!offlineUrl.trim()}>
+              캐시에서 보기
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Toolbar */}
       <div className="toolbar">
         <span className="toolbar-title">Jenkins 프로젝트</span>
@@ -534,6 +666,10 @@ export default function Dashboard({ onGoDetail }) {
               isFavorite={favorites.includes(job.url)}
               onToggleFavorite={(e) => { e.stopPropagation(); toggleFavorite(job.url); }}
               onClick={() => {
+                // 실행 중 다른 job 을 고르면 선행 파이프라인을 즉시 취소한다. runAnalysis 진입부에도
+                // 같은 abort 가 있지만, 자격증명 누락 등으로 그 함수가 조기 return 하면 도달하지
+                // 못하므로 전환 시점에서 한 번 더 끊는다(abort 는 멱등).
+                abortRef.current?.abort();
                 setSelectedJob(job);
                 setResult(null);
                 setStepStates({});
@@ -575,9 +711,13 @@ export default function Dashboard({ onGoDetail }) {
             )}
           </div>
 
-          {/* Manual SCM override: only shown when >1 registry exists so the
-              user can disambiguate. Default (empty string) = auto-match. */}
-          {scmChoices.length > 1 && (
+          {/* Manual SCM override. Default (empty string) = auto-match.
+              ⚠ 등록이 1개일 때도 반드시 노출해야 한다. 자동매칭은 후보가 하나면 job URL 을
+              읽지도 않고 승인하는데(pickScmForJob 'sole'), 영향 탭의 provenance 게이트는
+              그 근거를 증거로 인정하지 않아 화면이 잠긴다. 이 드롭다운이 유일한 탈출구
+              (수동 지정 = matchedScmSource 'manual' = 가장 강한 근거)이므로, 1개일 때
+              숨기면 단일 SCM 사용자는 잠긴 채 빠져나올 방법이 없다. */}
+          {scmChoices.length > 0 && (
             <div style={{ padding: 'var(--sp-2)', display: 'flex', alignItems: 'center', gap: 8, fontSize: 'var(--text-sm)' }}>
               <label htmlFor="scm-override" style={{ color: 'var(--text-muted)' }}>SCM 매핑:</label>
               <select
@@ -625,9 +765,10 @@ export default function Dashboard({ onGoDetail }) {
                   <div
                     key={s.id}
                     className={`sync-segment${
-                      state === 'done'   ? ' seg-done'   :
-                      state === 'active' ? ' seg-active' :
-                      state === 'error'  ? ' seg-error'  : ''
+                      state === 'done'    ? ' seg-done'    :
+                      state === 'active'  ? ' seg-active'  :
+                      state === 'error'   ? ' seg-error'   :
+                      state === 'aborted' ? ' seg-aborted' : ''
                     }`}
                     title={stepMsgs[s.id] || s.label}
                   >

@@ -14,6 +14,15 @@ gcovr>=7.0,<8.0
 reportlab>=4.0,<5.0
 openpyxl>=3.1,<4.0
 beautifulsoup4>=4.12,<5.0
+# cross-process 파일 락 (impact run-lock·auth admin_users 등). 미설치 시 threading.Lock으로
+# degrade되어 다중 uvicorn 워커에서 상호배제가 깨진다 — 다중 워커 배포에서 필수.
+filelock>=3.12,<4.0
+
+# SKILL.md frontmatter 검사(scripts/check_skill_frontmatter.py, PostToolUse 훅)의 하드 의존.
+# 현재는 ag2/huggingface_hub 전이로만 설치돼 있어(LLM 스택) core-only 설치에선 사라질 수 있다
+# — 그 경우 검사기는 DISABLED로 정직하게 죽지만 게이트가 꺼진다. bcrypt/PyJWT 미선언과 같은
+# 패턴이라 명시 선언한다. import 하는 프로덕션 코드는 위 검사기가 유일하다.
+PyYAML>=6.0,<7.0
 
 # optional: richer HTML table parsing for pandas.read_html
 # lxml

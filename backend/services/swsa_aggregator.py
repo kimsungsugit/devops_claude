@@ -573,6 +573,14 @@ def build_swsa_report(
         for w in getattr(src, "parse_warnings", []) or []:
             res.warnings.append(f"[{prefix}] {w}")
 
+    # 라운드 107 — is_formula_cell 가드로 보존하는 템플릿 COUNTIF/SUM 요약 셀이
+    # openpyxl 캐시 미저장으로 재계산 안 하는 뷰어에서 공백/0이 되지 않도록
+    # fullCalcOnLoad로 열 때 자동 재계산(형제 빌더 정합). 캐시 불변→다운스트림 영향 0.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # pragma: no cover — openpyxl 버전 차 방어
+        pass
+
     wb.save(res.xlsm_io)
     res.xlsm_io.seek(0)
     return res

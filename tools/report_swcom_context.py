@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from docx import Document  # type: ignore
 from docx.oxml.table import CT_Tbl  # type: ignore

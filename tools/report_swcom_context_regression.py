@@ -14,7 +14,7 @@ from docx.text.paragraph import Paragraph  # type: ignore
 repo_root = Path(r"D:\Project\devops\260105")
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
-import report_generator as rg
+import report_generator as rg  # noqa: E402
 
 
 def _iter_blocks(doc: Document):

@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+
 # Auto-install dependencies
 def _ensure_package(name: str, pip_name: str = None):
     try:
@@ -31,13 +32,13 @@ except ImportError:
     pass
 
 try:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.colors import HexColor
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
     _HAS_REPORTLAB = True
 except ImportError:
     pass
@@ -232,13 +233,13 @@ def _ensure_reportlab():
         # Re-import after install
         global A4, mm, SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
         global getSampleStyleSheet, ParagraphStyle, HexColor, pdfmetrics, TTFont
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.units import mm
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.colors import HexColor
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
         _HAS_REPORTLAB = True
 
 

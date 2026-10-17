@@ -3,6 +3,7 @@ import { post } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { buildTone, defaultCacheRoot } from '../../api.js';
+import { pickScmForJob } from '../../projectLoader.js';
 
 /** Format milliseconds into a human-readable duration string */
 function fmtDuration(ms) {
@@ -55,6 +56,12 @@ export default function BuildInfoSection({ job, analysisResult }) {
 
   const rd = analysisResult?.reportData;
   const cacheRoot = analysisResult?.cacheRoot || defaultCacheRoot(job?.url) || cfg.cacheRoot;
+  // scm_id — 빌드 목록에 per-build SVN revision을 붙이려면 백엔드가 SCM(svn_url/creds)을 알아야
+  // 한다. 결과에 담긴 matchedScm 우선, 없으면 job↔registry 매칭·impact 메타 순으로 해석.
+  const scmId = analysisResult?.matchedScm?.id
+    || pickScmForJob(analysisResult?.scmList, job?.url)?.id
+    || analysisResult?.impactData?.trigger?.scm_id
+    || '';
 
   // Build steps from reportData (support multiple possible paths)
   const buildSteps = rd?.kpis?.build?.steps ?? rd?.steps ?? rd?.stages ?? null;
@@ -74,6 +81,8 @@ export default function BuildInfoSection({ job, analysisResult }) {
         job_url: job.url,
         username: cfg.username,
         api_token: cfg.token,
+        // scm_id를 주면 백엔드가 빌드별 SVN revision(빌드 시각→svn 날짜-revision)을 붙여준다.
+        scm_id: scmId,
         limit: 100,
         verify_tls: cfg.verifyTls,
       });
@@ -84,17 +93,39 @@ export default function BuildInfoSection({ job, analysisResult }) {
     } finally {
       setLoading(false);
     }
-  }, [job, cfg, toast]);
+  }, [job, cfg, toast, scmId]);
 
-  // Auto-load builds on mount
+  // Auto-load builds on mount + scmId 확정 시 재조회. scmId가 ''→실값으로 전이(분석 완료로
+  // matchedScm 채워짐)할 때 다시 부르지 않으면 '리비전' 컬럼이 계속 '—'로 남는다(W5 stale).
+  // deps에 scmId 포함(length 가드 제거) → 전이 시 revision 재부착. 값 동일하면 재발화 안 함.
   useEffect(() => {
-    if (job?.url && cfg.username && cfg.token && builds.length === 0) {
+    if (job?.url && cfg.username && cfg.token) {
       loadBuilds();
     }
-  }, [job?.url]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [job?.url, scmId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pagedBuilds = builds.slice(buildPage * PAGE_SIZE, (buildPage + 1) * PAGE_SIZE);
   const totalPages = Math.ceil(builds.length / PAGE_SIZE);
+
+  // 빌드 히스토리 결과 서머리(롤업) — 성공/실패 집계 + 리비전 범위·고유 종수. distinct===1이면
+  // 모든 빌드가 같은 revision으로 잡힌 것(리비전 해석 문제 신호)이라 경고한다.
+  const rollup = useMemo(() => {
+    const revs = builds.map(b => Number(b?.revision)).filter(n => Number.isFinite(n));
+    let success = 0, failure = 0;
+    for (const b of builds) {
+      const r = String(b?.result ?? '').toUpperCase();
+      if (r === 'SUCCESS') success += 1;
+      else if (r === 'FAILURE') failure += 1;
+    }
+    return {
+      total: builds.length, success, failure,
+      hasRev: revs.length > 0,
+      revCount: revs.length,
+      minRev: revs.length ? Math.min(...revs) : null,
+      maxRev: revs.length ? Math.max(...revs) : null,
+      distinct: new Set(revs).size,
+    };
+  }, [builds]);
 
   const loadLog = useCallback(async () => {
     setLogLoading(true);
@@ -282,16 +313,32 @@ export default function BuildInfoSection({ job, analysisResult }) {
           </div>
         )}
 
+        {/* 결과 서머리 롤업 — 성공/실패 + 리비전 범위·고유 종수(빌드별 SVN revision) */}
+        {rollup.total > 0 && (
+          <div className="text-sm" style={{ padding: '2px 0 6px' }}>
+            <span className="text-muted">총 {rollup.total}빌드</span>
+            <span style={{ margin: '0 6px', color: 'var(--color-success, #16a34a)' }}>성공 {rollup.success}</span>
+            <span style={{ marginRight: 6, color: 'var(--color-danger, #dc2626)' }}>실패 {rollup.failure}</span>
+            {rollup.hasRev && (
+              <span className="text-muted">· 리비전 r{rollup.minRev}→r{rollup.maxRev} · 고유 {rollup.distinct}종</span>
+            )}
+            {rollup.revCount >= 2 && rollup.distinct === 1 && (
+              <span style={{ color: 'var(--color-warning)', marginLeft: 6 }}>⚠ 모든 빌드가 같은 리비전 — 리비전 해석 확인 필요</span>
+            )}
+          </div>
+        )}
+
         {builds.length > 0 ? (
           <>
             <table className="impact-table">
               <thead>
-                <tr><th>#</th><th>결과</th><th>일시</th><th>소요 시간</th></tr>
+                <tr><th>#</th><th>리비전</th><th>결과</th><th>일시</th><th>소요 시간</th></tr>
               </thead>
               <tbody>
                 {pagedBuilds.map(b => (
                   <tr key={b.number}>
                     <td style={{ fontWeight: 700 }}>#{b.number}</td>
+                    <td className="text-sm" style={{ fontFamily: 'monospace' }} title="빌드 시각 기준 실제 checkout SVN revision">{b.revision ? `r${b.revision}` : '—'}</td>
                     <td><StatusBadge tone={buildTone(b.result)}>{b.result ?? 'IN PROGRESS'}</StatusBadge></td>
                     <td className="text-sm">{b.timestamp ? new Date(b.timestamp).toLocaleString('ko-KR') : '-'}</td>
                     <td className="text-sm">{fmtDuration(b.duration)}</td>

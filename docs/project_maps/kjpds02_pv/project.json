@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "scm_id": "kjpds02_pv",
+  "project": "KJPDS02_PV",
+  "source_roots": [
+    "C:\\Project\\Ados\\NE1AW_PORTING",
+    "C:\\Project\\Ados\\PDS128_FBL"
+  ],
+  "maps": {
+    "component_map": {
+      "file": "component_map.json",
+      "origin": "KJPDS02_PV SwDS v3.01 software structure table: (KJPDS02_SwDS) Software Architecture Design Specification_v3.01_20260410_R_변경내역반영.docx (sha256 f665012a3c935d2a41e80ecaa9db81cd1d2dc603b813f0eefb023271afaf1da6) — table files 103, in source 99; source files 178, listed 101, not listed 77 (no row, no verify=X — the document gives no exemption basis)",
+      "generated_at": "2026-10-17T11:20:25",
+      "method": "structure_table",
+      "table_files_not_in_source": [
+        "Ap_BuzzerCtrl_it_PDS.c",
+        "Ap_DoorCtrl_it.PDS.h",
+        "SysDiag_it_PDS.h",
+        "SysDiag_PDS.c"
+      ],
+      "table_files_not_in_source_hints": {
+        "Ap_BuzzerCtrl_it_PDS.c": [
+          "Ap_BuzzerCtrl_PDS.c",
+          "Ap_BuzzerCtrl_it_PDS.h"
+        ],
+        "Ap_DoorCtrl_it.PDS.h": [
+          "Ap_DoorCtrl_it_PDS.h",
+          "Ap_DoorPreCtrl_it_PDS.h",
+          "Ap_MotorCtrl_it_PDS.h"
+        ],
+        "SysDiag_it_PDS.h": [
+          "SysDiagCtrl_it_PDS.h"
+        ],
+        "SysDiag_PDS.c": [
+          "SysDiagCtrl_PDS.c"
+        ]
+      },
+      "conflicting_files": {},
+      "twins_path_keyed": {
+        "EEPROM.c": [
+          "NE1AW_PORTING/Generated_Code/EEPROM.c"
+        ],
+        "EEPROM.h": [
+          "NE1AW_PORTING/Generated_Code/EEPROM.h"
+        ]
+      },
+      "twins_left_unmapped": {
+        "EEPROM.c": [
+          "PDS128_FBL/Sources/Eeprom/EEPROM.c"
+        ],
+        "EEPROM.h": [
+          "PDS128_FBL/Sources/Eeprom/EEPROM.h"
+        ]
+      },
+      "twins_unresolved": {},
+      "source_files_not_listed": 77
+    }
+  }
+}

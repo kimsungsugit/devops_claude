@@ -1,0 +1,194 @@
+{
+  "alias": {
+    "_bool": "bool",
+    "bool": "bool",
+    "bool_t": "bool",
+    "boolean": "bool",
+    "byte": "u8",
+    "char": "s8",
+    "dword": "u32",
+    "int": "s32",
+    "int16": "s16",
+    "int16_t": "s16",
+    "int32": "s32",
+    "int32_t": "s32",
+    "int8": "s8",
+    "int8_t": "s8",
+    "long": "s32",
+    "s16": "s16",
+    "s32": "s32",
+    "s8": "s8",
+    "short": "s16",
+    "short int": "s16",
+    "signed": "s32",
+    "signed char": "s8",
+    "signed int": "s32",
+    "signed long": "s32",
+    "signed short": "s16",
+    "sint16": "s16",
+    "sint32": "s32",
+    "sint8": "s8",
+    "u16": "u16",
+    "u32": "u32",
+    "u8": "u8",
+    "uchar": "u8",
+    "uint": "u32",
+    "uint16": "u16",
+    "uint16_t": "u16",
+    "uint32": "u32",
+    "uint32_t": "u32",
+    "uint8": "u8",
+    "uint8_t": "u8",
+    "ulong": "u32",
+    "unsigned": "u32",
+    "unsigned char": "u8",
+    "unsigned int": "u32",
+    "unsigned long": "u32",
+    "unsigned short": "u16",
+    "unsigned short int": "u16",
+    "ushort": "u16",
+    "word": "u16"
+  },
+  "bounds": {
+    "bool": [
+      [
+        "FALSE",
+        "0"
+      ],
+      [
+        "TRUE",
+        "1"
+      ]
+    ],
+    "s16": [
+      [
+        "MIN",
+        "-32768"
+      ],
+      [
+        "MID",
+        "0"
+      ],
+      [
+        "MAX",
+        "32767"
+      ]
+    ],
+    "s32": [
+      [
+        "MIN",
+        "-2147483648"
+      ],
+      [
+        "MID",
+        "0"
+      ],
+      [
+        "MAX",
+        "2147483647"
+      ]
+    ],
+    "s8": [
+      [
+        "MIN",
+        "-128"
+      ],
+      [
+        "MID",
+        "0"
+      ],
+      [
+        "MAX",
+        "127"
+      ]
+    ],
+    "u16": [
+      [
+        "MIN",
+        "0x0"
+      ],
+      [
+        "MID",
+        "0x8000"
+      ],
+      [
+        "MAX",
+        "0xFFFF"
+      ]
+    ],
+    "u32": [
+      [
+        "MIN",
+        "0x0"
+      ],
+      [
+        "MID",
+        "0x80000000"
+      ],
+      [
+        "MAX",
+        "0xFFFFFFFF"
+      ]
+    ],
+    "u8": [
+      [
+        "MIN",
+        "0x0"
+      ],
+      [
+        "MID",
+        "0x80"
+      ],
+      [
+        "MAX",
+        "0xFF"
+      ],
+      [
+        "INV",
+        "0x100(범위초과)"
+      ]
+    ]
+  },
+  "float_cases": [
+    [
+      "0",
+      "0.0"
+    ],
+    [
+      "음수",
+      "음의 경계값"
+    ],
+    [
+      "양수",
+      "양의 경계값"
+    ],
+    [
+      "특수",
+      "NaN/±Inf(해당 시)"
+    ]
+  ],
+  "float_types": [
+    "double",
+    "f32",
+    "f64",
+    "float",
+    "float32",
+    "float32_t",
+    "float64",
+    "float64_t",
+    "real",
+    "real32",
+    "real64",
+    "single"
+  ],
+  "pointer": [
+    [
+      "NULL",
+      "NULL"
+    ],
+    [
+      "유효",
+      "유효 포인터/버퍼"
+    ]
+  ]
+}

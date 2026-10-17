@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 
 import config
 
 from .paths import safe_resolve_under
-
 
 _logger = logging.getLogger(__name__)
 
@@ -219,12 +221,254 @@ def svn_info_url(
         args += ["--non-interactive"]
     rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec, stdin_input=stdin_input)
     revision = ""
+    url = ""
+    repo_root = ""
     if rc == 0:
         for line in out.splitlines():
-            if line.lower().startswith("revision:"):
+            low = line.lower()
+            if not revision and low.startswith("revision:"):
                 revision = line.split(":", 1)[1].strip()
-                break
-    return {"rc": rc, "output": out, "revision": revision}
+            elif not url and low.startswith("url:"):  # 'Relative URL:'은 매칭 안 됨
+                url = line.split(":", 1)[1].strip()
+            elif not repo_root and low.startswith("repository root:"):
+                repo_root = line.split(":", 1)[1].strip()
+    return {"rc": rc, "output": out, "revision": revision, "url": url, "repo_root": repo_root}
+
+def svn_diff_summarize(
+    *,
+    repo_url: str,
+    rev_a: str,
+    rev_b: str,
+    username: str = "",
+    password: str = "",
+    timeout_sec: int = 60,
+) -> Dict[str, Any]:
+    """`svn diff --summarize -r A:B <repo_url>` → 변경 .c/.h 파일 + editType.
+
+    영향도 분석을 '현재 로컬 default 버전(A) ↔ 새 빌드 버전(B)' 사이의 정밀 델타에
+    묶기 위한 헬퍼. URL 대상이라 워킹카피가 필요 없고(서버 조회) 빌드가 몇 번 끼어
+    있든 A→B 전체 변경을 정확히 잡는다(단일 빌드 changeSet의 '빈 changeSet=0건'
+    오등치 회피).
+
+    revision은 정수 SVN revision만 허용한다(git SHA1/임의 문자열 주입 차단). status
+    코드(A/M/D/R)를 editType(add/delete/edit)로 매핑하되, .c/.h 소스만 반환한다.
+
+    Returns: {"rc": int, "output": str, "files": [rel...], "edit_types": {rel: add|edit|delete}}
+    """
+    ra, rb = str(rev_a or "").strip(), str(rev_b or "").strip()
+    if not (ra.isdigit() and rb.isdigit()):
+        return {"rc": 1, "output": "rev_a/rev_b must be numeric svn revisions", "files": [], "edit_types": {}}
+    base = str(repo_url or "").strip().rstrip("/")
+    if not base:
+        return {"rc": 1, "output": "repo_url required", "files": [], "edit_types": {}}
+    clean_pw, pw_error = _sanitize_password(password)
+    if pw_error:
+        return {"rc": 1, "output": pw_error, "files": [], "edit_types": {}}
+    args: List[str] = ["svn", "diff", "--summarize", "-r", f"{ra}:{rb}", base]
+    if username.strip():
+        args += ["--username", username.strip()]
+    stdin_input: Optional[str] = None
+    if clean_pw:
+        if _svn_supports_password_stdin():
+            args += ["--password-from-stdin"]
+            stdin_input = clean_pw
+        else:
+            args += ["--password", clean_pw]
+    # creds 유무와 무관하게 항상 non-interactive — 미신뢰 cert 프롬프트가 동기 스레드를
+    # timeout까지 점유하는 것을 방지한다.
+    args += ["--non-interactive"]
+    rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec, stdin_input=stdin_input)
+    files: List[str] = []
+    edit_types: Dict[str, str] = {}
+    if rc == 0:
+        for line in out.splitlines():
+            s = line.rstrip()
+            if not s:
+                continue
+            status = s[:1].upper()
+            # 'M' 수정 / 'A' 추가 / 'D' 삭제 / 'R' 대체. 프로퍼티 전용 변경('_'/공백 col1)은 제외.
+            if status not in ("A", "M", "D", "R"):
+                continue
+            parts = s.split()
+            if len(parts) < 2:
+                continue
+            url = parts[-1].strip()
+            rel = url[len(base):].lstrip("/") if url.startswith(base) else url
+            # svn은 URL의 비-ASCII/특수문자를 %-인코딩한다(한글 폴더 등) → by_name 로컬 경로와
+            # 매칭되도록 디코딩. base(registry URL)는 미인코딩이라 prefix strip 후 디코딩한다.
+            rel = unquote(rel.replace("\\", "/"))
+            if not rel.lower().endswith((".c", ".h")):
+                continue
+            et = {"A": "add", "D": "delete"}.get(status, "edit")  # M/R → edit
+            # 동일 파일 중복 라인: 구조적 변경(add/delete)을 단순 edit이 덮지 않게 보존.
+            if edit_types.get(rel) not in ("add", "delete"):
+                edit_types[rel] = et
+            files.append(rel)
+    return {
+        "rc": rc,
+        "output": out,
+        "files": sorted(dict.fromkeys(files)),
+        "edit_types": edit_types,
+    }
+
+
+# ISO-8601 UTC (초 단위, 선택적 소수부, 'Z') — svn 날짜 revision 인자에 임의 문자열 주입 차단.
+_ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
+
+
+def _svn_creds_args(username: str, clean_pw: Optional[str]) -> Tuple[List[str], Optional[str]]:
+    """svn 명령의 자격증명 인자 조립 — password는 가능하면 stdin(argv 노출 회피)."""
+    args: List[str] = []
+    stdin_input: Optional[str] = None
+    if username.strip():
+        args += ["--username", username.strip()]
+    if clean_pw:
+        if _svn_supports_password_stdin():
+            args += ["--password-from-stdin"]
+            stdin_input = clean_pw
+        else:
+            args += ["--password", clean_pw]
+    # creds 유무와 무관하게 non-interactive — 미신뢰 cert 프롬프트가 동기 스레드를 점유하는
+    # 것을 방지한다(svn_diff_summarize와 동일 정책).
+    args += ["--non-interactive"]
+    return args, stdin_input
+
+
+def svn_revision_at_date(
+    *,
+    repo_url: str,
+    when_iso: str,
+    username: str = "",
+    password: str = "",
+    timeout_sec: int = 60,
+) -> Dict[str, Any]:
+    """`svn info -r {when_iso} <repo_url>` → 그 시각(as-of date) 기준 youngest revision.
+
+    KJPDS02_PV처럼 Jenkins가 소스를 '빌드 시각 기준'으로 svn checkout 하는 git 파이프라인
+    잡에서 빌드별 실제 SVN revision을 되찾기 위한 헬퍼. 빌드 timestamp(UTC ISO)를 넘기면 그
+    시점에 체크아웃된 revision을 돌려준다(콘솔 로그의 'At revision N'과 일치 검증됨).
+
+    when_iso 는 UTC ISO-8601(`YYYY-MM-DDTHH:MM:SSZ`)만 허용하고 svn 날짜 revision 문법
+    `-r {DATE}`로 감싸 전달한다. URL 대상이라 워킹카피 불필요(오프라인 조회 아님, 서버 조회).
+
+    Returns: {"rc": int, "output": str, "revision": str}  # revision=정수문자열 또는 ""
+    """
+    base = str(repo_url or "").strip().rstrip("/")
+    when = str(when_iso or "").strip().strip("{}")
+    if not base:
+        return {"rc": 1, "output": "repo_url required", "revision": ""}
+    if not _ISO_UTC_RE.match(when):
+        return {"rc": 1, "output": f"invalid ISO-8601 UTC datetime: {when!r}", "revision": ""}
+    clean_pw, pw_error = _sanitize_password(password)
+    if pw_error:
+        return {"rc": 1, "output": pw_error, "revision": ""}
+    cred_args, stdin_input = _svn_creds_args(username, clean_pw)
+    args: List[str] = ["svn", "info", "-r", "{" + when + "}", base] + cred_args
+    rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec, stdin_input=stdin_input)
+    revision = ""
+    repo_root = ""
+    if rc == 0:
+        for line in out.splitlines():
+            low = line.lower()
+            if not revision and low.startswith("revision:"):
+                cand = line.split(":", 1)[1].strip()
+                revision = cand if cand.isdigit() else ""
+            elif not repo_root and low.startswith("repository root:"):
+                # 다중 프로젝트 저장소에서 repo-wide 리비전을 svn log로 뽑을 때의 로그 대상.
+                repo_root = line.split(":", 1)[1].strip()
+    return {"rc": rc, "output": out, "revision": revision, "repo_root": repo_root}
+
+
+def svn_date_revision_map(
+    *,
+    repo_url: str,
+    date_from_iso: str,
+    date_to_iso: str,
+    username: str = "",
+    password: str = "",
+    timeout_sec: int = 90,
+) -> Dict[str, Any]:
+    """`svn log --xml -r {D1}:{D2} <repo_url>` → [(iso_utc_date, revision:int), ...].
+
+    빌드 목록의 min~max 시각 사이 커밋을 1회 조회해, 각 빌드 timestamp를 'youngest rev ≤
+    date'로 매핑하기 위한 (date, rev) 테이블을 만든다(빌드마다 svn info 하지 않고 일괄).
+    항목은 revision 오름차순. 날짜 비교는 호출자가 파싱해서 수행한다(svn <date>는 UTC).
+
+    D1/D2 는 UTC ISO-8601만 허용, svn 날짜 revision `{DATE}` 문법. URL 대상.
+
+    Returns: {"rc": int, "output": str, "entries": [(iso_utc, rev_int), ...]}
+    """
+    base = str(repo_url or "").strip().rstrip("/")
+    d1 = str(date_from_iso or "").strip().strip("{}")
+    d2 = str(date_to_iso or "").strip().strip("{}")
+    if not base:
+        return {"rc": 1, "output": "repo_url required", "entries": []}
+    if not (_ISO_UTC_RE.match(d1) and _ISO_UTC_RE.match(d2)):
+        return {"rc": 1, "output": "date_from/date_to must be ISO-8601 UTC", "entries": []}
+    clean_pw, pw_error = _sanitize_password(password)
+    if pw_error:
+        return {"rc": 1, "output": pw_error, "entries": []}
+    cred_args, stdin_input = _svn_creds_args(username, clean_pw)
+    args: List[str] = [
+        "svn", "log", "--xml", "-r", "{" + d1 + "}:{" + d2 + "}", base,
+    ] + cred_args
+    rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec, stdin_input=stdin_input)
+    entries: List[Tuple[str, int]] = []
+    if rc == 0:
+        for m in re.finditer(r'<logentry\b[^>]*\brevision="(\d+)"[^>]*>(.*?)</logentry>', out, re.S):
+            dm = re.search(r"<date>([^<]+)</date>", m.group(2))
+            if dm:
+                entries.append((dm.group(1).strip(), int(m.group(1))))
+    entries.sort(key=lambda e: e[1])
+    return {"rc": rc, "output": out, "entries": entries}
+
+
+def svn_diff_unified(
+    *,
+    repo_url: str,
+    rev_a: str,
+    rev_b: str,
+    username: str = "",
+    password: str = "",
+    timeout_sec: int = 60,
+) -> Dict[str, Any]:
+    """`svn diff -r A:B <repo_url>` 전체 unified diff(svn 내부 diff). 함수 시그니처 변경 추출용.
+
+    svn_diff_summarize(파일 레벨 상태)와 달리 라인 레벨 -/+ 를 반환해 함수 선언의 이전→이후
+    원문을 뽑을 수 있다. rev는 정수 SVN revision만 허용(인자 주입 차단). 외부 diff 바이너리
+    의존을 피하려고 svn 내부 diff(기본, `--diff-cmd` 미사용)를 쓴다. best-effort 보강용이라
+    실패는 호출자가 빈 결과로 흡수한다.
+
+    Returns: {"rc": int, "output": str}
+    """
+    ra, rb = str(rev_a or "").strip(), str(rev_b or "").strip()
+    if not (ra.isdigit() and rb.isdigit()):
+        return {"rc": 1, "output": "rev_a/rev_b must be numeric svn revisions"}
+    base = str(repo_url or "").strip().rstrip("/")
+    if not base:
+        return {"rc": 1, "output": "repo_url required"}
+    clean_pw, pw_error = _sanitize_password(password)
+    if pw_error:
+        return {"rc": 1, "output": pw_error}
+    # -x -p (show-c-function): @@ hunk 헤더에 함수 컨텍스트를 붙여 라인단위 변경 함수 분류
+    # (classify_changed_functions_from_diff_text)를 가능하게 한다. extract_signature_changes는
+    # +/- 선언 라인만 읽으므로 무해 → 두 소비자가 같은 diff blob을 공유한다. 구버전 svn이 -x -p를
+    # 조용히 무시하면 컨텍스트 없는 bare @@가 나올 수 있어, 호출측은 positive-context 가드로 검증한다.
+    args: List[str] = ["svn", "diff", "-r", f"{ra}:{rb}", "-x", "-p", base]
+    if username.strip():
+        args += ["--username", username.strip()]
+    stdin_input: Optional[str] = None
+    if clean_pw:
+        if _svn_supports_password_stdin():
+            args += ["--password-from-stdin"]
+            stdin_input = clean_pw
+        else:
+            args += ["--password", clean_pw]
+    # creds 유무와 무관하게 항상 non-interactive — 미신뢰 cert 프롬프트 hang 방지.
+    args += ["--non-interactive"]
+    rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec, stdin_input=stdin_input)
+    return {"rc": rc, "output": out}
+
 
 def list_directory(project_root: str, rel_path: str = ".") -> Dict[str, Any]:
     root = Path(project_root or ".").resolve()
@@ -561,13 +805,37 @@ def replace_lines(project_root: str, rel_path: str, start_line: int, end_line: i
     return {"ok": True, "path": str(target)}
 
 
-def _pick_via_powershell(script: str) -> Tuple[str, str]:
+# 다이얼로그 제목을 PowerShell 로 넘기는 유일한 통로. 스크립트 **문자열이 아니라**
+# 환경변수다 — 아래 _pick_via_powershell docstring 참조.
+_DLG_TITLE_ENV = "ARIA_DIALOG_TITLE"
+_DLG_TITLE_MAX = 200
+
+
+def _pick_via_powershell(script: str, title: str = "") -> Tuple[str, str]:
+    """PowerShell 파일/폴더 다이얼로그 실행.
+
+    ⚠ **title 은 절대 script 문자열에 보간하지 말 것.** 이전 판은
+
+        f"$dlg.Description='{title or '폴더 선택'}';"
+
+    처럼 작은따옴표 **안에** f-string 으로 끼워 넣었다. `powershell -Command` 는
+    받은 문자열을 **파싱**하므로 `shell=False` 는 아무 방어도 되지 않는다 —
+    title 에 작은따옴표 하나만 넣으면 인용이 닫히고 그 뒤가 명령으로 실행된다
+    (`/api/file-mode/browse-file` body 의 `title` 은 검증이 없어 그대로 여기 온다).
+
+    환경변수 경유는 값이 PowerShell **파서를 거치지 않으므로** 이스케이프 규칙에
+    의존하지 않는 구조적 차단이다. 스크립트 쪽은 `$env:ARIA_DIALOG_TITLE` 를 읽는다.
+    """
+    env = dict(os.environ)
+    # NUL 은 환경변수에 담을 수 없어 ValueError 를 낸다(요청 하나가 500 이 된다).
+    env[_DLG_TITLE_ENV] = (title or "").replace("\x00", "")[:_DLG_TITLE_MAX]
     try:
         res = subprocess.run(
             ["powershell", "-NoProfile", "-Command", script],
             capture_output=True,
             text=True,
             timeout=600,
+            env=env,
         )
     except Exception as exc:
         return "", f"powershell_error:{exc}"
@@ -602,11 +870,12 @@ def pick_directory(title: str = "폴더 선택") -> Tuple[str, str]:
     script = (
         "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');"
         "$dlg=New-Object System.Windows.Forms.FolderBrowserDialog;"
-        f"$dlg.Description='{title or '폴더 선택'}';"
+        # title 은 여기 보간하지 않는다 — 환경변수로 받는다(_pick_via_powershell 참조).
+        f"$dlg.Description=$env:{_DLG_TITLE_ENV};"
         "$dlg.ShowNewFolderButton=$true;"
         "if($dlg.ShowDialog() -eq 'OK'){ $dlg.SelectedPath }"
     )
-    path, err = _pick_via_powershell(script)
+    path, err = _pick_via_powershell(script, title or "폴더 선택")
     if path:
         return path, ""
     if err:
@@ -639,11 +908,12 @@ def pick_file(title: str = "파일 선택") -> Tuple[str, str]:
     script = (
         "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');"
         "$dlg=New-Object System.Windows.Forms.OpenFileDialog;"
-        f"$dlg.Title='{title or '파일 선택'}';"
+        # title 은 여기 보간하지 않는다 — 환경변수로 받는다(_pick_via_powershell 참조).
+        f"$dlg.Title=$env:{_DLG_TITLE_ENV};"
         "$dlg.Filter='All files (*.*)|*.*';"
         "if($dlg.ShowDialog() -eq 'OK'){ $dlg.FileName }"
     )
-    path, err = _pick_via_powershell(script)
+    path, err = _pick_via_powershell(script, title or "파일 선택")
     if path:
         return path, ""
     if err:

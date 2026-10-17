@@ -83,7 +83,7 @@ def _json_header(obj: Any) -> str:
     return json.dumps({"truncated": True, "len": len(value)}, ensure_ascii=True)
 
 
-def _to_response(res: Any, meta: SwsaBuildMeta, inputs: Any) -> Response:
+def _to_response(res: Any, meta: SwsaBuildMeta, inputs: Any, quality_run_id: Any = None) -> Response:
     data = res.xlsm_io.getvalue()
     filename = f"({meta.project_id}_SwSA) Software Static Analysis Report_{meta.doc_version}_{meta.test_date}.xlsm"
     # CR/LF 는 valid ASCII 라 encode(replace)로 안 걸러짐 → 헤더 인젝션/500(h11) 방지 위해 제거
@@ -107,7 +107,45 @@ def _to_response(res: Any, meta: SwsaBuildMeta, inputs: Any) -> Response:
         "X-SwSA-Summary": _json_header(summary),
         "X-SwSA-Warnings": _json_header(warnings[:20]),
     }
+    # (R39 N1) "이 파일이 어느 run 인가" — 기록 실패도 `unrecorded` 로 말한다(단일 출처 헬퍼).
+    from workflow.quality.recorder import quality_run_headers
+    headers.update(quality_run_headers(quality_run_id))
     return Response(content=data, media_type=_MEDIA_XLSM, headers=headers)
+
+
+def _swsa_quality_data(inputs):
+    """SwSA 빌드 입력 → Quality 기록용 dict. HIS 가 0건이어도 **dict 를 돌려준다**.
+
+    HIS(ST201~204) pass% 가 게이트 지표 — 없으면 점수화하지 않는다. QAC 위반 수는
+    ``extraction_failed`` 면 '0건'이 아니라 '추출 실패'라 **미포함**(가짜 0점 방지).
+
+    (R37 리뷰 W1) 예전엔 여기서 `None` 을 돌려주고 호출부가 기록을 건너뛰었다. 그러면 SwSA 만
+    옛 동작으로 남아 — 문서는 만들어졌는데 이력이 없어 보드가 영영 "미생성" 이다.
+    "빈 것인가" 의 판정은 `recorder.empty_output_reason` **한 곳**이 한다(복제 금지).
+    """
+    st201 = getattr(inputs, "st201", None) if inputs is not None else None
+    his = []
+    if st201 is not None and getattr(st201, "metrics", None):
+        for m in st201.metrics.values():
+            his.append({
+                "total": getattr(m, "total_functions", 0),
+                "fail": getattr(m, "fail_count", 0),
+                "unbinned": getattr(m, "unbinned_count", 0),
+            })
+    # (R37 리뷰 W1) HIS 가 0건이어도 **dict 를 돌려준다** — 호출부가 여기서 기록을 건너뛰면
+    # SwSA 만 옛 동작으로 남아, 문서는 만들어졌는데 이력이 없어 보드가 영영 "미생성" 이다.
+    # 빈 것인지의 판정은 `recorder.empty_output_reason` 한 곳이 한다(복제 금지).
+    data = {"his_metrics": his, "his_metric_count": len(his)}
+    qac = getattr(inputs, "qac_xml", None)
+    if qac is not None and not getattr(qac, "extraction_failed", False):
+        misra = getattr(qac, "misra", None)
+        secure = getattr(qac, "secure", None)
+        data["misra_active"] = getattr(misra, "active", 0) if misra else 0
+        data["secure_active"] = getattr(secure, "active", 0) if secure else 0
+    pmd = getattr(inputs, "pmd", None)
+    if pmd is not None:
+        data["pmd_fail"] = getattr(pmd, "fail_count", 0)
+    return data
 
 
 def _do_build(req: SwSABuildRequest) -> Response:
@@ -125,7 +163,23 @@ def _do_build(req: SwSABuildRequest) -> Response:
         st201=getattr(inputs, "st201", None),
         pmd=getattr(inputs, "pmd", None),
     )
-    return _to_response(res, meta, inputs)
+    # Quality DB recording (non-fatal). HIS 0건이면 recorder 가 `empty_output` 으로 남긴다(R37 D-3).
+    # (R39 N1) 반환값을 받아 응답 헤더로 — 기록 실패면 None 이고 헤더는 `unrecorded`.
+    _quality_run_id = None
+    try:
+        _qd = _swsa_quality_data(inputs)
+        from workflow.quality.recorder import output_hash_kwargs, record_run
+        _quality_run_id = record_run(
+            "swsa", _qd,
+            project_root=str(getattr(meta, "project_id", "") or ""),
+            meta={"asil_level": str(getattr(meta, "asil_level", "") or "")},
+            # (R36 C-4) 응답 바이트의 해시 — 검토 기록이 이 run 에 붙을 수 있게.
+            **output_hash_kwargs(getattr(res, "xlsm_io", None)),
+        )
+    except Exception:
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
+        _logger.exception("SwSA quality record skipped (non-fatal)")
+    return _to_response(res, meta, inputs, quality_run_id=_quality_run_id)
 
 
 @router.post("/report/build")

@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import List
 
 from docx import Document  # type: ignore
-from docx.oxml.text.paragraph import CT_P  # type: ignore
 from docx.oxml.table import CT_Tbl  # type: ignore
+from docx.oxml.text.paragraph import CT_P  # type: ignore
 from docx.table import Table  # type: ignore
 from docx.text.paragraph import Paragraph  # type: ignore
 

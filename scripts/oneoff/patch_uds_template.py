@@ -17,7 +17,6 @@ from pathlib import Path
 
 import docx
 
-
 SRC = Path(r"D:\Project\devops\Release_claude\docs\(HDPDM01_SUDS)_template_clean.docx")
 DST = Path(r"D:\Project\devops\Release_claude\docs\(HDPDM01_SUDS)_template_tokenized.docx")
 

@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 from report.constants import (
-    UDS_RULES,
-    UDS_PLACEHOLDERS,
-    GLOBALS_FORMAT_ORDER,
     DEFAULT_TYPE_RANGES,
+    GLOBALS_FORMAT_ORDER,
+    UDS_PLACEHOLDERS,
+    UDS_RULES,
 )
 
 

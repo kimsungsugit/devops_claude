@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
 import config
-
 from workflow.rag.chunker import _chunk_source_file
 
 if TYPE_CHECKING:

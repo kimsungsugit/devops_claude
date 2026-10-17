@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
-import sys
 
 repo_root = Path(r"d:\Project\devops\260105")
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-import report_generator as rg
+import report_generator as rg  # noqa: E402
 
 
 def main() -> None:

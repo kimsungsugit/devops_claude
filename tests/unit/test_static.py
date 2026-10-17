@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from workflow.common import Issue
-from workflow.static import parse_clang_tidy_output, _parse_semgrep_results
+from workflow.static import _parse_semgrep_results, parse_clang_tidy_output
 
 
 class TestParseClangTidyOutput:

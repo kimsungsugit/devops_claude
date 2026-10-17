@@ -4,10 +4,8 @@ password hash/verify + JWT encode/decode + 만료 + type 불일치 검증.
 """
 from __future__ import annotations
 
-import os
 import sys
 import time
-from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -89,7 +87,6 @@ class TestJWTToken:
         assert exc_info.value.code == "TOKEN_INVALID"
 
     def test_expired_token_raises(self, monkeypatch):
-        from backend.services import auth_service as svc
         from backend.services.auth_service import (
             TokenError,
             create_access_token,

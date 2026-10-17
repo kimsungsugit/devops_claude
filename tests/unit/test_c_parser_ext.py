@@ -2,14 +2,11 @@
 """Extended tests for workflow.code_parser.c_parser (not in test_c_parsing.py)."""
 from __future__ import annotations
 
-import pytest
-
 from workflow.code_parser.c_parser import (
-    _parse_comment_fields,
-    _extract_function_defs_regex_fallback,
     _extract_calls_from_body_text,
+    _extract_function_defs_regex_fallback,
     _extract_leading_comment,
-    CFunction,
+    _parse_comment_fields,
 )
 
 

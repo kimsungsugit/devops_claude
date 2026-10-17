@@ -3,6 +3,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Any, Dict, List
+
+# 문서 종류 파일명 판정은 `report_gen.doc_kind` 가 **정본**이다. 여기서는 재수출만 한다 —
+# `generators/` 는 `backend/` 를 import 할 수 없어(라우터가 generators 를 쓰므로 순환)
+# 양쪽이 닿는 `report_gen/` 에 둬야 한 벌로 유지된다.
+from report_gen.doc_kind import is_sds_filename, is_srs_filename  # noqa: F401  (re-export)
 from workflow.function_module_map import build_function_module_index
 
 try:

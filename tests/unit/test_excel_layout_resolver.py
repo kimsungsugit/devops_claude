@@ -850,3 +850,44 @@ class TestInspectV101SheetConfig:
         })
         layout = elr.inspect_swit_layout(template, "sitr")
         assert layout.deviation_sheet_present is True
+
+
+class TestSheetSignalsIgnoreSpacing:
+    """회사 SwUTCV 정본 시트명은 `4. Coverage`(점 뒤 공백) — 2026-08-26 실측.
+
+    시그널 판정이 공백을 안 걷으면 이 시트를 못 세고, v1.01 이 남은 두 신호에만
+    걸리게 된다(1표 여유). 아래는 **`4. Coverage` 하나만 공백형**으로 두어 그 한 표가
+    실제로 세어지는지 본다 — 세 신호 다 있으면 공백을 무시해도 통과하므로 가드가 안 된다.
+    """
+
+    def _wb(self, coverage_name: str):
+        import openpyxl
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        for name in ("Cover", "History", "1.Test Summary", "2.Traceability", coverage_name):
+            ws = wb.create_sheet(name)
+            ws["A1"] = "x"
+        return wb
+
+    def _signals(self, wb) -> int:
+        from backend.services.excel_layout_resolver import normalize_sheet_key
+        keys = [normalize_sheet_key(s) for s in wb.sheetnames]
+        return sum([
+            any("4.coverage" in k for k in keys),
+            any("3.consistency" in k for k in keys),
+            any("2.traceability" in k for k in keys),
+        ])
+
+    def test_space_after_dot_still_counts(self):
+        assert self._signals(self._wb("4. Coverage")) == 2      # 공백 무시하면 1
+
+    def test_no_space_form_still_counts(self):
+        assert self._signals(self._wb("4.Coverage")) == 2
+
+    def test_a_different_sheet_does_not_count(self):
+        assert self._signals(self._wb("3.Coverage")) == 1       # v2.02 판 — 오검출 금지
+
+    def test_normalize_sheet_key_strips_all_whitespace_and_case(self):
+        from backend.services.excel_layout_resolver import normalize_sheet_key
+        assert normalize_sheet_key("4. Coverage") == "4.coverage"
+        assert normalize_sheet_key("  4 . COVERAGE ") == "4.coverage"

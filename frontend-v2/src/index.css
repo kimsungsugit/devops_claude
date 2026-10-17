@@ -29,6 +29,9 @@ html, body {
   --warning: #ffab00;
   --highlight: #fffae6;
   --card-shadow: rgba(9, 30, 66, 0.08);
+  /* 카드 안의 '옴폭한 표면'(코드 블록·펼친 행). 정의 없이 참조만 하던 토큰이라
+   * 같은 의미의 <pre>가 패널마다 다른 색으로 보였다 → 여기서 단일 정의. */
+  --bg-subtle: #f4f5f7;
 
   --color-success: #22c55e;
   --color-success-soft: rgba(34, 197, 94, 0.10);
@@ -89,6 +92,7 @@ body[data-theme='dark'] {
   --success: #22c55e;
   --warning: #fbbf24;
   --card-shadow: rgba(0, 0, 0, 0.25);
+  --bg-subtle: #0d1526;
   --color-success: #4ade80;
   --color-success-soft: rgba(74, 222, 128, 0.12);
   --color-warning: #fbbf24;
@@ -197,7 +201,10 @@ body {
   font-weight: 600;
 }
 
-/* 문서 생성 허브 — 6개 생성 종류를 전환하는 옵션 세그먼트 서브내비 */
+/* 섹션 내부 서브내비 — 한 탭 안의 화면을 나누는 옵션 세그먼트.
+ * 문서 생성 허브(.docgen-subnav)가 먼저 썼고 프로젝트 분석 탭이 같은 패턴을 쓰면서
+ * 일반 이름(.subnav)으로 승격했다. .docgen-subnav 는 기존 사용처를 위한 별칭. */
+.subnav,
 .docgen-subnav {
   display: flex;
   flex-wrap: wrap;
@@ -205,6 +212,18 @@ body {
   border-bottom: 1px solid var(--border);
   margin-bottom: var(--sp-4);
 }
+/* 서브내비는 화면에 붙어 있어야 한다 — 패널을 한참 내려간 뒤 다른 서브탭으로 가려고
+ * 맨 위까지 되올라가야 하면, "스크롤이 유일한 이동 수단"을 없애려던 내비가 스크롤을 다시
+ * 요구한다. 바깥 .accordion-nav 가 이미 sticky 라 같은 규약을 따른다.
+ * background 없이 sticky 만 주면 스크롤되는 카드가 탭 글자 위로 비쳐 지나간다. */
+.subnav {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg);
+  margin-bottom: 0;   /* 부모가 flex gap 을 주므로 이중 간격 방지 */
+}
+.subnav .tab-item,
 .docgen-subnav .tab-item {
   padding: 8px var(--sp-3);
   font-size: var(--text-sm);
@@ -610,9 +629,29 @@ label {
   background: var(--color-danger-soft);
 }
 
+/* 생성 준비 게이트 전용 톤 (DocGenPreflightPanel).
+   - step-warn  : `degraded`(있지만 부족) / `stale_path` — **차단이 아니다**. 붉은색을
+                  쓰면 진행 불가로 읽히므로 경고 톤을 따로 둔다.
+   - step-muted : `unmeasured`(재지 못함) — 값이 0 인 것과 다르다. 회색으로 두어
+                  "아직 모른다" 가 "문제 없음/0" 으로 읽히지 않게 한다. */
+.pipeline-step.step-warn {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+}
+
+.pipeline-step.step-muted {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
 .step-icon { font-size: 14px; width: 20px; text-align: center; flex-shrink: 0; }
 .step-label { flex: 1; font-weight: 500; }
-.step-msg { font-size: var(--text-sm); color: var(--text-muted); }
+/* 준비 게이트 사유에는 **파일명이 통째로** 들어간다(부재 시 그 폴더의 실제 파일 목록).
+   `KJPDS02_DV_Fault_Injection_TestResult_v1.01_251205_R.xlsx` 처럼 공백 없는 57자 토큰은
+   기본 줄바꿈으로 안 끊겨 패널 밖으로 삐져나간다 — 260px 폭에서 실측(넘침이지 잘림은
+   아니라 옆 내용과 겹친다). ⚠ `break-word` 가 아니라 **`anywhere`** 여야 한다: 전자는
+   min-content 크기를 안 줄여서 flex 항목(`.step-label { flex: 1 }`)이 여전히 안 줄어든다. */
+.step-msg { font-size: var(--text-sm); color: var(--text-muted); overflow-wrap: anywhere; }
 
 /* ── Artifact list ── */
 .artifact-list {
@@ -664,6 +703,41 @@ label {
 }
 
 .impact-table tr:hover td { background: var(--hover); }
+
+/* ── Board table (생성 현황 보드 / 품질 게이트 상세) ──
+   `.impact-table` 과 같은 골격이되 (a) 행 확장을 쓰므로 hover 를 데이터 행에만 걸고,
+   (b) 셀 정렬을 middle 로 둔다(상태 pill·진행바가 세로 중앙에 와야 읽힌다).
+
+   ⚠ 이 블록이 없으면 표가 **브라우저 기본 <table>** 로 렌더된다 — 테두리도 배경도
+   없이. `GateReviewSection` 이 정의되지 않은 `.data-table`/`.section`/`.alert` 를
+   쓰다가 정확히 그렇게 됐고, 그게 "품질 게이트 UI 가 와닿지 않는다" 의 물리적
+   1순위 원인이었다. 새 표를 만들 땐 클래스가 실제로 정의돼 있는지 확인할 것. */
+.board-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-md);
+}
+
+.board-table th {
+  text-align: left;
+  padding: 6px 10px;
+  background: var(--bg);
+  border-bottom: 2px solid var(--border);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.board-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.board-table tbody tr:hover td { background: var(--hover); }
 
 /* ── Accordion nav ── */
 .detail-layout {
@@ -810,6 +884,7 @@ label {
   .app-header { padding: 0 var(--sp-2); height: 40px; }
   .tab-bar { overflow-x: auto; }
   .tab-item { padding: 8px var(--sp-3); font-size: var(--text-sm); white-space: nowrap; }
+  .subnav { flex-wrap: nowrap; overflow-x: auto; }
   /* 좁은 폭에서 메인 탭바와 동일하게 한 줄 가로 스크롤 유지(wrap로 인한 헤더 높이 가변 방지) */
   .docgen-subnav { flex-wrap: nowrap; overflow-x: auto; }
   .stats-row { flex-direction: column; }
@@ -844,6 +919,73 @@ label {
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
   flex-shrink: 0;
+}
+
+/* ── Motion (기능적 애니메이션 — 상태·피드백 전달 전용) ──────────────────
+   원칙: 장식이 아니라 "진행 중 / 값 변경 / 완결"을 전달한다.
+   모든 애니메이션은 하단 prefers-reduced-motion 블록에서 사실상 무효화된다
+   (접근성·멀미 방지 — ISO 26262 도구 필수). */
+
+/* (1) 진행 중 "살아있음" pulse — 현재 실행 단계/세그먼트/러닝 상태.
+   해당 클래스가 렌더되는 곳이면 JS 배선 없이 자동 적용. */
+@keyframes aria-pulse-live {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+.pipeline-step.step-active,
+.sync-segment.seg-active,
+.pill-running {
+  animation: aria-pulse-live 1.4s ease-in-out infinite;
+}
+
+/* (2) 불확정 진행바 — 완료시간 미상(빌드 중)일 때 .progress-bar에 .indeterminate 부여.
+   opt-in 유틸(현재 소비처 없음 — 긴 작업 progress 도입 시 클래스만 추가하면 동작). */
+@keyframes aria-progress-indeterminate {
+  from { background-position: 0 0; }
+  to   { background-position: 32px 0; }
+}
+.progress-bar.indeterminate .progress-fill,
+.progress-fill.indeterminate {
+  width: 100%;
+  background-color: var(--accent-soft);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    var(--accent) 0, var(--accent) 8px,
+    transparent 8px, transparent 16px
+  );
+  background-size: 32px 32px;
+  animation: aria-progress-indeterminate 0.8s linear infinite;
+}
+
+/* (3) 값 변경 하이라이트 flash — 갱신된 숫자/셀에 .value-flash 부여.
+   마운트·key 변경 시 1회 재생(장기 무한 애니메이션 아님). */
+@keyframes aria-value-flash {
+  from { background-color: var(--highlight); }
+  to   { background-color: transparent; }
+}
+.value-flash {
+  animation: aria-value-flash 1.2s ease-out;
+  border-radius: var(--radius-sm);
+}
+
+/* (4) 토스트 exit fade-out — enter(toast-in)와 대칭. ToastItem이 닫힐 때 .toast-leaving 부여. */
+@keyframes toast-out {
+  from { opacity: 1; transform: translateY(0); }
+  to   { opacity: 0; transform: translateY(8px); }
+}
+.toast-item.toast-leaving {
+  animation: toast-out 0.2s ease forwards;
+  pointer-events: none;
+}
+
+/* 🔒 reduced-motion: 전 애니메이션/트랜지션 사실상 무효화 (접근성·멀미 방지). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* ── Scrollbar ── */
@@ -898,218 +1040,10 @@ label {
 .badge-dot.info    { background: var(--color-info); }
 .badge-dot.neutral { background: var(--text-muted); }
 
-/* ══════════════════════════════════════════════════════════════════
-   Quality Dashboard
-   ══════════════════════════════════════════════════════════════════ */
-.qd-root {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
-}
-
-.qd-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-}
-
-.qd-title {
-  margin: 0;
-  font-size: var(--text-2xl);
-  font-weight: 700;
-  color: var(--text);
-}
-
-.qd-filter {
-  width: auto;
-  min-width: 100px;
-  padding: var(--sp-1) var(--sp-2);
-  font-size: var(--text-sm);
-}
-
-/* ── Chart panel ── */
-.qd-chart-panel {
-  overflow-x: auto;
-}
-
-.qd-chart-svg {
-  width: 100%;
-  max-width: 600px;
-  height: auto;
-  display: block;
-}
-
-.qd-grid-line {
-  stroke: var(--border);
-  stroke-width: 0.5;
-  stroke-dasharray: 2 2;
-}
-
-.qd-axis-label {
-  font-size: 9px;
-  fill: var(--text-muted);
-  font-family: inherit;
-}
-
-.qd-threshold-line {
-  stroke: var(--color-warning);
-  stroke-width: 1;
-  stroke-dasharray: 4 3;
-}
-
-.qd-threshold-label {
-  font-size: 8px;
-  fill: var(--color-warning);
-  font-weight: 700;
-  font-family: inherit;
-}
-
-.qd-bar-pass {
-  fill: var(--color-success);
-  opacity: 0.85;
-  transition: opacity var(--transition-fast);
-}
-.qd-bar-pass:hover { opacity: 1; }
-
-.qd-bar-fail {
-  fill: var(--color-danger);
-  opacity: 0.85;
-  transition: opacity var(--transition-fast);
-}
-.qd-bar-fail:hover { opacity: 1; }
-
-/* ── Table ── */
-.qd-table-panel {
-  overflow: hidden;
-}
-
-.qd-table-wrap {
-  overflow-x: auto;
-}
-
-.qd-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--text-base);
-}
-
-.qd-table th {
-  text-align: left;
-  padding: var(--sp-2) var(--sp-3);
-  font-size: var(--text-sm);
-  font-weight: 700;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  border-bottom: 1px solid var(--border);
-  white-space: nowrap;
-}
-
-.qd-table td {
-  padding: var(--sp-2) var(--sp-3);
-  border-bottom: 1px solid var(--border);
-  white-space: nowrap;
-}
-
-.qd-table tbody tr:hover {
-  background: var(--hover);
-}
-
-.qd-table tbody tr:last-child td {
-  border-bottom: none;
-}
-
-.qd-score-pass {
-  font-weight: 700;
-  color: var(--color-success);
-}
-
-.qd-score-fail {
-  font-weight: 700;
-  color: var(--color-danger);
-}
-
-.qd-date {
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-}
-
-/* ── Advice panel ── */
-.qd-advice-panel {
-  border-left: 3px solid var(--color-info);
-}
-
-.qd-advice-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-}
-
-.qd-advice-item {
-  padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--radius-md);
-  background: var(--bg);
-  border: 1px solid var(--border);
-}
-
-.qd-advice-header {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin-bottom: var(--sp-1);
-}
-
-.qd-advice-metric {
-  font-weight: 600;
-  font-size: var(--text-md);
-  color: var(--text);
-}
-
-.qd-advice-score {
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-}
-
-.qd-advice-body {
-  font-size: var(--text-base);
-  color: var(--text-muted);
-  padding-left: var(--sp-2);
-  border-left: 2px solid var(--border);
-  margin-top: var(--sp-1);
-}
-
-/* ── Empty state ── */
-.qd-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--sp-2);
-  padding: var(--sp-8) 0;
-  color: var(--text-muted);
-  font-size: var(--text-md);
-}
-
-.qd-empty-icon {
-  font-size: var(--text-3xl);
-  opacity: 0.4;
-}
-
-.qd-loading {
-  text-align: center;
-  padding: var(--sp-6);
-  color: var(--text-muted);
-  font-size: var(--text-md);
-}
-
-/* ── Responsive ── */
-@media (max-width: 600px) {
-  .qd-header { flex-direction: column; align-items: flex-start; }
-  .qd-filter { width: 100%; }
-  .qd-table th:nth-child(5),
-  .qd-table td:nth-child(5) { display: none; }
-}
+/* Quality Dashboard 전용 `.qd-*` 62줄은 2026-08-07 에 제거했다 — 그 화면이
+   `QualityGateSection` 으로 흡수되면서 참조가 0건이 됐다(같은 데이터를 보는
+   화면이 둘이라 서로 다른 판정을 내던 것을 한 벌로 합친 결과). 새 화면은
+   `.panel`/`.board-table`/`.pill-*` 공용 클래스를 쓴다. */
 
 /* ── Sync progress bar (horizontal 4-segment) ── */
 .sync-progress {
@@ -1150,6 +1084,21 @@ label {
   background: var(--color-danger-soft);
   border-color: var(--color-danger);
   color: var(--color-danger);
+}
+/* 사용자가 의도적으로 멈춘 단계. 실패(danger)가 아니므로 중립 톤 — api.js buildTone 이
+   Jenkins 의 ABORTED 를 'neutral' 로 매핑하는 것과 같은 판단이다. 위 .seg-active 펄스
+   목록(aria-pulse-live)에는 **넣지 않는다**: 펄스는 '살아있음' 신호라 중단에 붙이면
+   의미가 반전된다. */
+/* ⚠ opacity 로 죽이지 않는다. .sync-segment 기본(=pending)이 이미 --panel/--text-muted 라
+   거기에 opacity 를 얹으면 '중단됨'이 '아직 시작 안 함'보다 **더 흐려져** 대비가 역전된다.
+   중단은 사용자가 실제로 도달한 지점이므로 pending 보다 뚜렷해야 한다 — 테두리를 굵혀
+   구분하고 불투명도는 유지한다. */
+.sync-segment.seg-aborted {
+  background: var(--panel);
+  border-color: var(--text-secondary, var(--text-muted));
+  border-style: dashed;
+  color: var(--text-secondary, var(--text-muted));
+  font-weight: 600;
 }
 .sync-segment .seg-icon { font-size: 12px; }
 .sync-segment .seg-label { font-size: var(--text-xs); }
@@ -1731,4 +1680,10 @@ label {
   font-size: 0.75rem;
   color: #d70015;
   font-weight: 500;
+}
+
+/* 콜트리 노드 hover 하이라이트 — CallTreeNode의 노드별 useState(hover) 대체(W2: 상위 hover
+   서브트리 재렌더 제거). 인라인/전체탭 공용. 루트 행은 인라인 배경(bg-elevated) 상시 적용. */
+.ct-node-row:hover {
+  background: var(--bg-elevated);
 }

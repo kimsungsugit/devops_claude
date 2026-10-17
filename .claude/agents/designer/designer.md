@@ -1,6 +1,6 @@
 ---
 name: designer
-model: sonnet
+model: opus
 description: UI/UX 디자인, 컴포넌트 설계, 디자인 토큰, 레이아웃, 접근성을 담당하는 프론트엔드 디자인 에이전트
 tools:
   - Read

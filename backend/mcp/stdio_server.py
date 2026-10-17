@@ -4,12 +4,12 @@ Run: python -m backend.mcp.stdio_server
 """
 from __future__ import annotations
 
+# Flush stderr immediately so error messages appear before process exit
+import functools
 import json
 import sys
 from pathlib import Path
 
-# Flush stderr immediately so error messages appear before process exit
-import functools
 print = functools.partial(print, flush=True)  # noqa: A001 — intentional shadow
 
 # Ensure project root is on sys.path
@@ -17,16 +17,16 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP  # noqa: E402
 
-from backend.mcp import (
+from backend.mcp import (  # noqa: E402
     get_code_search_mcp_server,
     get_docs_mcp_server,
     get_git_mcp_server,
     get_jenkins_mcp_server,
     get_report_mcp_server,
 )
-from backend.services import local_service as _ls
+from backend.services import local_service as _ls  # noqa: E402
 
 mcp = FastMCP("devops-release")
 

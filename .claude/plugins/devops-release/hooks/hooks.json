@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/validate-api-call.sh"
+            "command": "python ${CLAUDE_PLUGIN_ROOT}/scripts/validate_api_call.py"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/check-secrets.sh"
+            "command": "python ${CLAUDE_PLUGIN_ROOT}/scripts/check_secrets.py"
           }
         ]
       }

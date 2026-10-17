@@ -1,0 +1,1429 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>ARIA 문서별 자동화 전제·한계·구현 장점</title>
+  <style>
+    :root {
+      --ink: #142033;
+      --muted: #5c6a7e;
+      --line: #d9e2ec;
+      --paper: #f5f8fb;
+      --white: #ffffff;
+      --navy: #102a43;
+      --blue: #2166d1;
+      --cyan: #00a8c6;
+      --teal: #087f75;
+      --green: #16845b;
+      --amber: #b56a00;
+      --red: #bd2c35;
+      --soft-blue: #edf5ff;
+      --soft-teal: #ecfbf8;
+      --soft-amber: #fff7e8;
+      --soft-red: #fff0f1;
+      --shadow: 0 16px 46px rgba(16, 42, 67, .11);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 84px;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 92% 4%, rgba(0, 168, 198, .11), transparent 28rem),
+        linear-gradient(180deg, #f9fbfd 0, var(--paper) 32rem);
+      font-family: "Pretendard", "Noto Sans KR", "Segoe UI", Arial, sans-serif;
+      line-height: 1.62;
+      word-break: keep-all;
+    }
+
+    a { color: inherit; }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      color: #fff;
+      background:
+        linear-gradient(120deg, rgba(9, 35, 63, .97), rgba(13, 66, 98, .94)),
+        var(--navy);
+    }
+
+    .hero::before,
+    .hero::after {
+      content: "";
+      position: absolute;
+      border: 1px solid rgba(255, 255, 255, .13);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+
+    .hero::before {
+      width: 520px;
+      height: 520px;
+      right: -180px;
+      top: -310px;
+    }
+
+    .hero::after {
+      width: 320px;
+      height: 320px;
+      right: 9%;
+      bottom: -250px;
+    }
+
+    .hero-inner {
+      position: relative;
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 76px 32px 68px;
+    }
+
+    .eyebrow {
+      margin: 0 0 15px;
+      color: #83e4ef;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 920px;
+      margin: 0;
+      font-size: clamp(38px, 6vw, 70px);
+      line-height: 1.08;
+      letter-spacing: -.045em;
+    }
+
+    .hero-lead {
+      max-width: 850px;
+      margin: 24px 0 0;
+      color: #d9edf5;
+      font-size: clamp(18px, 2.1vw, 25px);
+      line-height: 1.5;
+    }
+
+    .hero-lead strong { color: #fff; }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 31px;
+    }
+
+    .meta span {
+      padding: 7px 12px;
+      border: 1px solid rgba(255, 255, 255, .21);
+      border-radius: 999px;
+      color: #dcebf1;
+      background: rgba(255, 255, 255, .06);
+      font-size: 13px;
+    }
+
+    .top-nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgba(16, 42, 67, .13);
+      background: rgba(255, 255, 255, .93);
+      backdrop-filter: blur(15px);
+    }
+
+    .top-nav-inner {
+      display: flex;
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 0 24px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .top-nav-inner::-webkit-scrollbar { display: none; }
+
+    .top-nav a {
+      flex: 0 0 auto;
+      padding: 17px 15px 14px;
+      border-bottom: 3px solid transparent;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 750;
+      text-decoration: none;
+    }
+
+    .top-nav a:hover,
+    .top-nav a.active {
+      color: var(--blue);
+      border-bottom-color: var(--blue);
+    }
+
+    main {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 44px 32px 80px;
+    }
+
+    section {
+      margin-top: 76px;
+    }
+
+    section:first-child { margin-top: 0; }
+
+    .section-kicker {
+      margin: 0 0 8px;
+      color: var(--blue);
+      font-size: 13px;
+      font-weight: 850;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      margin: 0;
+      color: var(--navy);
+      font-size: clamp(29px, 3.6vw, 43px);
+      line-height: 1.17;
+      letter-spacing: -.035em;
+    }
+
+    .section-lead {
+      max-width: 920px;
+      margin: 14px 0 28px;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .principle {
+      display: grid;
+      grid-template-columns: 1fr 1.25fr 1fr;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--white);
+      box-shadow: var(--shadow);
+    }
+
+    .principle > div {
+      position: relative;
+      min-height: 180px;
+      padding: 28px;
+    }
+
+    .principle > div + div { border-left: 1px solid var(--line); }
+
+    .principle .num {
+      display: inline-grid;
+      width: 30px;
+      height: 30px;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--blue);
+      font-size: 13px;
+      font-weight: 850;
+    }
+
+    .principle h3 {
+      margin: 15px 0 8px;
+      color: var(--navy);
+      font-size: 21px;
+    }
+
+    .principle p { margin: 0; color: var(--muted); }
+
+    .principle .emphasis {
+      color: #fff;
+      background: linear-gradient(135deg, #145a8d, #0a7d8a);
+    }
+
+    .principle .emphasis h3,
+    .principle .emphasis p { color: #fff; }
+
+    .principle .emphasis p { opacity: .85; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0;
+      margin-top: 24px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+    }
+
+    .flow-step {
+      position: relative;
+      min-height: 145px;
+      padding: 22px 20px;
+    }
+
+    .flow-step + .flow-step { border-left: 1px solid var(--line); }
+
+    .flow-step::after {
+      content: "→";
+      position: absolute;
+      z-index: 2;
+      top: 47%;
+      right: -13px;
+      display: grid;
+      width: 26px;
+      height: 26px;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      color: var(--blue);
+      background: #fff;
+      font-weight: 900;
+    }
+
+    .flow-step:last-child::after { display: none; }
+
+    .flow-step small {
+      display: block;
+      color: var(--blue);
+      font-weight: 850;
+      letter-spacing: .06em;
+    }
+
+    .flow-step strong {
+      display: block;
+      margin: 9px 0 5px;
+      color: var(--navy);
+      font-size: 18px;
+    }
+
+    .flow-step span { color: var(--muted); font-size: 14px; }
+
+    .callout {
+      margin: 24px 0 0;
+      padding: 21px 24px;
+      border-left: 5px solid var(--blue);
+      border-radius: 0 13px 13px 0;
+      background: var(--soft-blue);
+    }
+
+    .callout strong { color: var(--navy); }
+
+    .callout.warn {
+      border-left-color: var(--amber);
+      background: var(--soft-amber);
+    }
+
+    .callout.danger {
+      border-left-color: var(--red);
+      background: var(--soft-red);
+    }
+
+    .matrix-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      box-shadow: 0 10px 30px rgba(16, 42, 67, .06);
+    }
+
+    table {
+      width: 100%;
+      min-width: 900px;
+      border-collapse: collapse;
+    }
+
+    th, td {
+      padding: 16px 17px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      color: #fff;
+      background: var(--navy);
+      font-size: 14px;
+      letter-spacing: .01em;
+    }
+
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover td { background: #f8fbfe; }
+
+    td:first-child {
+      color: var(--navy);
+      font-weight: 800;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+
+    .status.good { color: #0b6747; background: #def7eb; }
+    .status.warn { color: #875000; background: #fff0c9; }
+    .status.info { color: #1658a4; background: #e7f1ff; }
+    .status.bad { color: #9b2730; background: #ffe0e3; }
+
+    .doc-stack {
+      display: grid;
+      gap: 28px;
+    }
+
+    .doc-card {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+
+    .doc-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 28px 30px 22px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(100deg, #f7fbff, #fff);
+    }
+
+    .doc-head h3 {
+      margin: 0;
+      color: var(--navy);
+      font-size: 28px;
+      letter-spacing: -.025em;
+    }
+
+    .doc-head p {
+      margin: 6px 0 0;
+      color: var(--muted);
+    }
+
+    .doc-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .doc-cell {
+      min-height: 190px;
+      padding: 25px 30px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .doc-cell:nth-child(odd) { border-right: 1px solid var(--line); }
+    .doc-cell:nth-last-child(-n+2) { border-bottom: 0; }
+
+    .doc-cell h4 {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin: 0 0 12px;
+      color: var(--navy);
+      font-size: 17px;
+    }
+
+    .doc-cell h4::before {
+      content: "";
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--cyan);
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    li + li { margin-top: 7px; }
+
+    .advantage {
+      background: var(--soft-teal);
+    }
+
+    .advantage h4::before { background: var(--green); }
+
+    .limit { background: #fffaf2; }
+    .limit h4::before { background: var(--amber); }
+
+    .ppt-copy {
+      position: relative;
+      margin: 0;
+      padding: 24px 100px 24px 30px;
+      border-top: 1px solid var(--line);
+      color: #fff;
+      background: var(--navy);
+      font-size: 18px;
+      font-weight: 650;
+    }
+
+    .copy-btn {
+      position: absolute;
+      top: 19px;
+      right: 22px;
+      padding: 8px 11px;
+      border: 1px solid rgba(255,255,255,.33);
+      border-radius: 9px;
+      color: #fff;
+      background: rgba(255,255,255,.08);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .copy-btn:hover { background: rgba(255,255,255,.16); }
+
+    code {
+      border-radius: 6px;
+      color: #1b4a78;
+      background: #edf4fa;
+      font-family: Consolas, "SFMono-Regular", monospace;
+      font-size: .89em;
+      word-break: break-all;
+    }
+
+    .code-evidence {
+      margin-top: 15px;
+      padding-top: 13px;
+      border-top: 1px dashed #c8d5e1;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .metric-triad {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      overflow: hidden;
+      margin: 26px 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+    }
+
+    .metric-triad > div {
+      min-height: 172px;
+      padding: 25px;
+    }
+
+    .metric-triad > div + div { border-left: 1px solid var(--line); }
+    .metric-triad b { display: block; color: var(--blue); font-size: 14px; }
+    .metric-triad strong { display: block; margin: 9px 0 6px; color: var(--navy); font-size: 22px; }
+    .metric-triad span { color: var(--muted); }
+
+    .data-snapshot {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 22px;
+      margin: 25px 0;
+    }
+
+    .snapshot {
+      padding: 25px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+    }
+
+    .snapshot .big {
+      color: var(--blue);
+      font-size: 42px;
+      font-weight: 900;
+      line-height: 1;
+    }
+
+    .snapshot h3 { margin: 11px 0 7px; color: var(--navy); }
+    .snapshot p { margin: 0; color: var(--muted); }
+
+    .roadmap {
+      counter-reset: roadmap;
+      margin-top: 24px;
+      border-top: 1px solid var(--line);
+    }
+
+    .roadmap-item {
+      position: relative;
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 25px;
+      padding: 23px 0 23px 54px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .roadmap-item::before {
+      counter-increment: roadmap;
+      content: counter(roadmap);
+      position: absolute;
+      left: 0;
+      top: 24px;
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--blue);
+      font-weight: 900;
+    }
+
+    .roadmap-item strong { color: var(--navy); }
+    .roadmap-item p { margin: 0; color: var(--muted); }
+
+    .ppt-section {
+      padding: 35px;
+      border-radius: var(--radius);
+      color: #fff;
+      background: linear-gradient(135deg, #102a43, #145a77);
+      box-shadow: var(--shadow);
+    }
+
+    .ppt-section h2,
+    .ppt-section .section-kicker { color: #fff; }
+
+    .ppt-section .section-kicker { opacity: .72; }
+    .ppt-section .section-lead { color: #d7eaf3; }
+
+    .slide-copy {
+      position: relative;
+      margin-top: 17px;
+      padding: 22px 120px 22px 24px;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 13px;
+      background: rgba(255,255,255,.07);
+    }
+
+    .slide-copy b {
+      display: block;
+      margin-bottom: 7px;
+      color: #7ce2eb;
+      font-size: 13px;
+    }
+
+    .slide-copy p {
+      margin: 0;
+      color: #fff;
+      font-size: 18px;
+      font-weight: 650;
+    }
+
+    .slide-copy .copy-btn { top: 18px; }
+
+    details {
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: #fff;
+    }
+
+    details + details { margin-top: 10px; }
+
+    summary {
+      padding: 15px 18px;
+      color: var(--navy);
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    details .detail-body {
+      padding: 0 18px 18px;
+      color: var(--muted);
+    }
+
+    footer {
+      padding: 34px 25px 50px;
+      color: #718096;
+      text-align: center;
+      font-size: 13px;
+    }
+
+    @media (max-width: 900px) {
+      .principle,
+      .flow,
+      .doc-grid,
+      .metric-triad,
+      .data-snapshot {
+        grid-template-columns: 1fr;
+      }
+
+      .principle > div + div,
+      .flow-step + .flow-step,
+      .doc-cell:nth-child(odd),
+      .metric-triad > div + div {
+        border-left: 0;
+        border-right: 0;
+        border-top: 1px solid var(--line);
+      }
+
+      .flow-step::after {
+        content: "↓";
+        top: auto;
+        right: calc(50% - 13px);
+        bottom: -13px;
+      }
+
+      .doc-cell { border-bottom: 1px solid var(--line) !important; }
+      .doc-cell:last-child { border-bottom: 0 !important; }
+      .roadmap-item { grid-template-columns: 1fr; gap: 5px; }
+    }
+
+    @media (max-width: 620px) {
+      .hero-inner { padding: 56px 20px 48px; }
+      main { padding: 34px 18px 65px; }
+      h1 { font-size: 40px; }
+      .doc-head { flex-direction: column; padding: 24px 22px; }
+      .doc-cell { padding: 23px 22px; }
+      .ppt-copy, .slide-copy { padding: 22px; padding-top: 62px; }
+      .copy-btn { top: 17px; right: auto; left: 22px; }
+      .ppt-section { padding: 28px 20px; }
+      table { min-width: 760px; }
+    }
+
+    @media print {
+      @page { size: A4; margin: 14mm; }
+      body { background: #fff; font-size: 10pt; }
+      .top-nav, .copy-btn { display: none !important; }
+      .hero { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .hero-inner { padding: 40px 25px; }
+      main { max-width: none; padding: 20px 0; }
+      section { margin-top: 34px; }
+      .doc-card, .matrix-wrap, .snapshot, details {
+        box-shadow: none;
+        break-inside: avoid;
+      }
+      .doc-card { break-before: auto; }
+      .ppt-copy, .ppt-section, th, .principle .emphasis {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      .flow { break-inside: avoid; }
+      details[open] .detail-body { display: block; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-inner">
+      <p class="eyebrow">ARIA · ISO 26262 SW DOCUMENT AUTOMATION</p>
+      <h1>문서 자동화는 완성본을 대신하는 것이 아니라, 검토 가능한 초안의 출발점을 높인다</h1>
+      <p class="hero-lead">
+        각 문서가 요구하는 <strong>권위 입력과 Revision</strong>을 고정한 뒤,
+        결정론 분석으로 사실·수치·링크를 만들고 LLM은 근거가 있는 설명만 보강한다.
+        최종 산출물은 자동 생성된 검토 초안이며, 승인과 시험 적합성 판단은 사람이 확정한다.
+      </p>
+      <div class="meta">
+        <span>검토일 2026-07-28</span>
+        <span>범위 ISO 26262 SW V-model</span>
+        <span>원본 PPT 12장 · 워커 읽기 완료</span>
+        <span>코드 기준 Release_claude</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="top-nav" aria-label="문서 내 탐색">
+    <div class="top-nav-inner">
+      <a href="#principle">자동화 원칙</a>
+      <a href="#baseline">입력 기준문서</a>
+      <a href="#drafts">명세 초안 4종</a>
+      <a href="#evidence">시험 결과 4종</a>
+      <a href="#trace">추적성 판정</a>
+      <a href="#rag">RAG 고도화</a>
+      <a href="#ppt-copy">PPT 반영 문구</a>
+      <a href="#code">코드 근거</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="principle">
+      <p class="section-kicker">01 · Operating principle</p>
+      <h2>자동화의 핵심은 ‘사실 생성’과 ‘문장 생성’을 분리하는 것이다</h2>
+      <p class="section-lead">
+        코드가 구조와 관계를 반복 가능하게 계산하고, AI는 그 결과를 읽기 쉬운 문장으로 정리한다.
+        이 경계를 지켜야 산출물의 장점은 살리고 ISO 26262 증거의 과대평가는 막을 수 있다.
+      </p>
+
+      <div class="principle">
+        <div>
+          <span class="num">1</span>
+          <h3>결정론 코어</h3>
+          <p>요구 ID, 함수, 호출관계, 입출력, 시험 매핑, P/F와 커버리지를 코드로 계산한다. 같은 입력은 같은 결과를 만든다.</p>
+        </div>
+        <div class="emphasis">
+          <span class="num">2</span>
+          <h3>근거 제한형 LLM</h3>
+          <p>결정론 결과, 승인 문서, RAG excerpt 안에서 설명과 초안을 보강한다. 근거가 없으면 N/A 또는 검토 대상으로 남긴다.</p>
+        </div>
+        <div>
+          <span class="num">3</span>
+          <h3>사람 승인 게이트</h3>
+          <p>요구 의도, ASIL, expected result, stub 조건, deviation 수용, 최종 evidence 채택은 책임자가 확정한다.</p>
+        </div>
+      </div>
+
+      <div class="flow" aria-label="ARIA 문서 자동화 흐름">
+        <div class="flow-step">
+          <small>BASELINE</small>
+          <strong>SRS · SDS · HSIS</strong>
+          <span>승인 요구·설계·인터페이스</span>
+        </div>
+        <div class="flow-step">
+          <small>ANALYZE</small>
+          <strong>Source / AST</strong>
+          <span>함수·분기·호출·전역변수</span>
+        </div>
+        <div class="flow-step">
+          <small>DRAFT</small>
+          <strong>UDS · STS · SUTS · SITS</strong>
+          <span>설계·시험명세 검토 초안</span>
+        </div>
+        <div class="flow-step">
+          <small>EXECUTE</small>
+          <strong>VectorCAST</strong>
+          <span>Unit / Integration 실행 증거</span>
+        </div>
+        <div class="flow-step">
+          <small>ASSETIZE</small>
+          <strong>Reports · Trace · RAG</strong>
+          <span>보고·영향분석·재사용</span>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>중요:</strong> UDS·SUTS·SITS 초안은 소스만으로도 시작할 수 있지만,
+        STS와 요구사항 종단 추적성은 승인된 SRS/SwRS 없이는 완성할 수 없다.
+        RAG는 누락된 요구사항을 대신 만들지 않고 후보 연결과 과거 근거를 제안한다.
+      </div>
+    </section>
+
+    <section id="baseline">
+      <p class="section-kicker">02 · Authoritative inputs</p>
+      <h2>입력 기준문서는 자동화의 재료이자 넘지 말아야 할 권위 경계다</h2>
+      <p class="section-lead">
+        SRS·SDS·HSIS는 현재 생성 대상이라기보다 파싱·정규화·연결 대상이다.
+        코드가 형식 차이와 입도 차이를 줄여주지만 내용의 승인 상태까지 자동으로 만들지는 않는다.
+      </p>
+
+      <div class="matrix-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>기준문서</th>
+              <th>자동화 전제</th>
+              <th>구현 기능</th>
+              <th>기능상 장점</th>
+              <th>남는 한계 / 승인</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>SRS / SwRS<br><span class="status info">추적 허브</span></td>
+              <td>요구 ID, 설명, ASIL, Related ID, 검증기준이 승인 baseline에 존재해야 한다.</td>
+              <td>DOCX 표와 비정형 텍스트에서 요구 ID·ASIL·상위 ID·검증기준을 구조화하고 중복을 제거한다.</td>
+              <td>STS 생성과 전 문서 추적성의 분모를 하나로 맞춰 누락 요구를 표면화한다.</td>
+              <td>문서에 없는 요구 의도나 안전 목표는 생성하지 못한다. 파싱 성공은 요구 적합성 승인이 아니다.</td>
+            </tr>
+            <tr>
+              <td>SDS<br><span class="status info">설계 기준</span></td>
+              <td>컴포넌트 책임, 인터페이스, ASIL, Related ID와 하위 함수 관계가 식별 가능해야 한다.</td>
+              <td>SwCom/컴포넌트·함수·ASIL·설명을 추출하고, 서로 다른 컴포넌트 설명 충돌 시 임의 상속보다 공백을 선택한다.</td>
+              <td>leaf 함수가 SRS에 직접 연결되지 않아도 <b>함수 → UDS → SDS → SwRS</b> roll-up을 구성할 수 있다.</td>
+              <td>SDS가 이름 목록뿐이면 상위 추적 근거가 약하다. 컴포넌트 책임과 파생·범위제외 근거는 설계 책임자가 확정해야 한다.</td>
+            </tr>
+            <tr>
+              <td>HSIS / STP<br><span class="status info">보강 입력</span></td>
+              <td>HSIS의 신호 ID·SW 변수·방향·특성·Related ID 및 STP 시험전략이 최신 Revision이어야 한다.</td>
+              <td>HSIS 변수와 소스 변수를 연결해 입력 범위·하드웨어 신호·요구 ID를 보강하고 STP의 시험전략을 AI 컨텍스트로 제공한다.</td>
+              <td>테스트 값이 단순 이름 추정에 머무르지 않고 인터페이스 정의의 min/max와 시험환경을 반영한다.</td>
+              <td>변수 alias, 단위·스케일, 다중 매핑과 Revision 불일치는 자동 확정할 수 없다.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="code-evidence">
+        코드 근거:
+        <code>generators/sts.py:616-674</code>,
+        <code>report_gen/requirements.py:650-760</code>,
+        <code>generators/sts.py:318-405</code>
+      </div>
+    </section>
+
+    <section id="drafts">
+      <p class="section-kicker">03 · Specification drafts</p>
+      <h2>문서 4종은 서로 다른 질문을 자동화한다</h2>
+      <p class="section-lead">
+        UDS는 “코드가 무엇을 하는가”, STS는 “요구를 어떻게 검증할 것인가”,
+        SUTS는 “함수 경계와 분기를 어떻게 시험할 것인가”,
+        SITS는 “모듈 사이 상호작용을 어떻게 검증할 것인가”를 초안화한다.
+      </p>
+
+      <div class="doc-stack">
+        <article class="doc-card" id="uds">
+          <header class="doc-head">
+            <div>
+              <h3>UDS · Unit Design Specification</h3>
+              <p>Source 구조를 함수 단위 상세설계 초안으로 변환</p>
+            </div>
+            <span class="status good">결정론 + 제한형 AI</span>
+          </header>
+          <div class="doc-grid">
+            <div class="doc-cell">
+              <h4>자동화 전제와 생성 초안</h4>
+              <ul>
+                <li>C/H 소스가 파싱 가능하고 함수 경계와 prototype이 식별되어야 한다.</li>
+                <li>함수 ID·이름·prototype·설명·ASIL·Related ID·입출력·전제조건·전역변수·호출·logic flow를 초안화한다.</li>
+                <li>SRS/SDS·주석·함수 override·RAG 근거가 있으면 관련 정보를 보강한다.</li>
+              </ul>
+            </div>
+            <div class="doc-cell">
+              <h4>코드가 극복하려는 한계</h4>
+              <ul>
+                <li>AST만으로 놓치는 호출을 함수 body, macro, function pointer, fallback 분석으로 합친다.</li>
+                <li>헤더 prototype을 우선하고 typedef를 정규화해 구현부 signature의 정보 손실을 줄인다.</li>
+                <li>설명·ASIL·Related ID마다 comment/SDS/inference 출처를 남긴다.</li>
+                <li>LLM 결과는 evidence schema, reviewer, auditor, judge와 재시도 구조로 점검한다.</li>
+              </ul>
+            </div>
+            <div class="doc-cell advantage">
+              <h4>구현 기능의 장점</h4>
+              <ul>
+                <li>함수 inventory와 호출관계를 수작업보다 빠르고 일관되게 갱신한다.</li>
+                <li>간접 호출과 전역변수까지 보여주므로 영향분석과 SUTS 입력 품질이 좋아진다.</li>
+                <li>근거 출처가 남아 추정값과 문서값을 리뷰어가 구분할 수 있다.</li>
+                <li>동일 소스 Revision에서 반복 생성해 문서 drift를 줄일 수 있다.</li>
+              </ul>
+            </div>
+            <div class="doc-cell limit">
+              <h4>초안의 한계와 사람 확정</h4>
+              <ul>
+                <li>주석·SDS가 없으면 설명, ASIL, Related ID가 inference 또는 TBD가 될 수 있다.</li>
+                <li>동적 dispatch, 전처리 분기, 런타임 상태의 실제 의도는 정적 분석만으로 확정할 수 없다.</li>
+                <li>현재 의미 검증은 confidence를 낮추지만 모든 실패를 hard block하지는 않는다.</li>
+                <li>안전 의도·ASIL·상위 요구 연결은 설계 책임자가 승인해야 한다.</li>
+              </ul>
+            </div>
+          </div>
+          <blockquote class="ppt-copy" id="copy-uds">
+            UDS 자동화는 Source의 함수·호출·입출력·전역상태를 결정론적으로 분석하고, 문서·주석 근거를 결합해 상세설계 검토 초안을 만든다. 추정된 설명·ASIL·Related ID는 출처와 함께 표시하여 사람이 최종 확정한다.
+            <button class="copy-btn" data-copy="copy-uds" type="button">문구 복사</button>
+          </blockquote>
+          <div class="code-evidence" style="padding:15px 30px 22px">
+            <code>report_gen/uds_generator.py:889-931, 1198-1227</code> ·
+            <code>workflow/uds_ai.py:623-646, 714-858</code>
+          </div>
+        </article>
+
+        <article class="doc-card" id="sts">
+          <header class="doc-head">
+            <div>
+              <h3>STS · Software Test Specification</h3>
+              <p>승인 요구사항을 SW 요구기반 시험명세 초안으로 변환</p>
+            </div>
+            <span class="status warn">SRS 권위 필요</span>
+          </header>
+          <div class="doc-grid">
+            <div class="doc-cell">
+              <h4>자동화 전제와 생성 초안</h4>
+              <ul>
+                <li>실제 요구기반 시험을 위해 승인된 SRS/SwRS 요구 ID와 검증기준이 필요하다.</li>
+                <li>TC ID·제목·안전관련 여부·시험환경·시험방법·전제조건·Action·Expected·SRS ID를 생성한다.</li>
+                <li>SDS·UDS·STP·HSIS를 보조 근거로 사용한다.</li>
+              </ul>
+            </div>
+            <div class="doc-cell">
+              <h4>코드가 극복하려는 한계</h4>
+              <ul>
+                <li>SRS 표와 비정형 텍스트를 모두 파싱하고 가장 풍부한 요구 정보를 유지한다.</li>
+                <li>요구와 함수·logic flow를 매핑해 실행 가능한 단계 후보를 만든다.</li>
+                <li>함수 미매핑 요구도 삭제하지 않고 review-only TC로 남겨 추적 공백을 숨기지 않는다.</li>
+                <li>결정론 TC 생성 후에만 AI가 SDS/STP/HSIS 컨텍스트로 문장을 보강한다.</li>
+              </ul>
+            </div>
+            <div class="doc-cell advantage">
+              <h4>구현 기능의 장점</h4>
+              <ul>
+                <li>모든 요구를 TC 후보와 trace matrix에 올려 누락 검토를 빠르게 시작할 수 있다.</li>
+                <li>요구의 ASIL·상태·상위 ID가 TC 전제조건과 안전 표시로 전파된다.</li>
+                <li>HSIS 신호가 있는 요구는 하드웨어 인터페이스 기반 시험방법을 보강할 수 있다.</li>
+                <li>XLSM, 품질 리포트, 추적 매트릭스를 함께 만들어 문서 작성 시간을 줄인다.</li>
+              </ul>
+            </div>
+            <div class="doc-cell limit">
+              <h4>초안의 한계와 사람 확정</h4>
+              <ul>
+                <li>review-only TC도 요구 매핑 커버리지에는 포함되므로 100%가 실행 가능성이나 시험 적합성을 뜻하지 않는다.</li>
+                <li>Expected result와 환경·판정기준은 요구 의도와 실제 시스템 조건으로 확정해야 한다.</li>
+                <li>AI 응답 검증은 주로 JSON 구조와 길이를 확인하므로 근거 일치까지 보증하지 않는다.</li>
+                <li><b>현재 자동 검증기는 생성 열과 검사 열이 어긋나 있어 validation PASS를 단독 신뢰하면 안 된다.</b></li>
+                <li>SRS가 없으면 STS라기보다 검토용 시험 아이디어 목록으로 표시해야 한다.</li>
+              </ul>
+            </div>
+          </div>
+          <blockquote class="ppt-copy" id="copy-sts">
+            STS 자동화는 승인된 SwRS를 분모로 요구별 시험단계와 추적 매트릭스를 생성한다. 함수와 연결되지 않은 요구도 review-only 후보로 남겨 공백을 드러내며, 실행 가능성과 Expected Result는 시험 책임자가 확정한다.
+            <button class="copy-btn" data-copy="copy-sts" type="button">문구 복사</button>
+          </blockquote>
+          <div class="code-evidence" style="padding:15px 30px 22px">
+            <code>generators/sts.py:2223-2380, 1366-1431, 1537-1574</code> ·
+            검증기 열 불일치 <code>generators/sts.py:1737-1750</code> ↔
+            <code>generators/suts.py:2126-2148</code>
+          </div>
+        </article>
+
+        <article class="doc-card" id="suts">
+          <header class="doc-head">
+            <div>
+              <h3>SUTS · Software Unit Test Specification</h3>
+              <p>함수 구조와 경계조건을 단위시험 시퀀스 초안으로 변환</p>
+            </div>
+            <span class="status good">결정론 중심</span>
+          </header>
+          <div class="doc-grid">
+            <div class="doc-cell">
+              <h4>자동화 전제와 생성 초안</h4>
+              <ul>
+                <li>함수 prototype, 입력·출력 또는 관측 가능한 전역상태가 식별되어야 한다.</li>
+                <li>함수별 TC와 boundary, condition, switch, loop, global-state, void side-effect, MC/DC 시퀀스를 만든다.</li>
+                <li>SRS·UDS·HSIS는 요구 ID, 설명, 인터페이스 범위를 보강한다. SDS 입력은 인터페이스에 선언돼 있으나 현재 본문에서 직접 소비되지 않는다.</li>
+              </ul>
+            </div>
+            <div class="doc-cell">
+              <h4>코드가 극복하려는 한계</h4>
+              <ul>
+                <li>정밀 파싱 실패 시 lightweight parser로 함수 inventory를 보존한다.</li>
+                <li>void/no-param 함수는 callee 입출력, 전역변수, logic-flow 변수까지 추적해 시험 가능한 관측점을 찾는다.</li>
+                <li>HSIS 특성값을 경계값 힌트로 사용하고 타입별 유효·무효 경계를 생성한다.</li>
+                <li>AI는 끝까지 관측 변수를 찾지 못한 함수에만 제한 적용한다.</li>
+              </ul>
+            </div>
+            <div class="doc-cell advantage">
+              <h4>구현 기능의 장점</h4>
+              <ul>
+                <li>반복적인 경계값·분기·loop·switch 조합을 빠짐없이 같은 규칙으로 제안한다.</li>
+                <li>AI 호출 범위를 좁혀 비용과 비결정성을 줄이고 재생성 일관성을 높인다.</li>
+                <li>전역 side effect와 callee 상태까지 관측 후보로 올려 void 함수의 시험 공백을 줄인다.</li>
+                <li>ASIL과 logic flow를 함께 보므로 MC/DC 검토 대상 선별이 쉬워진다.</li>
+              </ul>
+            </div>
+            <div class="doc-cell limit">
+              <h4>초안의 한계와 사람 확정</h4>
+              <ul>
+                <li>경계값은 타입·이름·HSIS 힌트 기반이며 실제 알고리즘의 정답 oracle은 아니다.</li>
+                <li>Stub 동작, 초기 전역상태, 타이밍, 허용오차, 테스트 harness는 사람이 확정해야 한다.</li>
+                <li>MC/DC 후보 생성은 독립효과 입증과 목표 커버리지 달성을 보장하지 않는다.</li>
+                <li>명시적으로 전달한 SDS가 현재 적용되지 않고, 원격 SRS·UDS·HSIS는 로컬 <code>Path.is_file()</code> 검사에서 건너뛸 수 있다.</li>
+                <li>검증 issue가 있어도 XLSM 생성 자체를 항상 차단하지는 않는다.</li>
+              </ul>
+            </div>
+          </div>
+          <blockquote class="ppt-copy" id="copy-suts">
+            SUTS 자동화는 함수의 타입·분기·switch·loop·전역상태를 분석해 경계값과 MC/DC 후보를 결정론적으로 생성한다. AI는 관측점이 부족한 함수에만 제한하며, Expected Result·Stub·독립효과는 시험 책임자가 확정한다.
+            <button class="copy-btn" data-copy="copy-suts" type="button">문구 복사</button>
+          </blockquote>
+          <div class="code-evidence" style="padding:15px 30px 22px">
+            <code>generators/suts.py:547-825, 2169-2567</code> ·
+            SDS 미소비/원격 경로 한계 <code>generators/suts.py:2177-2195, 2308, 2344, 2365</code>
+          </div>
+        </article>
+
+        <article class="doc-card" id="sits">
+          <header class="doc-head">
+            <div>
+              <h3>SITS · Software Integration Test Specification</h3>
+              <p>실제 모듈 간 호출관계를 통합시험 흐름 초안으로 변환</p>
+            </div>
+            <span class="status info">AI 미사용 · 정적 분석</span>
+          </header>
+          <div class="doc-grid">
+            <div class="doc-cell">
+              <h4>자동화 전제와 생성 초안</h4>
+              <ul>
+                <li>소스에서 caller/callee와 파일·모듈 경계가 식별되어야 한다.</li>
+                <li>통합 flow ID, entry function, call chain, component, 입출력, expected observable, ASIL, Related ID와 sub-case를 생성한다.</li>
+                <li>SRS는 요구 ID, STP는 시험환경을 보강한다. SDS·HSIS는 현재 로드만 하며, UDS 설명 병합도 flow 내용에 주는 효과가 제한적이다.</li>
+              </ul>
+            </div>
+            <div class="doc-cell">
+              <h4>코드가 극복하려는 한계</h4>
+              <ul>
+                <li>프로젝트 내부의 실제 cross-module 호출만 선택하고 OS·library 호출을 제외한다.</li>
+                <li>entry 출력뿐 아니라 pointer out, callee 출력, callee global side effect를 관측값으로 수집한다.</li>
+                <li>입력이 없으면 callee 입력을, 출력이 없으면 global write를 찾아 통합 관측점을 복원한다.</li>
+                <li>정렬과 ID 생성이 결정론적이어서 반복 생성 시 차이가 안정적이다.</li>
+              </ul>
+            </div>
+            <div class="doc-cell advantage">
+              <h4>구현 기능의 장점</h4>
+              <ul>
+                <li>문서상의 추상 연결이 아니라 실제 구현 호출을 기반으로 integration 후보를 만든다.</li>
+                <li>외부 라이브러리 노이즈를 줄이고 SW 컴포넌트 간 인터페이스 검토에 집중한다.</li>
+                <li>pointer와 global side effect를 포함해 관측 가능한 통합 결과를 넓힌다.</li>
+                <li>AI를 아직 사용하지 않아 현재 결과의 재현성과 원인 추적이 명확하다.</li>
+              </ul>
+            </div>
+            <div class="doc-cell limit">
+              <h4>초안의 한계와 사람 확정</h4>
+              <ul>
+                <li>function pointer·callback·runtime dispatch와 더 긴 경로는 정적 call graph에서 빠질 수 있다.</li>
+                <li>Expected 값은 타입 경계 휴리스틱이므로 실제 인터페이스 oracle로 승인할 수 없다.</li>
+                <li>파일명 기반 모듈 경계와 순번 기반 <code>SwCom_XX</code>가 실제 SDS 컴포넌트와 일치하는지 확정해야 한다.</li>
+                <li>컴포넌트 경계, timing/order, fault propagation과 stub 구성을 사람이 확정해야 한다.</li>
+                <li>현재 SDS·HSIS 로딩만으로는 생성 TC가 실제로 보강되지 않는 구간이 있다.</li>
+                <li>cross-module flow가 검출되지 않으면 문서가 생성되지 않으며 원인을 별도 조사해야 한다.</li>
+              </ul>
+            </div>
+          </div>
+          <blockquote class="ppt-copy" id="copy-sits">
+            SITS 자동화는 프로젝트 내부의 실제 cross-module 호출만 선별하고 pointer·callee output·global side effect를 관측점으로 확장한다. 예상값과 동적 호출·타이밍 조건은 통합시험 책임자가 확정한다.
+            <button class="copy-btn" data-copy="copy-sits" type="button">문구 복사</button>
+          </blockquote>
+          <div class="code-evidence" style="padding:15px 30px 22px">
+            <code>generators/sits.py:246-428, 580-776, 1417-1617</code> ·
+            보강 입력 연결 한계 <code>generators/sits.py:1466-1502, 1595-1603</code>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="evidence">
+      <p class="section-kicker">04 · VectorCAST evidence documents</p>
+      <h2>시험결과와 구조 커버리지는 문서와 판정 의미를 분리한다</h2>
+      <p class="section-lead">
+        ARIA는 VectorCAST 원시 결과를 공통 session으로 정규화한 뒤,
+        실행결과 문서와 커버리지 문서를 회사 템플릿에 맞춰 각각 생성한다.
+      </p>
+
+      <div class="matrix-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>산출물</th>
+              <th>자동화 전제</th>
+              <th>구현 기능과 생성 초안</th>
+              <th>기능상 장점</th>
+              <th>남는 한계 / 승인</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>SwUTR<br><span class="status good">Unit Result</span></td>
+              <td>VectorCAST Unit 환경·TC 결과와 SUTR 템플릿, build meta가 같은 기준선이어야 한다.</td>
+              <td>Total/Tested/P/F/Deviation/NotExecuted 요약, TC별 Input·Expected·Actual·P/F, deviation 초안을 작성하고 XLSM macro와 서식을 보존한다.</td>
+              <td>여러 환경의 실행결과를 정규화하고, 미실행과 미정의 결과를 P/F에서 분리해 불가능한 100% 초과 집계를 막는다.</td>
+              <td><code>Actual Coverage</code>는 TC 실행률이며 구조 커버리지가 아니다. PASS는 SUTS 적합성과 요구 추적 완료를 뜻하지 않는다. 기본 최종값 OK, Deviation과 승인 서명은 사람이 재확정한다.</td>
+            </tr>
+            <tr>
+              <td>SwUTCV<br><span class="status good">Unit Coverage</span></td>
+              <td>Unit metrics report의 Statement/Branch/MC/DC와 함수 식별자가 UDS/SUTS와 연결 가능해야 한다.</td>
+              <td>Test Summary, TC×Function traceability, UDS↔SUTS consistency, 함수별 구조 커버리지와 ASIL 강조를 생성한다.</td>
+              <td>실행 P/F와 구조 커버리지를 분리하고 미커버 함수·라인을 리뷰 우선순위로 표면화한다.</td>
+              <td>템플릿·식별자 불일치와 incomplete sheet는 경고로 남는다. 일부 양식은 미달 행 Exception으로 계산값이 100%가 될 수 있어 원시 covered/total과 예외 정당성을 따로 검토해야 한다.</td>
+            </tr>
+            <tr>
+              <td>SwITR<br><span class="status good">Integration Result</span></td>
+              <td>VectorCAST Integration 환경·함수호출 실행결과와 SITS/템플릿이 동일 build 기준이어야 한다.</td>
+              <td>통합 Test Summary, interface TC Test Log, deviation, history를 만들고 기존 SwUT writer를 재사용해 포맷을 통일한다.</td>
+              <td>Unit/Integration 결과 형식을 통일하면서 integration 전용 TC와 interface 결과를 별도로 관리한다.</td>
+              <td>실제 인터페이스·호출순서·fault propagation 적합성은 결과 파일만으로 확정할 수 없다. 기본 OK와 Deviation을 다시 판정하고 VBA 실행도 Excel에서 확인해야 한다.</td>
+            </tr>
+            <tr>
+              <td>SwITCV<br><span class="status good">Integration Coverage</span></td>
+              <td>Integration metrics가 Function/Function Call 유형으로 식별되고 SITS TC와 환경이 매핑되어야 한다.</td>
+              <td>통합 traceability·consistency·function/function-call coverage와 ASIL 분포를 회사 Coverage 양식으로 생성한다.</td>
+              <td>통합 실행에서 함수가 존재했는지와 함수 호출 커버리지를 별도 근거로 보여주며 Unit coverage와의 혼동을 줄인다.</td>
+              <td>동적 호출과 환경명 fuzzy match, parser fallback은 검토가 필요하다. 함수 실행 표시·Function Call coverage·TC P/F는 별개이며 구조 커버리지가 인터페이스 의미 검증을 대체하지 않는다.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout warn">
+        네 문서 모두 코드 메타에서 <strong>evidence_class = auto-generated draft</strong>로 선언된다.
+        ASIL B/C/D에서 단독 증거로 사용하지 않고 manual review 후 승인해야 한다.
+      </div>
+
+      <div class="code-evidence">
+        <code>backend/services/swut_sutr_aggregator.py:1-18, 106-126</code> ·
+        <code>backend/services/swut_coverage_aggregator.py:1-22, 82-102</code> ·
+        <code>backend/services/swit_sitr_aggregator.py:1-25, 72-92</code> ·
+        <code>backend/services/swit_coverage_aggregator.py:1-24, 73-91</code>
+      </div>
+    </section>
+
+    <section id="trace">
+      <p class="section-kicker">05 · Traceability judgment</p>
+      <h2>매핑, 실행 판정, 구조 커버리지는 서로 다른 질문에 답한다</h2>
+      <p class="section-lead">
+        자동화의 장점은 수치를 많이 만드는 것이 아니라, 같은 숫자를 다른 의미로 오해하지 않도록
+        판정축을 분리하는 데 있다.
+      </p>
+
+      <div class="metric-triad">
+        <div>
+          <b>TRACE MAPPING</b>
+          <strong>연결이 존재하는가?</strong>
+          <span>SwRS→SDS/UDS/STS/SUTS/SITS/VectorCAST 링크의 존재와 direct/indirect confidence를 본다.</span>
+        </div>
+        <div>
+          <b>EXECUTION VERDICT</b>
+          <strong>시험이 실행되어 P/F가 났는가?</strong>
+          <span>VectorCAST의 Passed, Failed, Not Executed, Unmatched Result를 분리한다.</span>
+        </div>
+        <div>
+          <b>STRUCTURAL COVERAGE</b>
+          <strong>코드 구조가 얼마나 실행됐는가?</strong>
+          <span>Unit의 Statement/Branch/MC/DC와 Integration의 Function/Function Call을 분리한다.</span>
+        </div>
+      </div>
+
+      <div class="callout danger">
+        <strong>발표 시 금지할 등치:</strong>
+        “매핑 100% = 시험 통과 100%”, “3358P/0F = 모든 대상 실행 완료”,
+        “UDS·SUTS·VectorCAST 존재 = SwRS까지 역추적 완료”로 표현하면 안 된다.
+      </div>
+
+      <p style="margin:24px 0 0">
+        코드는 10개 밴드
+        <b>SyRS · SDS · HSIS · UDS · STS · SUTS · SITS · SyTS · SyITS · VectorCAST</b>를 고정하고,
+        시스템 시험은 SW 시험 판정에서 분리한다. 링크는 같은 입력이면 같은 순서로 정렬되며,
+        ASIL C/D는 SUTS·SITS 누락을 별도 gap으로 표시한다.
+      </p>
+      <div class="code-evidence">
+        <code>report_gen/trace_link_table.py:24-74, 175-225, 229-307</code> ·
+        <code>backend/services/swut_input_adapter.py:223-267</code> ·
+        <code>backend/services/vcast_parser.py:972-1001, 1054-1085</code>
+      </div>
+    </section>
+
+    <section id="rag">
+      <p class="section-kicker">06 · Data accumulation and RAG</p>
+      <h2>데이터가 많아서가 아니라, 승인·Revision·평가가 붙은 데이터가 늘어날수록 개선된다</h2>
+      <p class="section-lead">
+        현재 구현은 LLM 자체를 온라인 학습시키는 구조가 아니다.
+        요구·설계·소스·시험·성공한 수정 사례를 검색 가능한 기억으로 축적하고 다음 작업에서 재사용한다.
+      </p>
+
+      <div class="data-snapshot">
+        <div class="snapshot">
+          <div class="big">228</div>
+          <h3>루트 RAG KB 항목</h3>
+          <p>requirements 198, UDS 12, build/tests/coverage 각 6. 마지막 항목은 2026-03-13이며 project/revision 메타데이터는 비어 있다.</p>
+        </div>
+        <div class="snapshot">
+          <div class="big">269</div>
+          <h3>품질 실행 이력</h3>
+          <p>quality score 1,261건, 2026-07-28까지 누적. 추세는 보이지만 아직 생성전략을 자동 변경하는 폐루프는 아니며, 현재 품질 기록은 Coverage 경로 중심이다.</p>
+        </div>
+      </div>
+
+      <div class="matrix-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>개선 항목</th>
+              <th>현재 가능한 효과</th>
+              <th>현재 한계</th>
+              <th>올해 고도화 조건</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>근거 검색</td>
+              <td>키워드+embedding hybrid search로 과거 요구·UDS·시험·coverage를 재사용</td>
+              <td>Project/Revision hard filter가 없고 오래된 chunk가 함께 검색될 수 있음</td>
+              <td><code>project_id + scm_revision + build_no + artifact_id + hash</code>를 필수 key로 저장</td>
+            </tr>
+            <tr>
+              <td>성공 해결 재사용</td>
+              <td>자동수정 후 재검사가 성공한 패턴만 weight/apply count로 축적</td>
+              <td>사용자 승인·거절 feedback 훅은 실제 API/UI와 연결되지 않음</td>
+              <td>stable entry ID에 승인/거절/수정사유/검토자/결과를 연결</td>
+            </tr>
+            <tr>
+              <td>품질 추세</td>
+              <td>문서별 score와 gate 결과, 이전 대비 변화량을 조회</td>
+              <td>품질 DB가 생성기 전략 또는 RAG 우선순위에 자동 반영되지 않으며 일부 pass-rate 입력에는 미실행 수가 빠질 수 있음</td>
+              <td>승인율·수정률·groundedness·stale hit·project leakage를 평가</td>
+            </tr>
+            <tr>
+              <td>사내 U: 자산화</td>
+              <td>일반 파일 읽기는 워커 IPC와 경로 whitelist로 안전하게 수행</td>
+              <td>외부 RAG ingestor는 로컬 <code>Path</code>를 직접 사용해 워커 경로를 우회</td>
+              <td>RAG 수집도 FileResolver/worker stream을 사용하도록 통합</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="roadmap">
+        <div class="roadmap-item">
+          <strong>Revision 계약</strong>
+          <p>모든 문서·소스·VectorCAST 원시 결과에 동일한 SCM Revision, build, variant, toolchain을 부여하고 mismatch를 hard block한다.</p>
+        </div>
+        <div class="roadmap-item">
+          <strong>정제된 Upsert</strong>
+          <p>변경 문서는 새 chunk만 추가하지 않고 기존 Revision을 superseded 처리하며 content hash로 중복을 제거한다.</p>
+        </div>
+        <div class="roadmap-item">
+          <strong>검증 피드백</strong>
+          <p>자동 매핑과 초안에 대해 승인·거절·수정 이유를 저장하고, 승인된 근거만 기본 검색 corpus로 승격한다.</p>
+        </div>
+        <div class="roadmap-item">
+          <strong>검색 품질 평가</strong>
+          <p>Precision@K, Recall@K, groundedness, stale-hit rate, project leakage, 초안 승인율을 고정 검증세트로 관리한다.</p>
+        </div>
+        <div class="roadmap-item">
+          <strong>추천 폐루프</strong>
+          <p>검증된 과거 변경과 시험결과를 영향분석·회귀시험 후보 추천에 연결하되, ISO evidence 채택은 사람 승인으로 유지한다.</p>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>정확한 발표 표현:</strong>
+        “데이터가 쌓일수록 AI가 스스로 학습한다”가 아니라
+        “검증되고 Revision이 식별된 근거와 성공 사례가 축적될수록 검색·재사용·영향분석의 정확도를 평가하며 높인다.”
+      </div>
+    </section>
+
+    <section id="ppt-copy" class="ppt-section">
+      <p class="section-kicker">07 · Copy-ready slide messages</p>
+      <h2>PPT 7~10장에 바로 반영할 문구</h2>
+      <p class="section-lead">한 슬라이드에 하나의 주장만 남기도록 문장을 압축했다.</p>
+
+      <div class="slide-copy" id="copy-slide7">
+        <b>슬라이드 7 · UDS / SUTS</b>
+        <p>소스 구조를 근거로 상세설계와 단위시험 초안을 함께 만들되, 추정된 ASIL·Related ID·Expected Result는 출처를 표시하고 사람이 확정한다.</p>
+        <button class="copy-btn" data-copy="copy-slide7" type="button">문구 복사</button>
+      </div>
+
+      <div class="slide-copy" id="copy-slide8">
+        <b>슬라이드 8 · STS / SITS</b>
+        <p>승인 요구사항은 STS의 분모가 되고 실제 cross-module 호출은 SITS의 근거가 된다. 요구기반 시험과 구현기반 통합시험을 분리해 초안화한다.</p>
+        <button class="copy-btn" data-copy="copy-slide8" type="button">문구 복사</button>
+      </div>
+
+      <div class="slide-copy" id="copy-slide9">
+        <b>슬라이드 9 · VectorCAST / Reports</b>
+        <p>VectorCAST 원시 결과를 Revision별로 정규화해 Unit·Integration 결과와 구조 커버리지 보고서를 생성하며, 매핑·P/F·커버리지는 서로 다른 지표로 관리한다.</p>
+        <button class="copy-btn" data-copy="copy-slide9" type="button">문구 복사</button>
+      </div>
+
+      <div class="slide-copy" id="copy-slide10">
+        <b>슬라이드 10 · RAG 자산화</b>
+        <p>ARIA는 검증 문서·시험결과·성공 수정 사례를 검색 지식으로 축적한다. 향후 Project·Revision 격리와 승인 피드백을 폐루프로 연결해 재사용성과 추천 정확도를 단계적으로 높인다.</p>
+        <button class="copy-btn" data-copy="copy-slide10" type="button">문구 복사</button>
+      </div>
+    </section>
+
+    <section id="code">
+      <p class="section-kicker">08 · Code evidence index</p>
+      <h2>코드 확인 위치</h2>
+      <p class="section-lead">PPT 설명의 근거를 다시 확인할 때 사용할 핵심 파일이다.</p>
+
+      <details open>
+        <summary>문서 생성기</summary>
+        <div class="detail-body">
+          <p><code>report_gen/uds_generator.py</code> — 함수·호출·전역변수·logic flow·provenance</p>
+          <p><code>workflow/uds_ai.py</code> — 근거 제한형 UDS 작성, reviewer/auditor/judge</p>
+          <p><code>generators/sts.py</code> — SRS 파싱, 요구-함수 매핑, STS TC·trace matrix</p>
+          <p><code>generators/suts.py</code> — 경계·분기·switch·loop·global·MC/DC 시퀀스</p>
+          <p><code>generators/sits.py</code> — cross-module flow와 integration sub-case</p>
+        </div>
+      </details>
+
+      <details>
+        <summary>VectorCAST 결과 문서</summary>
+        <div class="detail-body">
+          <p><code>backend/services/swut_input_adapter.py</code> — TC 정의·실행·P/F·미실행·미매핑 정규화</p>
+          <p><code>backend/services/vcast_parser.py</code> — Unit Statement/Branch와 Integration Function/Call 구분</p>
+          <p><code>backend/services/swut_sutr_aggregator.py</code> / <code>swut_coverage_aggregator.py</code></p>
+          <p><code>backend/services/swit_sitr_aggregator.py</code> / <code>swit_coverage_aggregator.py</code></p>
+        </div>
+      </details>
+
+      <details>
+        <summary>추적성·RAG·품질</summary>
+        <div class="detail-body">
+          <p><code>report_gen/trace_link_table.py</code> — 10밴드 link, direct/indirect, ASIL gap</p>
+          <p><code>workflow/rag/ingestor.py</code> / <code>workflow/rag/searcher.py</code> — 수집·hybrid search</p>
+          <p><code>workflow/rag/__init__.py</code> — KB 저장, 성공 패턴 학습, feedback 훅</p>
+          <p><code>workflow/quality/recorder.py</code> — 문서별 품질 run·score·delta 기록</p>
+          <p><code>backend/services/file_resolver.py</code> — Cloudium worker IPC와 U: 경로 보호</p>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <footer>
+    ARIA ISO 26262 문서 자동화 코드 검토본 · 원본 PPT 및 저장소는 수정하지 않고 읽기 전용으로 분석
+  </footer>
+
+  <script>
+    (() => {
+      const navLinks = [...document.querySelectorAll(".top-nav a")];
+      const sections = navLinks
+        .map((link) => document.querySelector(link.getAttribute("href")))
+        .filter(Boolean);
+
+      const updateActiveNav = () => {
+        let visible = sections[0];
+        sections.forEach((section) => {
+          if (section.getBoundingClientRect().top <= 150) visible = section;
+        });
+        navLinks.forEach((link) => {
+          link.classList.toggle(
+            "active",
+            link.getAttribute("href") === `#${visible.id}`
+          );
+        });
+      };
+      window.addEventListener("scroll", updateActiveNav, { passive: true });
+      updateActiveNav();
+
+      const cleanCopyText = (element) => {
+        const clone = element.cloneNode(true);
+        clone.querySelectorAll("button").forEach((button) => button.remove());
+        clone.querySelectorAll("b").forEach((label) => {
+          if (label.parentElement === clone) label.remove();
+        });
+        return clone.innerText.trim();
+      };
+
+      document.querySelectorAll("[data-copy]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const target = document.getElementById(button.dataset.copy);
+          if (!target) return;
+          const text = cleanCopyText(target);
+          const original = button.textContent;
+          let copied = false;
+          try {
+            await navigator.clipboard.writeText(text);
+            copied = true;
+          } catch {
+            const area = document.createElement("textarea");
+            area.value = text;
+            area.setAttribute("readonly", "");
+            area.style.position = "fixed";
+            area.style.opacity = "0";
+            document.body.appendChild(area);
+            area.focus();
+            area.select();
+            copied = document.execCommand("copy");
+            area.remove();
+          }
+          button.textContent = copied ? "복사됨" : "직접 복사";
+          window.setTimeout(() => { button.textContent = original; }, 1300);
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

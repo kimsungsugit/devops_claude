@@ -12,7 +12,7 @@
  * - api.js (post/api): 전체 mock
  * - JobCard, ResultPanel: mock (단위 격리)
  */
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
@@ -63,6 +63,8 @@ vi.mock('../components/ResultPanel.jsx', () => ({
 }));
 
 const { default: Dashboard } = await import('../views/Dashboard.jsx');
+// 세대 가드 테스트에서 mock 구현을 갈아끼우기 위해 모듈 자체를 잡아 둔다.
+const { post: mockPost, api: mockApi } = await import('../api.js');
 
 describe('Dashboard', () => {
   beforeEach(() => {
@@ -180,4 +182,171 @@ describe('Dashboard (정적 회귀 방지)', () => {
      * 본문에서 사라졌는데 deps에만 남아있는 dead reference는 별개 문제. */
     expect(dashboardSrc).toMatch(/const runAnalysis = useCallback[\s\S]*?\bmanualScmId\b[\s\S]*?\}, \[/);
   });
+});
+
+/* 실행 세대(generation) 가드 — 겹친 분석의 last-writer-wins 차단
+ *
+ * runAnalysis는 여러 개가 겹쳐 돌 수 있다(job 전환·재실행). 서버측 취소 endpoint가 없어
+ * 선행 실행은 abort 후에도 진행 중인 fetch를 완주하는데, 그때 구 실행이 setAnalysisResult를
+ * 그대로 호출하면 '늦게 끝난 쪽이 이기는' 상태가 된다. 그 결과 다른 프로젝트의 영향분석
+ * 결과가 현재 화면의 Context에 실리고, SrsSdsSection·ScmSection이 그걸 이 프로젝트의
+ * 추적성 근거로 표시한다(ISO 26262 오보고).
+ *
+ * abort만으로는 부족하다 — signal을 안 받는 raw post 호출(report/summary 등)은 완주하고,
+ * 그 직후의 updateResult()에는 abort 검사 지점이 없다. 그래서 세대 가드가 필요하다. */
+describe('Dashboard — 실행 세대 가드', () => {
+  const post = mockPost;
+  const api = mockApi;
+  const JOB_A = { name: 'job-a', url: 'http://jenkins/job/job-a/' };
+
+  /** 수동으로 resolve할 수 있는 promise. */
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise(r => { resolve = r; });
+    return { promise, resolve };
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCfg = {
+      baseUrl: 'http://jenkins', username: 'u', token: 't',
+      cacheRoot: '.cache', buildSelector: 'lastSuccessfulBuild', verifyTls: true,
+    };
+    mockSelectedJob = JOB_A;
+  });
+
+  it('선행 실행이 늦게 끝나도 후행 실행을 덮어쓰지 않는다', async () => {
+    // Arrange — report/summary에서 각 실행을 멈춰 세운다. 이 지점은 abort 검사가 없어
+    // 세대 가드가 없으면 구 실행이 그대로 updateResult()까지 진행한다.
+    const summaryCalls = [];
+    post.mockImplementation(async (url) => {
+      if (url === '/api/jenkins/jobs') return [JOB_A];
+      if (url === '/api/jenkins/sync-async') return { job_id: 'sync-1' };
+      if (url === '/api/jenkins/build-info') throw new Error('no cache');
+      if (url === '/api/jenkins/report/summary') {
+        const d = deferred();
+        summaryCalls.push(d);
+        return d.promise;
+      }
+      return {};
+    });
+    api.mockImplementation(async (url) => {
+      if (String(url).includes('/api/scm/list')) return { items: [{ id: 'scm-1' }] };
+      if (String(url).includes('/api/jenkins/progress')) {
+        return { progress: { done: true, checkout_ok: true } };
+      }
+      return {};
+    });
+
+    render(<Dashboard />);
+    const card = await screen.findByTestId('job-card');
+
+    // Act — 실행 1 시작 후 report/summary에서 멈출 때까지 대기
+    fireEvent.click(card);
+    await waitFor(() => expect(summaryCalls.length).toBe(1), { timeout: 10000 });
+
+    // 실행 2 시작 (job 전환에 해당) — 여기서 세대가 올라간다
+    fireEvent.click(card);
+    await waitFor(() => expect(summaryCalls.length).toBe(2), { timeout: 10000 });
+
+    // 이제 실행 1을 완주시킨다
+    summaryCalls[0].resolve({ kpis: {}, artifacts: {}, build_number: 111 });
+    await new Promise(r => setTimeout(r, 100));
+
+    // Assert (부정) — 구 실행은 Context에 아무것도 쓰지 않는다
+    expect(mockSetAnalysisResult).not.toHaveBeenCalled();
+
+    // Assert (긍정) — 가드가 '전부 차단'으로 망가지지 않았는지 반드시 함께 본다.
+    // 부정 단언만 두면 isCurrent()를 상수 false로 바꿔도 테스트가 통과한다(둘 다 안 씀).
+    // 그 상태는 finally의 setRunning(false)까지 막아 running이 true로 고착된다.
+    summaryCalls[1].resolve({ kpis: {}, artifacts: {}, build_number: 222 });
+    await waitFor(() => expect(mockSetAnalysisResult).toHaveBeenCalled(), { timeout: 10000 });
+    // 마지막으로 기록된 결과는 후행 실행의 것이어야 한다
+    const lastWrite = mockSetAnalysisResult.mock.calls.at(-1)[0];
+    expect(lastWrite.reportData?.build_number).toBe(222);
+  }, 30000);
+
+  it('중단 후에는 구 실행이 Context에 쓰지 않는다', async () => {
+    // abort만으로는 부족하다 — report/summary는 signal을 안 받아 완주하고,
+    // 그 직후 updateResult()에는 abort 검사 지점이 없다. stopAnalysis가 세대를 올려야 막힌다.
+    const summaryCalls = [];
+    post.mockImplementation(async (url) => {
+      if (url === '/api/jenkins/jobs') return [JOB_A];
+      if (url === '/api/jenkins/sync-async') return { job_id: 'sync-1' };
+      if (url === '/api/jenkins/build-info') throw new Error('no cache');
+      if (url === '/api/jenkins/report/summary') {
+        const d = deferred();
+        summaryCalls.push(d);
+        return d.promise;
+      }
+      return {};
+    });
+    api.mockImplementation(async (url) => {
+      if (String(url).includes('/api/scm/list')) return { items: [{ id: 'scm-1' }] };
+      if (String(url).includes('/api/jenkins/progress')) {
+        return { progress: { done: true, checkout_ok: true } };
+      }
+      return {};
+    });
+
+    render(<Dashboard />);
+    fireEvent.click(await screen.findByTestId('job-card'));
+    await waitFor(() => expect(summaryCalls.length).toBe(1), { timeout: 10000 });
+
+    // 중단
+    fireEvent.click(screen.getByText('중단'));
+
+    // 중단 후 진행 중이던 요청이 완주한다
+    summaryCalls[0].resolve({ kpis: {}, artifacts: {}, build_number: 111 });
+    await new Promise(r => setTimeout(r, 200));
+
+    expect(mockSetAnalysisResult).not.toHaveBeenCalled();
+  }, 30000);
+
+  it("중단하면 진행 중이던 단계가 '중단됨'으로 확정된다", async () => {
+    // 예전엔 stopAnalysis 가 stepStates 를 손대지 않아 active 세그먼트가 스피너를 계속
+    // 돌린 채 고착됐다. running=false 라 '중단' 버튼마저 사라져 사용자는 멈췄는지 도는지
+    // 알 수 없었다 — 중단이 무반응처럼 보이는 상태.
+    const summaryCalls = [];
+    post.mockImplementation(async (url) => {
+      if (url === '/api/jenkins/jobs') return [JOB_A];
+      if (url === '/api/jenkins/sync-async') return { job_id: 'sync-1' };
+      if (url === '/api/jenkins/build-info') throw new Error('no cache');
+      if (url === '/api/jenkins/report/summary') {
+        const d = deferred();
+        summaryCalls.push(d);
+        return d.promise;
+      }
+      return {};
+    });
+    api.mockImplementation(async (url) => {
+      if (String(url).includes('/api/scm/list')) return { items: [{ id: 'scm-1' }] };
+      if (String(url).includes('/api/jenkins/progress')) {
+        return { progress: { done: true, checkout_ok: true } };
+      }
+      return {};
+    });
+
+    const { container } = render(<Dashboard />);
+    fireEvent.click(await screen.findByTestId('job-card'));
+    // sync 가 done 이 되고 report 가 active 로 넘어간 시점까지 기다린다. 그냥 첫 seg-active
+    // 를 기다리면 sync 가 아직 진행 중이라 '완료 단계 보존'을 검증할 수 없다.
+    await waitFor(() => {
+      expect(container.querySelector('.seg-done')).toBeTruthy();
+      expect(container.querySelector('.seg-active')).toBeTruthy();
+    }, { timeout: 10000 });
+
+    fireEvent.click(screen.getByText('중단'));
+
+    await waitFor(() => expect(container.querySelector('.seg-aborted')).toBeTruthy());
+    // 진행 중 표시가 남아 있으면 안 된다 — 스피너 고착이 이 결함의 증상이었다
+    expect(container.querySelector('.seg-active')).toBeNull();
+    expect(mockToast).toHaveBeenCalledWith('info', expect.stringContaining('중단'));
+    // 글리프까지 확인한다. 클래스만 보면 stepIcon 의 'aborted' 분기를 지워도 통과하는데,
+    // seg-aborted 는 배경이 기본과 같아 **⏹ 가 사실상 유일한 시각 신호**다.
+    expect(container.querySelector('.seg-aborted').textContent).toContain('⏹');
+    // 이미 끝난 단계는 보존해야 한다 — 스테퍼는 어디까지 끝났는지에 대한 유일한 기록이라
+    // 완료분까지 '중단됨'으로 덮으면 정보가 사라진다(sync 는 이 시점에 done 이다).
+    expect(container.querySelector('.seg-done')).toBeTruthy();
+  }, 30000);
 });

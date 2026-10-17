@@ -9,16 +9,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 try:
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.comments import Comment
-    from openpyxl.utils import get_column_letter
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
     from openpyxl.chart import BarChart, Reference
     from openpyxl.chart.series import DataPoint
-    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+    from openpyxl.comments import Comment
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
     from openpyxl.utils.exceptions import IllegalCharacterError
 except ImportError:
     import re as _re_fallback
@@ -38,9 +38,12 @@ except ImportError:
     DataPoint = None
 
 from backend.services.vcast_parser import (
-    TCBank, TestCaseItem, TestResultItem,
-    MetricsBank, MatricsType, MatricStatementItem, MatricFunCallItem,
-    CoverageItem, MatixDataBank
+    CoverageItem,
+    MatixDataBank,
+    MatricFunCallItem,
+    MatricStatementItem,
+    MetricsBank,
+    TCBank,
 )
 
 
@@ -538,7 +541,21 @@ def generate_testcase_excel(tcbank: TCBank, output_path: Path, mode: str = "Test
     
     # 테이블 포맷 설정
     _set_table_format(excel, col_offset, row_offset, current_row - 1, col_count)
-    
+
+    # 세로 셀 병합 (MERGE-01/02) — C# AllowMerging 컬럼 포팅.
+    #   레퍼런스(UCTestCaseList.cs:1147-1182)는 setTableFormat 테두리 후 병합을 발행하므로
+    #   여기서도 _set_table_format 다음에 적용한다. 데이터 행만 대상(캡션/제목 제외).
+    first_data_row = row_offset + 1
+    last_data_row = current_row - 1
+    if last_data_row > first_data_row:
+        # generic 값-기준 세로 병합: TC ID(연속 동일 케이스), Unit Name(같은 unit 묶음).
+        #   GenMethod/Pass-Fail 등은 generic 대상에서 제외(아래 별도 처리/가로병합 보존).
+        _merge_equal_runs(excel, col_offset + 1, first_data_row, last_data_row)  # TC ID
+        if mode == "TestCase":
+            _merge_equal_runs(excel, col_offset + 2, first_data_row, last_data_row)  # Unit Name
+            # TC Gen Method 경계 병합(현재 공란 → no-op이나 충실 포팅, 과병합 방지).
+            _merge_genmethod_runs(excel, col_offset + 3, first_data_row, last_data_row, tm_col=None)
+
     # 열 너비 설정 (C# 기준: base=[1,60,100,150,20] + data=80 each + last=150)
     excel.set_column_width(1, 1)  # spacer col A
     base_widths = [60, 100, 150, 20]  # TC Index, TC ID, Unit, TC Gen Method
@@ -567,6 +584,96 @@ def _set_table_format(excel: XlsxManager, col_offset: int, row_offset: int, last
     excel.draw_thick_border(row_start, col_offset, row_last, col_offset, BorderEdge.Left)
     excel.draw_thick_border(row_start, col_last, row_last, col_last, BorderEdge.Right)
     excel.draw_thick_border(row_last, col_offset, row_last, col_last, BorderEdge.Bottom)
+
+
+def _merge_equal_runs(
+    excel: XlsxManager, col: int, first_row: int, last_row: int, *, skip_empty: bool = True
+) -> int:
+    """단일 컬럼에서 연속 동일값 run을 세로 병합 (MERGE-01).
+
+    C# 레퍼런스의 ``FlexgidLib.getMergedCellsOnColumns`` + 적용 루프
+    (``UCTestCaseList.cs:1147-1158``) 등가 포팅. C1FlexGrid는 ``AllowMerging`` 컬럼
+    (TC_ID/UnitName 등)의 인접 동일값을 자동으로 하나의 세로 병합 셀로 묶는데,
+    openpyxl에는 그 기능이 없어 데이터 값에서 직접 run을 찾아 ``merge``한다.
+
+    - 빈값/None은 경계로 처리(merge 시작/확장 안 함) — C# GenMethod 처리(1165 ``IsNullOrEmpty``)와
+      동일하게 보수적. 무관한 공란 블록이 한 셀로 뭉치는 것을 방지.
+    - run 길이 1(단일 셀)은 merge하지 않음(openpyxl 단일셀 merge 무의미·위험).
+
+    반환: 발행한 병합 개수.
+    """
+    ws = excel.worksheet
+    if ws is None or last_row <= first_row or col < 1:
+        return 0
+
+    def _norm(v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        s = str(v)
+        return s if s.strip() != "" else None
+
+    merged = 0
+    r = first_row
+    while r <= last_row:
+        v = _norm(ws.cell(row=r, column=col).value)
+        if v is None and skip_empty:
+            r += 1
+            continue
+        run_end = r
+        while run_end + 1 <= last_row and _norm(ws.cell(row=run_end + 1, column=col).value) == v:
+            run_end += 1
+        if run_end > r:
+            excel.merge(r, col, run_end, col)
+            merged += 1
+        r = run_end + 1
+    return merged
+
+
+def _merge_genmethod_runs(
+    excel: XlsxManager, gm_col: int, first_row: int, last_row: int, tm_col: Optional[int] = None
+) -> int:
+    """GenMethod 컬럼 경계 인식 세로 병합 (MERGE-02).
+
+    C# ``UCTestCaseList.cs:1160-1182`` 포팅. GenMethod(TC Gen Method)는 generic
+    값-기준 병합(``_merge_equal_runs``)에서 **의도적으로 제외**하고, 별도로
+    "(GenMethod, TestMethod) 쌍이 연속으로 같은 구간"만 병합한다.
+    예) REQ-ABV 2행 + FI-ABV 2행 → AOR/ABV가 4행으로 과병합되지 않고 2+2로 분리.
+
+    현재 ``generate_testcase_excel`` 레이아웃은 TC Gen Method가 공란이고 별도
+    Test Method 컬럼이 없어(``tm_col=None``) 사실상 no-op이다. 그러나 추후 GenMethod가
+    채워질 때 generic 병합의 과병합을 막기 위한 경계 처리를 미리 충실히 포팅해 둔다.
+    빈 GenMethod는 run을 시작하지 않는다.
+
+    반환: 발행한 병합 개수.
+    """
+    ws = excel.worksheet
+    if ws is None or last_row <= first_row or gm_col < 1:
+        return 0
+
+    def _s(row: int, c: int) -> str:
+        v = ws.cell(row=row, column=c).value
+        return str(v) if v is not None else ""
+
+    merged = 0
+    r = first_row
+    while r <= last_row:
+        gm = _s(r, gm_col)
+        if gm.strip() == "":
+            r += 1
+            continue
+        tm = _s(r, tm_col) if tm_col is not None else None
+        run_end = r
+        while (
+            run_end + 1 <= last_row
+            and _s(run_end + 1, gm_col) == gm
+            and (tm_col is None or _s(run_end + 1, tm_col) == tm)
+        ):
+            run_end += 1
+        if run_end > r:
+            excel.merge(r, gm_col, run_end, gm_col)
+            merged += 1
+        r = run_end + 1
+    return merged
 
 
 def generate_metrics_excel(metrics_bank: MetricsBank, output_path: Path, unit_bank: Optional[Dict[str, str]] = None) -> bool:

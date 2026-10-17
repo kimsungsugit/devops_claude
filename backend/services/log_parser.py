@@ -12,12 +12,11 @@ Supports:
 """
 from __future__ import annotations
 
-import re
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from datetime import datetime
 
 _logger = logging.getLogger("devops_api.log_parser")
 

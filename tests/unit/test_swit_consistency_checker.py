@@ -270,7 +270,8 @@ class TestTcIdPatternsKJPDS02:
     ])
     def test_function_id_extraction(self, tc_id, expected_fn):
         from backend.services.swut_consistency_checker import (
-            _extract_function_id, _tc_id_patterns,
+            _extract_function_id,
+            _tc_id_patterns,
         )
         prefix = "SwITC" if tc_id.startswith("SwIT") else "SwUTC"
         _, fn_re = _tc_id_patterns(prefix)
@@ -288,6 +289,7 @@ class TestKjpds02TraceabilityMatrix:
 
     def _make_cov_wb_bytes(self):
         import io
+
         import openpyxl
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -308,6 +310,7 @@ class TestKjpds02TraceabilityMatrix:
 
     def _make_sutr_wb_bytes(self):
         import io
+
         import openpyxl
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -356,7 +359,9 @@ class TestItemIdGeneralization:
     def test_mixed_family_header_counts_all(self):
         """SwST+SwSTR+SwFn+SwTK 혼합 헤더에서 전 계열 column 인식."""
         import io
+
         import openpyxl
+
         from backend.services.swit_consistency_checker import check_swit_consistency
         wb = openpyxl.Workbook()
         ws = wb.active

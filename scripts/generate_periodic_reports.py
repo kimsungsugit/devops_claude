@@ -9,18 +9,18 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from html import escape
 from pathlib import Path
 from typing import Any
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 from urllib.parse import urlparse
-from html import escape
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import config
+import config  # noqa: E402
 
 
 def load_get_adapter():
@@ -680,48 +680,6 @@ def build_context_payload(
         "changed_docs": changed_markdown_docs(changed_files)[:20],
         "uncommitted": uncommitted[:30],
         "github": github_meta,
-    }
-
-
-def build_fallback_sections(report_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-    commits = payload["recent_commits"]
-    areas = payload["top_areas"]
-    uncommitted_count = payload["uncommitted_count"]
-    work_type = work_type_label(payload["work_type"])
-    if report_type == "daily":
-        return {
-            "title": f"데일리 리포트 - {payload['today']}",
-            "summary": [f"작업 유형은 {work_type}로 분류했습니다.", "전일 변경 이력을 기준으로 자동 생성한 요약입니다.", *(entry["subject"] for entry in commits[:2])][:4],
-            "completed": [entry["subject"] for entry in commits[:5]] or ["집계 구간 내 커밋이 없습니다."],
-            "focus": [f"{item['area']} 영역 점검" for item in areas[:3]] or ["신규 작업 우선순위 확인"],
-            "risks": ["미커밋 변경이 남아 있습니다."] if uncommitted_count else ["즉시 보이는 로컬 변경 리스크는 없습니다."],
-            "next_actions": [f"{item['area']} 후속 검증 진행" for item in areas[:3]] or ["다음 작업 후보를 정리합니다."],
-        }
-    if report_type == "plan":
-        return {
-            "title": f"진행 계획서 - {payload['today']}",
-            "summary": [f"작업 유형은 {work_type}이며 최근 변경을 기준으로 계획 초안을 생성했습니다."],
-            "priority_actions": [("미커밋 변경을 정리하고 커밋 단위를 명확히 합니다." if uncommitted_count else "최근 변경사항 검증을 우선 수행합니다."), *[f"{item['area']} 영역 테스트 및 마무리 작업" for item in areas[:3]]][:4],
-            "mid_term_actions": [f"{item['area']} 관련 문서와 테스트를 보강합니다." for item in areas[:3]] or ["다음 요구사항 후보를 정리합니다."],
-            "risks": ["작업 범위가 넓어 문서 반영 누락 가능성이 있습니다."],
-            "notes": ["자동 생성 초안이므로 실제 우선순위와 비교해 조정이 필요합니다."],
-        }
-    if report_type == "weekly":
-        return {
-            "title": f"주간 리포트 - {payload['window_start']} to {payload['window_end']}",
-            "summary": [f"이번 주 작업 유형 중심은 {work_type} 입니다."],
-            "highlights": [entry["subject"] for entry in commits[:5]] or ["이번 주 커밋이 없습니다."],
-            "areas": [f"{item['area']} {item['count']}개 파일 변경" for item in areas[:5]] or ["주요 변경 영역이 없습니다."],
-            "risks": ["다음 주 초반 안정화 작업이 필요할 수 있습니다."],
-            "next_week": [f"{item['area']} 안정화 및 검증" for item in areas[:3]] or ["다음 주 우선순위 재정의"],
-        }
-    return {
-        "title": f"월간 리포트 - {payload['window_start']} to {payload['window_end']}",
-        "summary": [f"이번 달 작업 유형 중심은 {work_type} 입니다."],
-        "highlights": [entry["subject"] for entry in commits[:6]] or ["이번 달 커밋이 없습니다."],
-        "areas": [f"{item['area']} {item['count']}개 파일 변경" for item in areas[:6]] or ["주요 변경 영역이 없습니다."],
-        "risks": ["반복 변경 영역은 설계 문서 보강이 필요할 수 있습니다."],
-        "next_month": [f"{item['area']} 구조 안정화 및 테스트 보강" for item in areas[:3]] or ["다음 달 우선순위 정리"],
     }
 
 
@@ -2120,7 +2078,6 @@ def render_html_dashboard(today: date, cards: list[dict[str, Any]]) -> str:
             "monthly": "tone-monthly",
         }.get(card["report_type"], "tone-default")
         is_jira_plan = card["report_type"] == "jira_plan"
-        is_jira_result = card["report_type"] == "jira_result"
         board_html = ""
         if is_jira_plan:
             result_sections = {}

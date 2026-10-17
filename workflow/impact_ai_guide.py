@@ -8,11 +8,34 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+# 경계값 표시 테이블의 단일 출처. 별칭(`_c_type_boundaries`)은 기존 임포트 계약
+# (tests/unit/test_impact_ai_guide.py:445) 보존용 재-export — 상세는 아래 §경계값 유도 주석.
+from workflow.c_type_bounds import c_type_boundaries as _c_type_boundaries
+
 logger = logging.getLogger(__name__)
+
+
+def _load_impact_oai_config() -> Optional[Dict[str, Any]]:
+    """영향도 AI의 LLM config 해석 — 챗 어시스턴트와 동일 경로(서버고정 env-only).
+
+    `config.CHAT_OAI_CONFIG_PATH`(env CHAT_OAI_CONFIG_PATH) > `DEFAULT_OAI_CONFIG_PATH`.
+    load_oai_config(None)은 CHAT_OAI_CONFIG_PATH 오버라이드를 놓쳐, 챗은 되는데 영향도 AI는
+    안 되는 불일치가 생긴다. 챗과 동일 해석을 써 "챗이 되는 배포면 영향도 AI도 된다"를 보장한다.
+    (클라이언트가 경로를 제어하지 못하는 서버고정값만 사용 — assistant_service와 동일 계약.)
+    """
+    from workflow.ai import load_oai_config
+    try:
+        import config as _appcfg
+        cfg_path = getattr(_appcfg, "CHAT_OAI_CONFIG_PATH", None) or None
+    except Exception:
+        cfg_path = None
+    return load_oai_config(cfg_path)
+
 
 # ASIL 등급 위험도 순서
 _ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
@@ -82,6 +105,7 @@ class RiskAssessment:
     max_asil: str
     justification: str
     affected_safety_functions: List[str] = field(default_factory=list)
+    unknown_asil_count: int = 0  # ASIL 미상(미파싱/TBD) 함수 수 — QM 단정 금지(안전측)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -91,6 +115,7 @@ class RiskAssessment:
             "max_asil": self.max_asil,
             "justification": self.justification,
             "affected_safety_functions": self.affected_safety_functions,
+            "unknown_asil_count": self.unknown_asil_count,
         }
 
 
@@ -142,7 +167,10 @@ def assess_risk(
 
     Fully deterministic — no LLM required.
     """
-    if not changed_types:
+    # 변경 함수도 영향 범위도 전혀 없을 때만 LOW로 단정. (영향 집합만 있는 경로 — 예:
+    # /api/impact/analyze는 변경 '유형'을 산출 안 하므로 changed_types가 비지만 영향은 있다.)
+    _has_impact = any(impact_groups.get(k) for k in (impact_groups or {}))
+    if not changed_types and not _has_impact:
         return RiskAssessment(
             grade="LOW", score=0, asil_escalation=False, max_asil="QM",
             justification="변경된 함수 없음",
@@ -156,27 +184,43 @@ def assess_risk(
 
     asil_levels: List[str] = []
     safety_funcs: List[str] = []
+    unknown_asil_count = 0
     for fn in all_impacted:
         info = by_name.get(fn)
         if info is None:
             info = by_name.get(fn.lower())
         if info is None:
             info = {}
-        asil = str(info.get("asil") or "QM").strip().upper()
-        if asil in _ASIL_RANK:
+        asil = str(info.get("asil") or "").strip().upper()
+        if asil in _ASIL_RANK:  # QM/A/B/C/D — 명시적으로 분류된 경우만
             asil_levels.append(asil)
-            if _ASIL_RANK.get(asil, 0) >= 2:  # B, C, D
+            if _ASIL_RANK[asil] >= 2:  # B, C, D
                 safety_funcs.append(f"{fn} (ASIL {asil})")
+        else:
+            # ASIL 미상(소스/문서 미파싱, TBD 등): QM(비안전)으로 단정하지 않는다 — 안전측(CLAUDE.md #4).
+            unknown_asil_count += 1
 
-    max_asil = max(asil_levels, key=lambda a: _ASIL_RANK.get(a, 0)) if asil_levels else "QM"
+    max_asil = (
+        max(asil_levels, key=lambda a: _ASIL_RANK.get(a, 0)) if asil_levels
+        else ("UNKNOWN" if unknown_asil_count else "QM")
+    )
 
     # Calculate risk score (0-100)
     # Components: ASIL weight (40%), change type weight (30%), scope weight (30%)
     asil_score = _ASIL_RANK.get(max_asil, 0) * 10  # 0-40
 
+    # I1: 단순 평균은 단일 고위험 변경(SIGNATURE 가중4)을 다수 저위험(HEADER 가중1) 속에 희석한다
+    # (예: SIGNATURE 1 + HEADER 99 → avg≈1.03 → 위험 묻힘). max에 가중(0.7)해 '가장 위험한 변경'을
+    # 반영하되 avg(0.3)로 prevalence도 남긴다. 방향은 상향(과대보고=안전측), GRADE는 여전히
+    # asil_escalation이 지배(안전함수는 등급 별도 강제). scope는 아래 scope_score가 따로 반영.
     change_scores = [_CHANGE_WEIGHT.get(ct, 1) for ct in changed_types.values()]
-    avg_change = sum(change_scores) / len(change_scores) if change_scores else 0
-    change_score = min(avg_change * 7.5, 30)  # 0-30
+    if change_scores:
+        _max_change = max(change_scores)
+        _avg_change = sum(change_scores) / len(change_scores)
+        change_metric = _max_change * 0.7 + _avg_change * 0.3
+    else:
+        change_metric = 0
+    change_score = min(change_metric * 7.5, 30)  # 0-30
 
     total_impacted = len(all_impacted)
     scope_score = min(total_impacted * 3, 30)  # 0-30
@@ -200,6 +244,10 @@ def assess_risk(
     else:
         grade = "LOW"
 
+    # ASIL 미상이 있는데 known safety ASIL이 없으면 LOW로 단정 금지 — 최소 MEDIUM(수동 확인).
+    if unknown_asil_count and grade == "LOW":
+        grade = "MEDIUM"
+
     # Justification
     parts = []
     parts.append(f"최대 ASIL: {max_asil}")
@@ -207,6 +255,8 @@ def assess_risk(
     parts.append(f"총 영향 범위: {total_impacted}개 함수")
     if safety_funcs:
         parts.append(f"안전 관련 함수: {', '.join(safety_funcs[:5])}")
+    if unknown_asil_count:
+        parts.append(f"ASIL 미상 {unknown_asil_count}개 — 수동 확인 필요(QM 단정 금지)")
     change_types_str = ", ".join(set(changed_types.values()))
     parts.append(f"변경 유형: {change_types_str}")
 
@@ -217,6 +267,7 @@ def assess_risk(
         max_asil=max_asil,
         justification="; ".join(parts),
         affected_safety_functions=safety_funcs[:10],
+        unknown_asil_count=unknown_asil_count,
     )
 
 
@@ -255,11 +306,11 @@ def analyze_cross_document_impact(
 def _build_guide_prompt_context(ctx: ImpactGuideContext, risk: RiskAssessment) -> str:
     """Build context string for LLM prompt."""
     lines = [
-        f"## 변경 분석 컨텍스트",
+        "## 변경 분석 컨텍스트",
         f"- 리스크 등급: {risk.grade} (점수: {risk.score}/100)",
         f"- 최대 ASIL: {risk.max_asil}",
         f"- ASIL 에스컬레이션: {'예' if risk.asil_escalation else '아니오'}",
-        f"",
+        "",
         f"## 변경된 함수 ({len(ctx.changed_types)}개)",
     ]
     for fn, ct in list(ctx.changed_types.items())[:20]:
@@ -271,25 +322,31 @@ def _build_guide_prompt_context(ctx: ImpactGuideContext, risk: RiskAssessment) -
         for group, fns in ctx.impact_groups.items():
             if fns:
                 lines.append(f"\n## 영향 범위 — {group} ({len(fns)}개)")
-                for fn in fns[:10]:
+                for fn in list(fns)[:10]:  # fns가 dict(라이브)면 fns[:10]가 KeyError → list()로 키 슬라이스 안전
                     lines.append(f"- {fn}")
 
     if ctx.suts_tcs:
-        lines.append(f"\n## 기존 테스트 케이스")
+        lines.append("\n## 기존 테스트 케이스")
         for fn, tcs in list(ctx.suts_tcs.items())[:10]:
             lines.append(f"- {fn}: {', '.join(tcs[:5])}")
 
     return "\n".join(lines)
 
 
-def generate_change_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> str:
+def generate_change_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> Optional[str]:
     """Generate executive summary using LLM.
 
-    Falls back to deterministic summary if LLM unavailable.
+    반환: LLM이 생성한 요약 문자열, 또는 LLM 미설정/실패 시 None(caller가 결정론 폴백).
+    None(정상 폴백)과 예외(코드/호출 실패)를 구분한다 — 과거 agent_call 오시그니처로
+    매 호출 TypeError→debug 흡수되어 AI 강화가 영구 비활성이던 버그를 방지.
     """
     try:
-        from workflow.ai import agent_call
         from prompts import load_prompt
+        from workflow.ai import agent_call_text
+
+        cfg = _load_impact_oai_config()
+        if not cfg:
+            return None  # LLM 미설정 — 결정론 폴백(정상 경로, 에러 아님)
 
         system = load_prompt("impact_guide")
         context = _build_guide_prompt_context(ctx, risk)
@@ -298,27 +355,334 @@ def generate_change_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> st
             f"위 변경 분석을 바탕으로 ISO 26262 관점의 영향도 요약을 작성하세요.\n"
             f"포함 항목: 변경 범위 요약, 리스크 판단 근거, 리뷰 우선순위, 권고사항."
         )
-        result = agent_call(system_prompt=system, user_prompt=user_msg, role="analysis")
-        if result and isinstance(result, str):
-            return result
-    except Exception as e:
-        logger.debug("LLM 가이드 생성 실패, 결정론적 폴백 사용: %s", e)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ]
+        output = agent_call_text(cfg, messages, role="analysis", stage="impact_guide")
+        if output and isinstance(output, str) and output.strip():
+            return output.strip()
+        return None
+    except Exception:
+        # 코드/호출 실패는 debug가 아닌 warning으로 승격 — 폴백 뒤에 배선 버그가 숨지 않도록.
+        logger.warning("LLM 영향도 요약 실패 — 결정론 폴백 사용", exc_info=True)
+        return None
 
-    # Deterministic fallback
-    return _deterministic_summary(ctx, risk)
+
+def _format_doc_content_for_prompt(doc_content: Optional[Dict]) -> str:
+    """영향 함수의 현재 문서 내용(doc_content)을 프롬프트용 짧은 텍스트로 직렬화(방어적·캡).
+
+    구조(프론트 docContentFor 조립): {uds:{description,prototype,globals,calls}, sds:str,
+    suts:[{tc_id,action,inputs,expected}], sts:[...], sits:[...]}. 각 문서 원문을 라벨링해
+    LLM이 '원문→제안'의 실제 근거로 쓰게 한다. 과대 페이로드 방지로 전체 2000자 캡.
+    """
+    if not doc_content or not isinstance(doc_content, dict):
+        return ""
+    lines: List[str] = []
+    try:
+        uds = doc_content.get("uds")
+        if isinstance(uds, dict):
+            # ⚠ str(x)[:N]는 슬라이스 전에 x 전체를 직렬화하므로 반드시 문자열일 때만 —
+            # 거대/중첩 비문자열 값이 오면 요청당 무한정 CPU/메모리(전역 body-size 상한 없음,
+            # deep-review Warning). globals 원소도 문자열만(비문자열은 조용히 skip).
+            _d = uds.get("description")
+            if isinstance(_d, str) and _d.strip():
+                lines.append(f"- UDS Description: {_d[:400]}")
+            _p = uds.get("prototype")
+            if isinstance(_p, str) and _p.strip():
+                lines.append(f"- UDS Prototype: {_p[:200]}")
+            gl = uds.get("globals")
+            if isinstance(gl, list) and gl:
+                _gs = [g[:80] for g in gl[:10] if isinstance(g, str)]
+                if _gs:
+                    lines.append(f"- UDS Used Globals: {', '.join(_gs)}")
+        sds = doc_content.get("sds")
+        if isinstance(sds, str) and sds.strip():
+            lines.append(f"- SDS 내용: {sds.strip()[:400]}")
+        for _key, _label in (("suts", "SUTS"), ("sts", "STS"), ("sits", "SITS")):
+            tcs = doc_content.get(_key)
+            if not isinstance(tcs, list) or not tcs:
+                continue
+            parts: List[str] = []
+            for tc in tcs[:4]:
+                if not isinstance(tc, dict):
+                    continue
+                tc_id = str(tc.get("tc_id") or "").strip()
+                bits: List[str] = []
+                for f in ("description", "action", "test_action", "precondition"):
+                    v = tc.get(f)
+                    if isinstance(v, str) and v.strip():
+                        bits.append(v.strip()[:120])
+                        break
+                for f in ("inputs", "expected"):
+                    v = tc.get(f)
+                    if isinstance(v, dict) and v:
+                        kv = ", ".join(f"{k}={val}" for k, val in list(v.items())[:6])
+                        bits.append(f"{f}: {kv}"[:160])
+                    elif isinstance(v, str) and v.strip():
+                        bits.append(f"{f}: {v.strip()[:120]}")
+                if tc_id or bits:
+                    parts.append(f"{tc_id} — {'; '.join(bits)}" if bits else tc_id)
+            if parts:
+                lines.append(f"- {_label} TC: " + " | ".join(parts))
+    except Exception:  # pragma: no cover — 방어적(부분 직렬화라도 반환)
+        logger.debug("doc_content 직렬화 부분 실패 — 부분 결과 반환", exc_info=True)
+    return "\n".join(lines)[:2000]
+
+
+# ── 경계값 유도(결정론) — C 타입 → 경계값 ────────────────────────────────────────
+# LLM '경계값' 제안이 일반 문구(MIN/MID/MAX)가 아니라 실제 값(unsigned=0x hex, signed=10진)을 쓰게
+# grounding한다(결정론 골격 카드·실제 시험 내용과 일관).
+#
+# 테이블 본체는 `workflow/c_type_bounds.py`가 단일 출처다(임포트는 파일 상단) — 예전엔 이 파일과
+# 프론트 `impactBoundary.js`가 서로를 "미러"라 주석만 달아둔 복제본이라 한쪽만 고치면 조용히 갈라졌다.
+# 이제 `tests/fixtures/c_type_bounds.json`을 Python·vitest가 함께 assert하고,
+# `tests/unit/test_c_type_bounds_mirror.py`가 실 문서 산출 테이블(generators/*.py)과의 수치
+# 정합까지 검사한다.
+
+
+def _split_top_level_commas(s: str) -> List[str]:
+    """괄호/대괄호 depth 0의 콤마로만 분리(함수 포인터 파라미터 보호)."""
+    parts: List[str] = []
+    depth = 0
+    cur: List[str] = []
+    for ch in s:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        parts.append("".join(cur))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _extract_params_from_signature(sig: str) -> List[tuple]:
+    """시그니처 문자열 → [(type, name)] (프론트 parseSignatureParams 미러, 경계값 grounding용)."""
+    m = re.search(r"\(([\s\S]*)\)", sig or "")
+    if not m:
+        return []
+    inner = m.group(1).strip()
+    if not inner or inner.lower() == "void":
+        return []
+    out: List[tuple] = []
+    for raw in _split_top_level_commas(inner):
+        am = re.match(r"^([\s\S]*?)\s*((?:\[[^\]]*\])+)\s*$", raw)
+        base = am.group(1) if am else raw
+        arr = am.group(2) if am else ""
+        toks = base.replace("*", " * ").split()
+        if len(toks) > 1 and re.match(r"^[A-Za-z_]\w*$", toks[-1]):
+            name = toks[-1]
+            typ = " ".join(toks[:-1]).replace(" *", "*") + arr
+        else:
+            name, typ = "", raw
+        out.append((typ, name))
+    return out
+
+
+def _format_param_boundaries(sig: str) -> str:
+    """시그니처 → 파라미터별 경계값 grounding 텍스트(없으면 빈 문자열). 최대 12행."""
+    lines: List[str] = []
+    for typ, name in _extract_params_from_signature(sig):
+        if not name:
+            continue
+        bounds = _c_type_boundaries(typ)
+        if bounds:
+            lines.append(f"  - {name}({typ}): " + ", ".join(f"{lab}={val}" for lab, val in bounds))
+    return "\n".join(lines[:12])
+
+
+def explain_function_change(
+    *,
+    function: str,
+    change_type: str = "",
+    before: str = "",
+    after: str = "",
+    function_diff: str = "",
+    asil: str = "",
+    module: str = "",
+    requirements: Optional[List[str]] = None,
+    doc_content: Optional[Dict] = None,
+    impact_path: Optional[Dict] = None,
+    no_semantic_change: bool = False,
+) -> Optional[str]:
+    """단일 함수 변경에 대한 '원문→제안' 문서 반영안(무엇이/영향/리뷰 초점)을 LLM으로 생성.
+
+    선언 원문(before/after)·본문 diff(function_diff)가 있으면 실제 코드 변화(변수·조건·로직)를
+    근거로 구체 설명한다. BODY 함수는 선언 변화가 없어 function_diff가 핵심 근거가 된다.
+    doc_content(각 문서의 현재 내용)가 주어지면 각 문서에 대해 '원문(현재 문장) → 제안(변경 후
+    문장)'을 실제 문장 근거로 생성한다(없으면 '현재 내용 없음' 명시 후 신규 문장 제안).
+    반환: 설명 문자열, 또는 LLM 미설정/실패 시 None(caller가 결정론 폴백/미표시).
+    """
+    try:
+        from workflow.ai import agent_call_text
+
+        cfg = _load_impact_oai_config()
+        if not cfg:
+            return None  # LLM 미설정 — 정상 폴백(에러 아님)
+
+        reqs = ", ".join(str(r) for r in (requirements or []) if str(r).strip()) or "-"
+        lines = [
+            f"함수: {function}",
+            f"변경 유형: {change_type or '미상'}",
+            f"ASIL 등급: {asil or '미상'}",
+            f"모듈: {module or '-'}",
+            f"연관 요구사항: {reqs}",
+        ]
+        if before:
+            lines.append(f"변경 전 선언:\n{before}")
+        if after:
+            lines.append(f"변경 후 선언:\n{after}")
+        if function_diff:
+            lines.append(f"변경 코드(unified diff, '-'제거/'+'추가):\n{function_diff}")
+        context = "\n".join(lines)
+        # 간접영향 근거 — 간접(비변경) 함수면 "왜 영향받는지"(변경함수 seed → via 경유)를 프롬프트에
+        # 실어 AI가 '계약 유지 확인' 관점(직접 수정 아님)으로 설명하게 한다. 무향 콜그래프라 '경유'로만.
+        if isinstance(impact_path, dict) and (impact_path.get("seed") or impact_path.get("via")):
+            _seed = str(impact_path.get("seed") or "").strip()
+            _via = str(impact_path.get("via") or "").strip()
+            _hop = str(impact_path.get("hop") or "").strip()
+            _rel = (f"변경 함수 '{_seed}' → '{_via}' 경유" if _seed and _via and _seed != _via
+                    else f"변경 함수 '{_seed}'" if _seed else f"'{_via}'")
+            context += (
+                f"\n\n[간접 영향 — 이 함수는 직접 변경되지 않음. {_rel}와의 호출 관계({_hop})로 영향. "
+                "무향 콜그래프라 호출/피호출 방향은 단정 불가. 문서 본문 수정보다 '호출 인터페이스 계약"
+                "(시그니처·전제조건·부작용) 유지 확인 + 회귀시험 재실행 판단'을 중심으로 설명하라.]"
+            )
+        # 비의미 변경(주석/포맷/코드 이동 only) — 로직·동작 불변. LLM이 허위 문서수정·신규 TC를 내지 않게
+        # 명시 지시(프론트 결정론 억제 renderAuthoringProposal 가드와 짝 — 이중 방어).
+        if no_semantic_change:
+            context += (
+                "\n\n[비의미 변경 — 이 변경은 C 주석/포맷/코드 이동만이고 로직·동작·인터페이스 변화가 없다. "
+                "'문서 수정 불필요'를 명시하고, 신규 테스트 케이스나 문서 편집(원문→제안)을 제안하지 마라.]"
+            )
+        # ⚠ 비의미 변경(no_semantic_change)이면 '원문→제안'·경계값 grounding을 **주입하지 않는다**.
+        # 이 재료들은 문서 편집·시험 케이스 제안을 유도하는데, 아래 user_msg의 '제안하지 마라' 지시와
+        # 같은 프롬프트에 공존하면 상충 신호가 된다(reviewer: 이중 방어 무력화 — '제안 금지'와 '이 경계값으로
+        # 시험 케이스 제안'이 동시 등장). 비의미 경로는 제안 재료 자체를 주지 않아 확실히 함구시킨다.
+        if not no_semantic_change:
+            doc_ctx = _format_doc_content_for_prompt(doc_content)
+            if doc_ctx:
+                context += (
+                    "\n\n[현재 문서 내용(원문) — 아래 '문서별 반영'에서 이 문장을 근거로 '원문→제안' 작성]\n"
+                    + doc_ctx
+                )
+            # 파라미터 경계값 grounding — 시그니처(after/before) 또는 UDS prototype에서 결정론 유도한 실제
+            # 경계값을 프롬프트에 실어 LLM이 일반 문구(MIN/MID/MAX)가 아닌 실제 값으로 시험 케이스를 제안하게
+            # 한다(결정론 골격 카드와 일관). 미상 타입은 유도 결과가 없어 자동 생략(환각 방지).
+            _sig_for_bounds = after or before or ""
+            if not _sig_for_bounds and isinstance(doc_content, dict):
+                _uds_dc = doc_content.get("uds")
+                if isinstance(_uds_dc, dict):
+                    _sig_for_bounds = str(_uds_dc.get("prototype") or "")
+            _bounds_txt = _format_param_boundaries(_sig_for_bounds)
+            if _bounds_txt:
+                context += (
+                    "\n\n[파라미터 경계값(결정론 유도 — 시험 케이스 제안에 이 실제 값을 사용)]\n"
+                    + _bounds_txt
+                )
+        system = (
+            "당신은 ISO 26262 자동차 기능안전 소프트웨어의 변경 영향 분석가입니다. "
+            "C 함수 변경을 검토하는 엔지니어에게 정확하고 실행 가능한 한국어 설명을 제공합니다. "
+            "변경 코드(diff)나 선언 원문이 주어지면 실제로 바뀐 변수·조건·로직·상수를 근거로 설명하고, "
+            "근거 자료가 없으면 반드시 '추정'임을 명시하세요. "
+            "각 문서(UDS/STS/SUTS/SITS/SDS)에 '무엇을 어느 섹션에 어떻게' 반영해야 하는지 "
+            "실제 변수명·함수명·상수를 넣어 구체적으로 제시하고, 시험 문서(STS/SUTS/SITS)에는 "
+            "구체적 테스트 케이스(입력값·기대값·경계값)를 제안하세요. "
+            "현재 문서 내용(원문)이 주어지면 각 문서에 대해 '원문(현재 문장) → 제안(변경 후 문장)'을 "
+            "명시하세요(원문이 없으면 '현재 내용 없음'이라 적고 신규 문장을 제안). 일반론·모호한 표현 금지."
+        )
+        user_msg = (
+            f"{context}\n\n"
+            "위 함수 변경을 ISO 26262 관점에서 분석하세요. 마크다운 소제목을 사용하세요.\n\n"
+            "### 1. 무엇이 바뀌었나\n"
+            + ("변경 코드(diff)를 근거로 실제 바뀐 변수·조건·계산·상수·분기를 구체적으로 2~4문장. "
+               "어떤 변수가 추가/수정됐고 어떤 로직·분기가 바뀌었는지 명시.\n\n"
+               if function_diff else
+               "매개변수/반환/동작 변화를 원문 근거로 2~3문장(근거 원문 없으면 '추정' 명시).\n\n")
+            + "### 2. 문서별 반영 (원문 → 제안)\n"
+            "각 문서에 실제 변수명·함수명을 넣어 '원문(현재 문장) → 제안(변경 후 문장)' 형식으로. "
+            "현재 문서 내용이 주어졌으면 그 문장을 원문으로 인용하고, 없으면 '현재 내용 없음'이라 적은 뒤 제안. 해당 없으면 '영향 없음':\n"
+            "- **UDS**: Description / Prototype / Input·Output Parameters / Called·Calling / Used Globals 중 무엇을 어떻게\n"
+            "- **STS**: 어떤 TC의 Pre-condition / Test Action / Expected Result를 — 구체 입력·기대값 제시\n"
+            "- **SUTS**: Input·Output Variables + 추가할 단위 테스트 케이스(경계값 MIN/MID/MAX/INV, 변경된 분기 커버)\n"
+            "- **SITS**: 콜체인 / 통합 데이터 흐름 영향 + 통합 시나리오 케이스\n"
+            "- **SDS**: Component Interface / Behavior 반영 사항\n\n"
+            "### 3. 리뷰 초점\n"
+            "ASIL 등급을 고려한 확인 포인트(구체적). 확실치 않으면 '추정'이라 표기."
+        )
+        if no_semantic_change:
+            # 비의미 변경 — 문서 제안·신규 TC 요구 스캐폴드 대신 '수정 불필요'만 요청(결정론 억제와 짝).
+            user_msg = (
+                f"{context}\n\n"
+                "위 변경은 주석/포맷/코드 이동만으로 로직·동작·인터페이스 변화가 없습니다. 다음만 간결히 답하세요:\n\n"
+                "### 1. 무엇이 바뀌었나\n주석/포맷 변경 내용을 1~2문장으로(코드 로직 변화 없음을 명시).\n\n"
+                "### 2. 문서 영향\n'문서 수정 불필요 — 재검토·신규 TC 불필요'를 명시하고 근거(로직 불변)를 1줄. "
+                "새 테스트 케이스나 문서 편집(원문→제안)을 절대 제안하지 마세요.\n"
+            )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ]
+        output = agent_call_text(cfg, messages, role="analysis", stage="impact_explain")
+        if output and isinstance(output, str) and output.strip():
+            return output.strip()
+        return None
+    except Exception:
+        logger.warning("LLM 함수 변경 설명 실패 — 폴백", exc_info=True)
+        return None
+
+
+def _parse_test_suggestions_json(text: str) -> List[Dict[str, str]]:
+    """LLM 응답 문자열에서 테스트 제안 JSON 배열을 견고하게 파싱.
+
+    - ```json 펜스 제거 후 첫 '['~마지막 ']' 구간을 파싱
+    - list가 아니거나 원소가 dict/필수키(function/test_type/description) 미충족이면 드롭
+    - 프론트가 쓰는 3키를 보장하고 rationale 등 extra는 보존
+    """
+    if not text:
+        return []
+    stripped = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
+    stripped = re.sub(r"\n?```\s*$", "", stripped)
+    start = stripped.find("[")
+    end = stripped.rfind("]")
+    if start == -1 or end <= start:
+        return []
+    try:
+        parsed = json.loads(stripped[start:end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out: List[Dict[str, str]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        if not (item.get("function") and item.get("test_type") and item.get("description")):
+            continue
+        out.append({str(k): ("" if v is None else str(v)) for k, v in item.items()})
+    return out
 
 
 def suggest_test_additions(
     ctx: ImpactGuideContext,
     risk: RiskAssessment,
-) -> List[Dict[str, str]]:
+) -> Optional[List[Dict[str, str]]]:
     """Suggest new test cases using LLM.
 
-    Falls back to deterministic suggestions if LLM unavailable.
+    반환: LLM 제안 리스트, 또는 LLM 미설정/실패/파싱실패 시 None(caller가 결정론 폴백).
     """
     try:
-        from workflow.ai import agent_call
         from prompts import load_prompt
+        from workflow.ai import agent_call_text
+
+        cfg = _load_impact_oai_config()
+        if not cfg:
+            return None  # LLM 미설정 — 결정론 폴백(정상 경로)
 
         system = load_prompt("impact_test_advisor")
         context = _build_guide_prompt_context(ctx, risk)
@@ -327,19 +691,16 @@ def suggest_test_additions(
             f"위 변경에 대해 추가해야 할 테스트 케이스를 제안하세요.\n"
             f"JSON 배열로 응답: [{{\"function\": ..., \"test_type\": ..., \"description\": ..., \"rationale\": ...}}]"
         )
-        result = agent_call(system_prompt=system, user_prompt=user_msg, role="analysis")
-        if result:
-            text = result if isinstance(result, str) else str(result)
-            # Extract JSON array from response
-            start = text.find("[")
-            end = text.rfind("]")
-            if start != -1 and end > start:
-                return json.loads(text[start:end + 1])
-    except Exception as e:
-        logger.debug("LLM 테스트 제안 실패, 결정론적 폴백 사용: %s", e)
-
-    # Deterministic fallback
-    return _deterministic_test_suggestions(ctx)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ]
+        output = agent_call_text(cfg, messages, role="analysis", stage="impact_test_advisor")
+        parsed = _parse_test_suggestions_json(output or "")
+        return parsed or None
+    except Exception:
+        logger.warning("LLM 테스트 제안 실패 — 결정론 폴백 사용", exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -360,26 +721,22 @@ def generate_impact_guide(ctx: ImpactGuideContext) -> ImpactGuide:
     # Step 3: review checklist (deterministic)
     checklist = _build_review_checklist(ctx, risk, cross_doc)
 
-    # Step 4: try LLM for summary and test suggestions
+    # Step 4: try LLM for summary and test suggestions.
+    # LLM 헬퍼는 성공 시 값, 미설정/실패 시 None을 반환한다(예외를 자체 흡수) —
+    # None 여부로 enrichment를 명시 판정(과거 문자열 비교 기반 취약 판정 + 폴백 이중계산 제거).
     ai_enriched = False
     summary = _deterministic_summary(ctx, risk)
     test_recs = _deterministic_test_suggestions(ctx)
 
-    try:
-        llm_summary = generate_change_summary(ctx, risk)
-        if llm_summary and llm_summary != summary:
-            summary = llm_summary
-            ai_enriched = True
-    except Exception:
-        pass
+    llm_summary = generate_change_summary(ctx, risk)
+    if llm_summary:
+        summary = llm_summary
+        ai_enriched = True
 
-    try:
-        llm_tests = suggest_test_additions(ctx, risk)
-        if llm_tests:
-            test_recs = llm_tests
-            ai_enriched = True
-    except Exception:
-        pass
+    llm_tests = suggest_test_additions(ctx, risk)
+    if llm_tests:
+        test_recs = llm_tests
+        ai_enriched = True
 
     return ImpactGuide(
         executive_summary=summary,
@@ -399,13 +756,13 @@ def generate_impact_guide(ctx: ImpactGuideContext) -> ImpactGuide:
 def _deterministic_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> str:
     """Generate summary without LLM."""
     lines = [
-        f"# 영향도 분석 요약",
-        f"",
+        "# 영향도 분석 요약",
+        "",
         f"**리스크 등급**: {risk.grade} (점수: {risk.score}/100)",
         f"**최대 ASIL**: {risk.max_asil}",
         f"**ASIL 에스컬레이션**: {'예 — 안전 관련 함수 직접 변경' if risk.asil_escalation else '아니오'}",
-        f"",
-        f"## 변경 범위",
+        "",
+        "## 변경 범위",
         f"- 직접 변경: {len(ctx.changed_types)}개 함수",
     ]
 
@@ -413,16 +770,16 @@ def _deterministic_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> str
     lines.append(f"- 간접 영향: {total_impacted}개 함수")
 
     if risk.affected_safety_functions:
-        lines.append(f"")
-        lines.append(f"## 안전 관련 함수")
+        lines.append("")
+        lines.append("## 안전 관련 함수")
         for sf in risk.affected_safety_functions[:5]:
             lines.append(f"- {sf}")
 
     change_counts: Dict[str, int] = {}
     for ct in ctx.changed_types.values():
         change_counts[ct] = change_counts.get(ct, 0) + 1
-    lines.append(f"")
-    lines.append(f"## 변경 유형 분포")
+    lines.append("")
+    lines.append("## 변경 유형 분포")
     for ct, cnt in sorted(change_counts.items(), key=lambda x: -x[1]):
         lines.append(f"- {ct}: {cnt}건")
 
@@ -471,6 +828,13 @@ def _build_review_checklist(
             "priority": "CRITICAL",
             "item": "ASIL 에스컬레이션 — 안전 분석 담당자 리뷰 필수",
             "scope": f"함수: {', '.join(risk.affected_safety_functions[:3])}",
+        })
+
+    if risk.unknown_asil_count:
+        checklist.append({
+            "priority": "HIGH",
+            "item": f"ASIL 미상 {risk.unknown_asil_count}개 함수 — 안전 등급 수동 확인(QM 단정 금지)",
+            "scope": "소스 @asil 태그 또는 SCM 안전요구 매핑 확인",
         })
 
     for doc_type, impacts in cross_doc.items():

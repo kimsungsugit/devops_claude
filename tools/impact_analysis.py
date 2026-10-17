@@ -2,18 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Dict, List, Set
 
 import networkx as nx  # type: ignore
 
-import sys
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import report_generator as rg
+import report_generator as rg  # noqa: E402
 
 
 def _norm(s: str) -> str:
@@ -65,8 +64,13 @@ def analyze(source_root: str, changed: List[str]) -> Dict[str, object]:
         key = str(ch).strip().lower()
         if not key:
             continue
+        before = len(seed_funcs)
         seed_funcs.update(file_to_funcs.get(key, set()))
         seed_funcs.update(file_to_funcs.get(Path(key).name.lower(), set()))
+        # 정확(파일/basename) 매칭이 하나라도 성공하면 substring 폴백은 생략 — 부분문자열
+        # 매칭('door.c' ⊂ 다른 경로)으로 인한 과대 시드 오탐을 막는다.
+        if len(seed_funcs) > before:
+            continue
         for fn, fp in func_to_file.items():
             if key in fp.lower():
                 seed_funcs.add(fn)

@@ -1,14 +1,13 @@
 """Session and profile management domain helpers."""
-import re
-import os
-import sys
 import json
-import shutil
 import logging
-import zipfile
+import os
+import shutil
 import subprocess
-from pathlib import Path
+import sys
+import zipfile
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -16,22 +15,22 @@ try:
 except ImportError:
     HTTPException = Exception
 
-from backend.state import (
-    session_list_cache as _session_list_cache,
-    running_processes as _running_processes,
-)
-
 import config
-
 from backend.helpers.common import (
-    _read_json,
-    _write_json,
-    _is_relative_to,
-    _split_csv,
-    _safe_int,
     SETTINGS_FILE,
+    _is_relative_to,
+    _read_json,
+    _safe_int,
+    _split_csv,
+    _write_json,
 )
 from backend.services.jenkins_helpers import _detect_reports_dir
+from backend.state import (
+    running_processes as _running_processes,
+)
+from backend.state import (
+    session_list_cache as _session_list_cache,
+)
 
 _logger = logging.getLogger("devops_api")
 

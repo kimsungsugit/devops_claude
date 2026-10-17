@@ -17,10 +17,9 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, asdict, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
-
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 # ---------------------------------------------------------------------------
 # 데이터 모델

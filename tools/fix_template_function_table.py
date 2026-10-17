@@ -14,7 +14,6 @@ def main() -> None:
         header = [c.text.strip() for c in table.rows[0].cells]
         if not header or "[ Function Information ]" not in header[0]:
             continue
-        cols = len(table.columns)
         for r_idx, row in enumerate(table.rows):
             cells = row.cells
             col_count = len(cells)

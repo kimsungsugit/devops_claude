@@ -5,7 +5,7 @@ import logging
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Generator
+from typing import Generator, Optional
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
@@ -14,64 +14,162 @@ from workflow.quality.models import QualityBase
 
 _logger = logging.getLogger("workflow.quality.db")
 
-# 모듈 레벨 싱글톤
-_engine = None
-_SessionLocal = None
-_lock = threading.Lock()
+# 경로별 엔진/세션팩토리 캐시 (db_path 별 1개씩 — 동일 경로면 재사용).
+# 과거: 단일 _engine 싱글톤이라 첫 init 후 db_path 인자가 무시돼 테스트 격리가
+# 깨졌다(record_run(db_path=tmp)이 실제론 기본 DB에 기록). 경로별 dict 로 해소.
+# RLock: get_session_factory → get_engine 재귀 호출이 같은 스레드에서 안전하도록.
+_engines: dict = {}
+_session_factories: dict = {}
+_lock = threading.RLock()
 _QUALITY_DB_FILENAME = "quality.sqlite"
 
 
+def _resolve_key(db_path: "Optional[Path]") -> str:
+    """db_path → 캐시 키 (None이면 기본 경로)."""
+    return str(Path(db_path) if db_path is not None else _default_db_path())
+
+
 def _default_db_path() -> Path:
-    """config.DEFAULT_REPORT_DIR 기반 기본 DB 경로 반환."""
+    """기본 Quality DB 경로 반환.
+
+    상대 경로인 DEFAULT_REPORT_DIR은 **CWD가 아니라 프로젝트 루트(config.py 위치)**
+    기준으로 anchor한다. 과거에는 CWD 의존이라 backend 기동(CWD=backend) 시
+    backend/reports/quality.sqlite 를, 루트 실행(generators record_run) 시
+    reports/quality.sqlite 를 써서 read/write DB가 갈라져 대시보드가 빈 DB를
+    읽는 문제가 있었다.
+    """
     try:
         import config
-        report_dir = getattr(config, "DEFAULT_REPORT_DIR", "reports")
-        return Path(report_dir) / _QUALITY_DB_FILENAME
+        report_dir = Path(getattr(config, "DEFAULT_REPORT_DIR", "reports"))
+        if not report_dir.is_absolute():
+            repo_root = Path(config.__file__).resolve().parent
+            report_dir = repo_root / report_dir
+        return report_dir / _QUALITY_DB_FILENAME
     except Exception:
         return Path("reports") / _QUALITY_DB_FILENAME
 
 
+# 커넥션마다 거는 PRAGMA. 엔진 리스너 안의 클로저가 아니라 모듈 함수인 이유: 테스트가
+# **드라이버 기본값을 끈 커넥션**(`sqlite3.connect(timeout=0)`)에 직접 적용해 효과를 잴 수 있어야
+# 한다(R33 리뷰 W1 — 리스너 클로저는 재지 못해 뮤턴트가 살아남았다).
+BUSY_TIMEOUT_MS = 5000
+
+
+def _apply_sqlite_pragmas(dbapi_conn) -> None:
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    # (R34 리뷰 W9) sqlite 는 FK 를 기본으로 **집행하지 않는다**(실측 `PRAGMA foreign_keys=0`) — 모델의 `ForeignKey`
+    # 가 문서일 뿐이라 존재하지 않는 run_id 로 검토 기록이 들어갔다. 검토 기록(review_records/review_audit)은
+    # 감사 증거라 고아행을 허용하지 않는다. 기존 세 테이블의 FK 도 같은 방향(ORM cascade 와 일치).
+    cursor.execute("PRAGMA foreign_keys=ON")
+    # (R33 C-1, 계획 S10) 같은 DB 에 쓰는 호출처가 8곳(swut/swit/swsa/swreport 라우터 + sts/suts/sits
+    # 생성기 + record_uds_run)이다. ⚠ 계획서의 "busy_timeout 없음" 은 **오진**이었다 — 실측(2026-09-07):
+    # Python `sqlite3.connect()` 기본 `timeout=5.0` 이 이미 5초 busy handler 를 걸어 실효값은 원래
+    # 5000 이었고, 이 줄을 지운 뮤턴트가 살아남았다. 그래도 선언한다: 드라이버 기본값에 기대면
+    # `connect_args={"timeout": 0}` 같은 뒷날의 변경이 잠금 대기를 조용히 0 으로 되돌린다 — `connect`
+    # 리스너는 그 뒤에 발화하므로 여기서 다시 5초로 올린다(실측: timeout=0 커넥션 → 0 → 이 줄 → 5000).
+    # 선례 `backend/services/chat_history_db.py`(R2).
+    cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    cursor.close()
+
+
 def get_engine(db_path: Optional[Path] = None, *, force_new: bool = False):
-    """SQLAlchemy 엔진 반환 (싱글톤, thread-safe)."""
-    global _engine
-    if _engine is not None and not force_new:
-        return _engine
-
+    """SQLAlchemy 엔진 반환 (db_path 별 캐시, thread-safe)."""
+    key = _resolve_key(db_path)
     with _lock:
-        if _engine is not None and not force_new:
-            return _engine
+        if not force_new and key in _engines:
+            return _engines[key]
 
-        if db_path is None:
-            db_path = _default_db_path()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+        path = Path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
 
-        url = f"sqlite:///{db_path}"
-        _engine = create_engine(url, echo=False)
+        url = f"sqlite:///{path}"
+        engine = create_engine(url, echo=False)
 
-        @event.listens_for(_engine, "connect")
+        @event.listens_for(engine, "connect")
         def _set_sqlite_pragma(dbapi_conn, connection_record):
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.close()
+            _apply_sqlite_pragmas(dbapi_conn)
 
-        _logger.info("Quality DB engine: %s", db_path)
-        return _engine
+        _engines[key] = engine
+        # force_new 로 엔진을 갈면 기존 세션팩토리도 무효화.
+        _session_factories.pop(key, None)
+        _logger.info("Quality DB engine: %s", path)
+        return engine
 
 
 def get_session_factory(db_path: Optional[Path] = None):
-    """SessionLocal 팩토리 반환."""
-    global _SessionLocal
-    if _SessionLocal is None:
-        engine = get_engine(db_path)
-        _SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
-    return _SessionLocal
+    """SessionLocal 팩토리 반환 (db_path 별 캐시)."""
+    key = _resolve_key(db_path)
+    with _lock:
+        if key not in _session_factories:
+            engine = get_engine(db_path)  # RLock 재귀 안전
+            _session_factories[key] = sessionmaker(bind=engine, expire_on_commit=False)
+        return _session_factories[key]
+
+
+# ── 경량 컬럼 마이그레이션 ────────────────────────────────────────────────
+# 이 저장소엔 **Alembic 이 없다**(`alembic.ini` 0건, `ALTER TABLE` 0건). 그리고
+# `create_all(checkfirst=True)` 는 **없는 테이블만 만들 뿐 기존 테이블에 컬럼을
+# 더하지 않는다**. 즉 모델에 필드를 추가하면 그 순간부터 기존 DB 를 읽는 모든
+# 쿼리가 `no such column: …` 로 죽는다 — `/api/quality/*` 전체가 500 이 된다.
+#
+# 그래서 모델 필드 추가는 **반드시 여기 한 줄과 한 세트**다. SQLite 의
+# `ALTER TABLE … ADD COLUMN` 은 기존 행을 NULL 로 채우므로 데이터 손실이 없다.
+#
+# (table, column, DDL 타입, 인덱스명|None)
+_COLUMN_ADDITIONS = (
+    ("generation_runs", "scm_id", "VARCHAR(64)", "ix_gen_run_scm"),
+    # (R33 C-1) 산출물 바이트 해시 — models.py `GenerationRun.output_sha256` 과 한 세트.
+    ("generation_runs", "output_sha256", "VARCHAR(64)", None),
+    # (R48-a) run 생성자 — 자기 승인 차단. models.py `GenerationRun.created_by` 와 한 세트.
+    ("generation_runs", "created_by", "VARCHAR(120)", "ix_gen_run_created_by"),
+)
+
+
+def _existing_columns(conn, table: str) -> set:
+    """`PRAGMA table_info` 로 현재 컬럼 집합을 읽는다."""
+    from sqlalchemy import text
+    rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+    # row: (cid, name, type, notnull, dflt_value, pk)
+    return {str(r[1]) for r in rows}
+
+
+def _apply_column_additions(engine) -> None:
+    """모델에만 있고 DB 에 없는 컬럼을 더한다 (idempotent).
+
+    ⚠ **예외를 삼키지 않는다.** 여기서 실패하면 스키마와 모델이 어긋난 채로 도는
+    것이고, 그 상태의 증상은 "조회가 전부 500" 이라 원인을 되짚기 어렵다. 조용히
+    넘어가는 것보다 기동 시점에 시끄럽게 죽는 쪽이 훨씬 싸다.
+    """
+    from sqlalchemy import text
+
+    if engine.dialect.name != "sqlite":
+        # 이 프로젝트는 sqlite 전용(`get_engine` 이 URL 을 하드코딩)이지만,
+        # 다른 dialect 로 바뀌면 아래 DDL 문법이 통하지 않는다 — 침묵 대신 경고.
+        _logger.warning(
+            "컬럼 마이그레이션을 건너뛴다 — dialect=%s 는 이 경로가 지원하지 않는다",
+            engine.dialect.name,
+        )
+        return
+
+    with engine.begin() as conn:
+        for table, column, ddl_type, index_name in _COLUMN_ADDITIONS:
+            if column in _existing_columns(conn, table):
+                continue
+            _logger.info("Quality DB migrate: %s.%s 추가", table, column)
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+            if index_name:
+                conn.execute(text(
+                    f"CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({column})"
+                ))
 
 
 def init_db(db_path: Optional[Path] = None) -> None:
-    """테이블 생성 (없으면 CREATE)."""
+    """테이블 생성 (없으면 CREATE) + 누락 컬럼 추가."""
     engine = get_engine(db_path)
     QualityBase.metadata.create_all(engine, checkfirst=True)
+    _apply_column_additions(engine)
     _logger.info("Quality DB tables initialized")
 
 
@@ -91,10 +189,12 @@ def get_session(db_path: Optional[Path] = None) -> Generator[Session, None, None
 
 
 def reset_engine() -> None:
-    """테스트용: 엔진/세션 초기화."""
-    global _engine, _SessionLocal
+    """테스트용: 전 경로 엔진/세션 초기화."""
     with _lock:
-        if _engine is not None:
-            _engine.dispose()
-        _engine = None
-        _SessionLocal = None
+        for engine in _engines.values():
+            try:
+                engine.dispose()
+            except Exception:
+                pass
+        _engines.clear()
+        _session_factories.clear()

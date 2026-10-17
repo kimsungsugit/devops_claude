@@ -1,8 +1,15 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { post } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
+import { impactConflict, mismatchText } from '../../impactGuard.js';
+
+// 경로에서 파일명(basename)만 추출 — 전체 경로 대신 짧게 표시(전체 경로는 title로 hover 노출).
+const docBaseName = (p) => {
+  const s = String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+  return s.split('/').filter(Boolean).pop() || s;
+};
 
 export default function ScmSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
@@ -22,17 +29,34 @@ export default function ScmSection({ job, analysisResult }) {
     if (analysisResult?.scmList) setScmList(analysisResult.scmList);
   }, [analysisResult]);
 
+  // 마지막으로 반영한 matchedScm.id — 사용자의 수동 선택(아래 select)을 매 렌더마다
+  // 덮어쓰지 않으면서, Dashboard 의 매칭이 **실제로 바뀐** 경우만 재도출하기 위한 것.
+  const appliedMatchRef = useRef(null);
+
   useEffect(() => {
     // Prefer the registry entry that Dashboard matched to this job; fall back
     // to the first entry only when no match was recorded (multi-registry
     // setups would otherwise silently show data for the wrong project).
-    if (scmList.length > 0 && !selectedId) {
-      const matched = analysisResult?.matchedScm;
-      const preferId = matched?.id && scmList.some(s => s.id === matched.id)
-        ? matched.id
-        : scmList[0].id;
-      setSelectedId(preferId);
-    }
+    //
+    // ⚠ 예전 가드는 `!selectedId` 뿐이라 **한 번 정해지면 다시는 안 바뀌었다.**
+    //   Detail 은 display:none 으로 keep-alive 되고 섹션 key 가 job URL 기반이라
+    //   같은 job 에서 SCM 을 바꿔 재분석해도 ScmSection 이 remount 되지 않는다.
+    //   그러면 헤더·URL·소스 루트·'연결 문서' 표가 전부 **옛 프로젝트 것**으로
+    //   남고, 게다가 impactConflict 가 새 scm_id 와 옛 selectedId 를 비교해
+    //   scm_mismatch 를 띄우며 변경 파일 목록을 통째로 숨긴다 — 원인은 분석이
+    //   아니라 굳어버린 선택인데 배너는 분석을 탓한다.
+    if (scmList.length === 0) return;
+    const matched = analysisResult?.matchedScm;
+    const stillValid = selectedId && scmList.some(s => s.id === selectedId);
+    const matchChanged = !!matched?.id && matched.id !== appliedMatchRef.current;
+    if (stillValid && !matchChanged) return;
+    const preferId = matched?.id && scmList.some(s => s.id === matched.id)
+      ? matched.id
+      : scmList[0].id;
+    appliedMatchRef.current = matched?.id ?? null;
+    setSelectedId(preferId);
+    setScmInfo(null);
+    setSourceRoot(null);
   }, [scmList, analysisResult, selectedId]);
 
   /* --- Load SCM info via POST /api/jenkins/scm-info --- */
@@ -71,25 +95,48 @@ export default function ScmSection({ job, analysisResult }) {
     }
   }, [job, cfg, cacheRoot, toast]);
 
-  /* --- Check linked doc existence --- */
+  /* --- Check linked doc existence (경로별 상태 — 배열 값도 경로 단위로 개별 확인) --- */
   const checkDocStatus = useCallback(async (docs) => {
     if (!docs || !job?.url) return;
-    const entries = Object.entries(docs).filter(([, v]) => v);
-    if (entries.length === 0) return;
+    const paths = Object.values(docs)
+      .flatMap(v => (Array.isArray(v) ? v : [v]))
+      .filter(Boolean);
+    if (paths.length === 0) return;
     const result = {};
-    for (const [key, docPath] of entries) {
+    for (const docPath of paths) {
       try {
         const data = await post('/api/file-mode/check-access', { path: docPath });
-        result[key] = data?.accessible ? 'found' : 'not_found';
+        if (data?.accessible) {
+          result[docPath] = 'found';
+        } else if (data?.verified) {
+          // 실제 검증됨(local=Path, cloudium=worker IPC exists) + 접근 불가 → 진짜 '없음'.
+          // (백엔드가 cloudium에서도 worker로 존재를 검증하므로 이제 '없음'을 정확히 표시)
+          result[docPath] = 'not_found';
+        } else {
+          // 검증 불가(cloudium gate 미실행 / worker 연결·응답 오류 등) → '미확인'(거짓 '없음' 방지).
+          result[docPath] = 'unknown';
+        }
       } catch {
-        result[key] = 'unknown';
+        result[docPath] = 'unknown';
       }
     }
     setDocStatus(result);
-  }, [job, cacheRoot, cfg]);
+  }, [job]);
 
   const selected = scmList.find(s => s.id === selectedId);
-  const changed = analysisResult?.impactData?.changed_files ?? [];
+  // 변경 파일 목록이 정말 '지금 보고 있는 것'의 것인지 대조한다(impactGuard).
+  // Job 축(Context의 결과가 다른 Job의 것) + SCM 축(위 드롭다운으로 고른 SCM과 결과를 만든
+  // SCM이 다름 — 드롭다운은 바꿀 수 있는데 impactData는 따라오지 않는다) 둘 다 본다.
+  // 표시용이라 '모순이 증명될 때만' 감춘다 — 증거 부재까지 막으면 정상 데이터를 상시로
+  // 감추게 된다(impactGuard.impactConflict 주석 참조).
+  const _conflict = impactConflict(analysisResult, job?.url, selectedId);
+  // ⚠ useMemo — 두 폴백(`[]` · `?? []`)이 매 렌더 새 배열이라 아래 필터 useMemo 가 매번 재계산됐다.
+  const changed = useMemo(
+    () => (_conflict.conflict ? [] : (analysisResult?.impactData?.changed_files ?? [])),
+    [_conflict.conflict, analysisResult],
+  );
+  // 사유가 미지여도 반드시 문구가 나온다 — 감췄는데 배너가 안 뜨는 침묵 은닉 차단.
+  const changedHiddenReason = mismatchText(_conflict.reason);
 
   /* --- Filter changed files --- */
   const filteredFiles = useMemo(() => {
@@ -161,23 +208,52 @@ export default function ScmSection({ job, analysisResult }) {
                 ))}
               </div>
 
-              {/* Linked docs with existence status */}
-              {selected.linked_docs && Object.values(selected.linked_docs).some(Boolean) && (
+              {/* Linked docs — 표로 정리(유형·파일명·상태). 파일명만 표시하고 전체 경로는 행 title(hover)로
+                  노출한다(압축 규약 유지). 배열 값(복수 경로)은 경로별로 행을 분리하고, 유형 pill은 첫 행에만
+                  표기(연속 행은 ↳). 상태는 경로별 docStatus 조회. */}
+              {selected.linked_docs && Object.values(selected.linked_docs).some(v => (Array.isArray(v) ? v.length : v)) && (
                 <div style={{ marginTop: 12 }}>
                   <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>연결 문서</div>
-                  {Object.entries(selected.linked_docs).filter(([, v]) => v).map(([k, v]) => (
-                    <div key={k} className="artifact-item">
-                      <span className="artifact-icon">📄</span>
-                      <span className="pill pill-purple" style={{ marginRight: 4 }}>{k.toUpperCase()}</span>
-                      <span className="artifact-name">{v}</span>
-                      {docStatus[k] === 'found' && (
-                        <StatusBadge tone="success">존재</StatusBadge>
-                      )}
-                      {docStatus[k] === 'unknown' && (
-                        <StatusBadge tone="neutral">미확인</StatusBadge>
-                      )}
-                    </div>
-                  ))}
+                  <div style={{ overflowX: 'auto' }}>
+                    <table className="impact-table" style={{ marginTop: 0 }}>
+                      <thead>
+                        <tr>
+                          <th style={{ width: '1%', whiteSpace: 'nowrap' }}>유형</th>
+                          <th>파일명</th>
+                          <th style={{ width: '1%', whiteSpace: 'nowrap' }}>상태</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(selected.linked_docs)
+                          .filter(([, v]) => (Array.isArray(v) ? v.length : v))
+                          .flatMap(([k, v]) => {
+                            const paths = (Array.isArray(v) ? v : [v]).filter(Boolean);
+                            return paths.map((p, i) => {
+                              const st = docStatus[p];
+                              return (
+                                <tr key={`${k}-${i}`} title={p}>
+                                  <td style={{ whiteSpace: 'nowrap' }}>
+                                    {i === 0
+                                      ? <span className="pill pill-purple">{k.toUpperCase()}</span>
+                                      : <span className="text-muted" style={{ paddingLeft: 6 }}>↳</span>}
+                                  </td>
+                                  <td>
+                                    <span className="artifact-icon" style={{ marginRight: 6 }}>📄</span>
+                                    <span>{docBaseName(p)}</span>
+                                  </td>
+                                  <td style={{ whiteSpace: 'nowrap' }}>
+                                    {st === 'found' && <StatusBadge tone="success">유효</StatusBadge>}
+                                    {st === 'not_found' && <StatusBadge tone="danger">없음</StatusBadge>}
+                                    {st === 'unknown' && <StatusBadge tone="neutral">미확인</StatusBadge>}
+                                    {!st && <span className="text-muted text-sm">–</span>}
+                                  </td>
+                                </tr>
+                              );
+                            });
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
 
@@ -262,6 +338,15 @@ export default function ScmSection({ job, analysisResult }) {
       )}
 
       {/* Changed files with filter */}
+      {/* 감춘 이유를 밝힌다 — 조용히 비우면 '변경 없음'으로 오독된다. */}
+      {changedHiddenReason && (
+        <div className="panel mt-3">
+          <div className="panel-body text-sm text-muted">
+            ⚠ 변경 파일 목록을 표시하지 않았습니다 — {changedHiddenReason}
+          </div>
+        </div>
+      )}
+
       {changed.length > 0 && (
         <div className="panel mt-3">
           <div className="panel-header">

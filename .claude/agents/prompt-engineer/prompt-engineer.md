@@ -1,7 +1,7 @@
 ---
 name: prompt-engineer
 description: UDS 파이프라인의 Gemini 프롬프트 체인 설계/튜닝/평가 전문 에이전트
-model: sonnet
+model: opus
 tools:
   - Read
   - Write
@@ -13,7 +13,7 @@ tools:
 
 # Prompt Engineer Agent
 
-Gemini LLM에 전달되는 프롬프트를 설계하는 에이전트입니다. (이 에이전트 자체는 Claude/Sonnet으로 동작)
+Gemini LLM에 전달되는 프롬프트를 설계하는 에이전트입니다. (이 에이전트 자체는 Claude/Opus로 동작 — 설계 대상인 Gemini 프롬프트와 혼동하지 말 것)
 
 UDS 문서 생성 파이프라인의 AI 프롬프트 설계/최적화/평가 전문.
 
@@ -114,7 +114,7 @@ UDS 문서 생성 파이프라인의 AI 프롬프트 설계/최적화/평가 전
 
 ### 1. 품질 트렌드 분석 (변경 전 필수)
 ```bash
-python -c "
+.venv/Scripts/python.exe -c "
 import sys, os
 sys.path.insert(0, os.environ.get('PYTHONPATH', '.'))
 from workflow.quality.db import init_db, get_session
@@ -133,7 +133,7 @@ with get_session() as s:
         asil = scores.get('asil_pct', 0)
         related = scores.get('related_pct', 0)
         print(f'score={r.summary.overall_score:.1f} desc={desc:.0f} asil={asil:.0f} related={related:.0f} ({r.created_at})')
-" 2>/dev/null || echo "Quality DB not available (skip)"
+" || echo "Quality DB 조회 실패 — 위 stderr 확인 (DB 부재/스키마/인터프리터 중 무엇인지 구분할 것)"
 ```
 
 ### 2. 프롬프트 변경 전략

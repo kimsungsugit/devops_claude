@@ -3,12 +3,11 @@ Unit tests for UDS quality improvements.
 Verifies each phase's improvements work correctly.
 """
 
-import sys
-import os
-import json
 import re
-import pytest
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -17,7 +16,11 @@ REF_SUDS = REPO_ROOT / "docs" / "(HDPDM01_SUDS) Software Unit Design Specificati
 SRS_TXT = REPO_ROOT / "docs" / "HDPDM01_SRS.txt"
 SRS_DOCX = REPO_ROOT / "docs" / "(HDPDM01_SRS) Software Requirements Specification_v1.05_20230510.docx"
 SDS_DOCX = REPO_ROOT / "docs" / "(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx"
-SOURCE_ROOT = Path(r"D:\Project\Ados\PDS_64_RD")
+# ⚠ (R38 D-3) `PDS_64_RD` 오타였다 — 실제 경로는 `PDS64_RD`(CLAUDE.md §Important Paths).
+# Initial commit 부터 틀려 있어서 아래 6건이 **한 번도 실행된 적이 없다**. skip 메시지가
+# "Source code directory not available" 라 환경 제약처럼 읽혔지만 어느 머신에서도 통과하지
+# 않는 값이었다 — 그 6건은 실소스 파싱과 **DOCX 생성→재파싱 왕복** 검증의 유일한 경로다.
+SOURCE_ROOT = Path(r"D:\Project\Ados\PDS64_RD")
 
 
 class TestPhase2InputOutputParsing:
@@ -28,6 +31,7 @@ class TestPhase2InputOutputParsing:
         if not REF_SUDS.exists():
             pytest.skip("Reference SUDS not available")
         import docx
+
         from report_generator import _extract_function_info_from_docx
         doc = docx.Document(str(REF_SUDS))
         return _extract_function_info_from_docx(doc)
@@ -68,7 +72,7 @@ class TestPhase2StaticNaming:
     """Phase 2: Static variable naming convention detection."""
 
     def test_static_prefixes_config(self):
-        from config import STATIC_VAR_PREFIXES, GLOBAL_VAR_PREFIXES
+        from config import GLOBAL_VAR_PREFIXES, STATIC_VAR_PREFIXES
         assert "u8s_" in STATIC_VAR_PREFIXES
         assert "u8g_" in GLOBAL_VAR_PREFIXES
 
@@ -77,6 +81,7 @@ class TestPhase2StaticNaming:
         if not REF_SUDS.exists():
             pytest.skip("Reference SUDS not available")
         import docx
+
         from report_generator import _extract_function_info_from_docx
         doc = docx.Document(str(REF_SUDS))
         return _extract_function_info_from_docx(doc)
@@ -205,17 +210,19 @@ class TestPhase6FuzzyMatching:
     """Phase 6: Fuzzy function matching."""
 
     def test_case_insensitive_match(self):
-        from report_generator import generate_uds_function_mapping
         # Can't fully test without mocking, but verify function exists and signature
         import inspect
+
+        from report_generator import generate_uds_function_mapping
         sig = inspect.signature(generate_uds_function_mapping)
         params = list(sig.parameters.keys())
         assert "texts" in params
         assert "source_root" in params
 
     def test_traceability_accepts_function_details(self):
-        from report_generator import generate_uds_traceability_mapping
         import inspect
+
+        from report_generator import generate_uds_traceability_mapping
         sig = inspect.signature(generate_uds_traceability_mapping)
         params = list(sig.parameters.keys())
         assert "function_details" in params
@@ -229,6 +236,7 @@ class TestQualityScore:
         if not REF_SUDS.exists():
             pytest.skip("Reference SUDS not available")
         import docx
+
         from report_generator import _extract_function_info_from_docx
         doc = docx.Document(str(REF_SUDS))
         return _extract_function_info_from_docx(doc)
@@ -249,7 +257,10 @@ class TestQualityScore:
 
     def test_all_critical_fields_above_threshold(self, ref_fn_map):
         total = len(ref_fn_map)
-        thresholds = {"description": 0.9, "called": 0.9, "calling": 0.5, "inputs": 0.5, "outputs": 0.7}
+        # (R56 N52) 되읽기 키는 내부 의미다 — `calling` = 호출자(정본 "Called Function" 행, 정본에서 90%+ 채움),
+        #   `called` = 피호출자(정본 "Calling Function" 행, 50%+). 예전 임계(called 0.9 · calling 0.5)는 라벨과 키를 같은
+        #   이름끼리 짝짓던 옛 리더를 전제한 것이라 R56 뒤 `called` 가 52.2% 로 잡혔다 — 정본 수치는 그대로고 키 이름만 바뀌었다.
+        thresholds = {"description": 0.9, "called": 0.5, "calling": 0.9, "inputs": 0.5, "outputs": 0.7}
         for field, threshold in thresholds.items():
             filled = sum(
                 1 for v in ref_fn_map.values()
@@ -290,6 +301,7 @@ class TestPhase2V2CallingMetric:
         if not REF_SUDS.exists():
             pytest.skip("Reference SUDS not available")
         import docx
+
         from report_generator import _extract_function_info_from_docx
         doc = docx.Document(str(REF_SUDS))
         return _extract_function_info_from_docx(doc)
@@ -370,20 +382,58 @@ class TestPhase2V2CommentKeywords:
 
 
 class TestPhase3TbdResolve:
-    """Phase 3: ASIL TBD resolution via module inheritance and QM default."""
+    """ASIL 은 **지어내지 않는다** — 근거가 없으면 빈 값이다.
 
-    def test_finalize_asil_default_qm(self):
+    ⚠ 이 클래스는 원래 "QM default" 를 검증했다. 그 동작은
+      `report_gen/function_analyzer.py` 에서 **의도적으로 삭제**됐다(주석: "근거의 부재를
+      등급 주장으로 바꾸지 않는다"). `QM` 은 "안전 요구 면제" 라는 **적극적 주장**이라,
+      등급을 모르는 함수에 그걸 채우면 under-classification 이다(ISO 26262).
+
+    ⚠ 그런데 이 파일은 어떤 게이트도 돌리지 않는 `tests/` 루트에 있어(2026-08-21 발견)
+      **삭제된 동작을 요구하는 테스트가 그대로 살아 있었다.** 되살리며 "실패하니까"
+      코드를 QM 쪽으로 되돌렸다면 안전 등급이 조용히 낮아졌을 것이다.
+      → 현행 계약(사용자 결정: "none 은 none, tbd 면 tbd")을 고정한다.
+    """
+
+    def test_absent_asil_stays_empty_not_qm(self):
+        """등급 근거가 없으면 **빈 값**이다. `QM` 으로 채우지 않는다."""
         from report_generator import _finalize_function_fields
-        info = {"name": "test_func", "description": "does stuff"}
-        result = _finalize_function_fields(info)
-        assert result["asil"] != "TBD", "ASIL should not be TBD"
-        assert "QM" in result["asil"] or result["asil"] in {"A", "B", "C", "D"}
+        result = _finalize_function_fields({"name": "test_func", "description": "does stuff"})
+        assert result["asil"] == "", (
+            f"근거 없는 함수에 등급이 붙었다: {result['asil']!r} — "
+            "`QM` 은 '안전 요구 면제'라는 주장이라 근거 부재를 그걸로 채우면 "
+            "under-classification 이다"
+        )
+
+    def test_tbd_stays_tbd(self):
+        """`TBD`(미정)를 빈 값(근거 없음)으로 접지 않는다 — 둘은 다른 상태다."""
+        from report_generator import _finalize_function_fields
+        result = _finalize_function_fields(
+            {"name": "test_func", "description": "d", "asil": "TBD"})
+        assert result["asil"] == "TBD", (
+            f"TBD 가 {result['asil']!r} 로 바뀌었다 — '미정'과 '아예 없음'이 같아지면 "
+            "무엇을 더 조사해야 하는지가 사라진다"
+        )
+
+    def test_na_is_preserved(self):
+        """`N/A` 도 원래 표기 그대로 — 정규화는 값을 다듬는 것이지 지우는 게 아니다."""
+        from report_generator import _finalize_function_fields
+        result = _finalize_function_fields(
+            {"name": "test_func", "description": "d", "asil": "N/A"})
+        assert result["asil"] == "N/A"
 
     def test_finalize_asil_preserves_existing(self):
         from report_generator import _finalize_function_fields
         info = {"name": "test_func", "description": "test", "asil": "B"}
         result = _finalize_function_fields(info)
         assert result["asil"] == "B"
+
+    def test_case_is_normalized_but_grade_is_not_invented(self):
+        """소문자 등급은 대문자로 — 이건 **표기 정규화**지 등급 부여가 아니다."""
+        from report_generator import _finalize_function_fields
+        result = _finalize_function_fields(
+            {"name": "test_func", "description": "d", "asil": "d"})
+        assert result["asil"] == "D"
 
 
 class TestPhase3DescQuality:
@@ -491,12 +541,12 @@ class TestPhase3QualityBaseline:
         if not REF_SUDS.exists():
             pytest.skip("Reference SUDS not available")
         import docx
+
         from report_generator import _extract_function_info_from_docx
         doc = docx.Document(str(REF_SUDS))
         return _extract_function_info_from_docx(doc)
 
     def test_tbd_asil_zero(self, ref_fn_map):
-        from report_generator import _classify_description_quality
         tbd_count = sum(
             1 for v in ref_fn_map.values()
             if isinstance(v, dict) and str(v.get("asil") or "").strip().upper() == "TBD"
@@ -648,17 +698,32 @@ class TestPhase4QGateReport:
         assert "Low" in content
 
 
+@pytest.fixture(scope="module")
+def uds_source_payload():
+    """실소스 1회 파싱 — **모듈 전체가 공유한다**(R38 리뷰 C-2).
+
+    실측(`D:\\Project\\Ados\\PDS64_RD`, 447함수): 단독 **141초**. 예전엔 이 파싱이 두 번 돌았다 —
+    `TestPhase5E2EGeneration` 의 class-scope 픽스처 하나와, 다른 클래스의
+    `test_e2e_globals_static_rate` 가 **본문에서 직접** 부른 것. 게다가 pre-commit 은
+    `-n auto` 만 주므로 기본 분산이 `load` 이고, 그러면 class-scope 픽스처가 **워커마다**
+    재생성돼 최악 6회까지 동시 파싱한다(두 CI 는 `--dist loadfile` 이라 한 워커 고정).
+    module scope 로 올려 파일 안에서는 한 번만 돌게 한다.
+    """
+    if not SOURCE_ROOT.exists():
+        pytest.skip(f"실소스 트리가 없다: {SOURCE_ROOT} — 이 축은 이 머신에서 잴 수 없다")
+    from report_generator import generate_uds_source_sections
+    payload = generate_uds_source_sections(str(SOURCE_ROOT))
+    assert payload, "generate_uds_source_sections returned empty"
+    return payload
+
+
 class TestPhase5E2EGeneration:
     """Phase 5-3: End-to-end UDS generation and quality verification."""
 
     @pytest.fixture(scope="class")
-    def generated_payload(self):
-        if not SOURCE_ROOT.exists():
-            pytest.skip("Source code directory not available")
-        from report_generator import generate_uds_source_sections
-        payload = generate_uds_source_sections(str(SOURCE_ROOT))
-        assert payload, "generate_uds_source_sections returned empty"
-        return payload
+    def generated_payload(self, uds_source_payload):
+        """모듈 픽스처에 위임 — 이 클래스만의 파싱을 따로 돌리지 않는다(R38 리뷰 C-2)."""
+        return uds_source_payload
 
     def test_source_sections_has_function_details(self, generated_payload):
         fd = generated_payload.get("function_details", {})
@@ -676,7 +741,8 @@ class TestPhase5E2EGeneration:
 
     def test_e2e_docx_generation_and_parsing(self, generated_payload, tmp_path: Path):
         import docx
-        from report_generator import generate_uds_docx, _extract_function_info_from_docx
+
+        from report_generator import _extract_function_info_from_docx, generate_uds_docx
 
         out_path = str(tmp_path / "e2e_test.docx")
         payload = dict(generated_payload)
@@ -717,6 +783,7 @@ class TestPhase5TemplateFormat:
     def test_run_based_replacement_preserves_formatting(self):
         import docx
         from docx.shared import Pt, RGBColor
+
         from report_generator import _replace_docx_text
         doc = docx.Document()
         p = doc.add_paragraph()
@@ -734,6 +801,7 @@ class TestPhase5TemplateFormat:
 
     def test_header_footer_placeholder_detection(self):
         import docx
+
         from report_generator import _template_has_placeholders
         doc = docx.Document()
         doc.add_paragraph("No placeholders here.")
@@ -744,6 +812,7 @@ class TestPhase5TemplateFormat:
 
     def test_table_cell_replacement(self):
         import docx
+
         from report_generator import _replace_docx_text
         doc = docx.Document()
         table = doc.add_table(rows=1, cols=1)
@@ -817,11 +886,10 @@ class TestPhase5GlobalsStatic:
         assert "counter" in found
         assert "timer_val" in found
 
-    def test_e2e_globals_static_rate(self):
-        if not SOURCE_ROOT.exists():
-            pytest.skip("Source code directory not available")
-        from report_generator import generate_uds_source_sections
-        payload = generate_uds_source_sections(str(SOURCE_ROOT))
+    def test_e2e_globals_static_rate(self, uds_source_payload):
+        # (R38 리뷰 C-2) 예전엔 여기서 실소스를 **한 번 더** 파싱했다(141초 × 2). 모듈 픽스처를
+        # 받으면 같은 결과를 공유한다 — 검증 내용은 그대로다.
+        payload = uds_source_payload
         fd = payload.get("function_details", {})
         fbn = payload.get("function_details_by_name", {})
         all_fns = list(fd.values()) + list(fbn.values())
@@ -844,6 +912,7 @@ class TestPhase5DescSource:
         if not REF_SUDS.exists():
             pytest.skip("Reference SUDS not available")
         import docx
+
         from report_generator import _extract_function_info_from_docx
         doc = docx.Document(str(REF_SUDS))
         return _extract_function_info_from_docx(doc)

@@ -1,13 +1,13 @@
 """Database engine and session factory for RAG KB."""
 from __future__ import annotations
 
-import os
 import logging
+import os
 import re
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Generator
+from typing import Generator, Optional
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker

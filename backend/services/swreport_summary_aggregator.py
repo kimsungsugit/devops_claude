@@ -552,6 +552,13 @@ def build_summary_report(
     _apply_header(summ, meta, cols, first_row, fail_count=len(fail_ids))
 
     # 저장 + 외부링크 정화
+    # 라운드 107 — ES95411 템플릿 보존 수식(집계 셀)이 캐시 미저장으로 재계산 안 하는
+    # 뷰어에서 공백이 되지 않도록 fullCalcOnLoad. sanitize_xlsm_external_links는
+    # calcPr 미접촉(검증)이라 정화 후에도 플래그 보존. 캐시 불변→다운스트림 영향 0.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # pragma: no cover — openpyxl 버전 차 방어
+        pass
     out = io.BytesIO()
     wb.save(out)
     wb.close()

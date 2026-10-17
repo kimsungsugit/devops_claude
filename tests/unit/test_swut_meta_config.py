@@ -44,7 +44,8 @@ class TestSwutMetaConfigKJPDS02PV:
         assert isinstance(folders, list)
         assert len(folders) == 2
         assert all(isinstance(f, str) and f for f in folders)
-        assert "1.APP_UT_report_260604" in folders[0]
+        # 2026-06-24 — APP UT 로그 신규본 260611 갱신 (BOOT는 260604 불변).
+        assert "1.APP_UT_report_260611" in folders[0]
         assert "2.BOOT_UT_report_260604" in folders[1]
         # 단수 키(기존 코드 호환)는 APP(첫 항목)과 일치 — 우선순위 4단계 일관성
         assert k["swut_log_folder"] == folders[0]
@@ -64,17 +65,20 @@ class TestSwutMetaConfigKJPDS02PV:
                 "(부재 시 aggregator가 session 계산값으로 graceful fallback)"
             )
 
-    def test_swuts_docx_path_wip_pv_spec_v0_10(self):
-        """2026-06-18 — swuts_docx_path가 현행 PV spec((KJPDS02_PV_SwUTS) v0.10_260615)을 가리킴.
+    def test_swuts_docx_path_released_r_spec(self):
+        """swuts_docx_path 가 **현행 released spec** 을 가리킴.
 
-        빌더 라운드 105(spec 레이아웃 동적화)와 한 쌍인 config 교체분 가드:
-        - 구 DV spec(v1.01_251205_R)으로 조용히 되돌아가면 PV SwUT 빌드가
-          구 spec 기반으로 산출되는 회귀.
-        - top-level 키가 비면 resolve_swuts_path가 iso26262_docs.swuts_xlsm_path
-          (여전히 DV v1.01_R)로 폴백하는 잠재 함정 — 비어있지 않음을 고정.
-        - 2026-06-18: 팀이 작성중...v0.10_260608 → (KJPDS02_PV_SwUTS)...v0.10_260615로
-          rename(작성중 prefix 제거+날짜 갱신). 구 경로는 404로 빌드 전체 실패 →
-          현행 파일명 가드.
+        이 테스트가 지키는 것 셋 — 파일명이 바뀌어도 이 셋은 그대로다:
+        1. **공란 금지.** 비면 `resolve_swuts_path` 가 `iso26262_docs.swuts_xlsm_path`
+           로 폴백하는데 그건 **아직도 DV v1.01_251205_R** 이다(실측). 조용히 구 spec
+           으로 빌드된다.
+        2. **DV 회귀 금지.** PV/released 판이 아닌 DV spec 으로 되돌아가면 산출물이
+           통째로 구 양식이 된다.
+        3. **현행 파일명 고정.** 낡은 경로는 404 로 빌드 전체를 실패시킨다.
+
+        2026-08-25 갱신: 구 `(KJPDS02_PV_SwUTS)..v0.10_260615` 가 실측 404(팀이 released
+        R 로 교체) → `(KJPDS02_SwUTS)..v2.01_260629_R`. 교체 전 파일을 열어 양식을 확인했다
+        ('2.SW Unit Test Spec' C열 TC_ID + Inpt/ExpR 와이드 = PV 감사본 포맷 유지).
         """
         k = _load_cfg()["projects"]["KJPDS02"]
         p = k["swuts_docx_path"]
@@ -82,7 +86,30 @@ class TestSwutMetaConfigKJPDS02PV:
             "swuts_docx_path 공란 — iso26262_docs(DV spec) silent 폴백 함정"
         )
         assert p.endswith(
-            "(KJPDS02_PV_SwUTS) Software Unit Test "
-            "Specification_v0.10_260615.xlsm"
-        ), f"현행 PV spec 미지정: {p!r}"
+            "(KJPDS02_SwUTS) Software Unit Test "
+            "Specification_v2.01_260629_R.xlsm"
+        ), f"현행 released spec 미지정: {p!r}"
+        # 음성 대조군 — 구 DV spec 으로 되돌아간 것을 이름으로 못 박는다.
+        assert "v1.01_251205_R" not in p, "DV spec 회귀"
+
+    def test_swits_docx_path_released_r_spec(self):
+        """SwITS 도 같은 가드 — **2026-08-25 신설**(그동안 비대칭이었다).
+
+        SwIT 쪽이 더 위험하다: `sitr_spec_based` 빌드는 이 spec 시트를 **통째 복사**하므로
+        DV 판이 들어오면 산출물 레이아웃이 통째로 바뀐다(DV 는 F열 `SwITC_0101_01`,
+        PV/released 는 B열 `SwITC_SwUFn_0101_01`).
+
+        ⚠ **파일명에 `_PV_` 가 없다고 DV 로 단정하면 틀린다** — released R 판은 `_PV_`
+        접두 없이 나온다. 판정은 파일을 열어 TC ID 열로 해야 한다(2026-08-25 실측 확인).
+        """
+        k = _load_cfg()["projects"]["KJPDS02"]
+        p = k["swits_docx_path"]
+        assert isinstance(p, str) and p.strip(), (
+            "swits_docx_path 공란 — iso26262_docs(DV spec) silent 폴백 함정"
+        )
+        assert p.endswith(
+            "(KJPDS02_SwITS) Software Integration Test "
+            "Specification_v2.01_260629_R.xlsm"
+        ), f"현행 released spec 미지정: {p!r}"
+        assert "v1.01_251205_R" not in p, "DV spec 회귀"
         assert "v1.01_251205_R" not in p, "구 DV spec으로 회귀 금지"

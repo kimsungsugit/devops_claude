@@ -38,7 +38,7 @@ import io
 import re
 import threading
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 try:
     import openpyxl  # type: ignore
@@ -760,12 +760,16 @@ def _inspect_internal(
         # v2.02/v3.01 Coverage: Cover/History/Test Summary/1.Traceability/2.Consistency/
         #                      3.Coverage
         sheet_names_lower = [s.lower() for s in wb.sheetnames]
+        # 2026-08-26 — 시그널 판정은 **공백까지 걷은 키**로 한다. 회사 SwUTCV 정본의
+        # 시트명이 `"4. Coverage"`(점 뒤 공백)라 `"4.coverage" in n` 이 못 잡았고,
+        # 지금은 나머지 두 신호로 간신히 v1.01 로 넘어가고 있었다(1표 여유).
+        sheet_keys = [normalize_sheet_key(s) for s in wb.sheetnames]
         sitr_sheet_count_actual = len(wb.sheetnames)
         coverage_sheet_count_actual = len(wb.sheetnames)
         # v1.01 signature: "4.coverage" 시트명 (3.Coverage가 아닌 4.Coverage)
-        has_4_coverage = any("4.coverage" in n for n in sheet_names_lower)
-        has_3_consistency = any("3.consistency" in n for n in sheet_names_lower)
-        has_2_traceability = any("2.traceability" in n for n in sheet_names_lower)
+        has_4_coverage = any("4.coverage" in n for n in sheet_keys)
+        has_3_consistency = any("3.consistency" in n for n in sheet_keys)
+        has_2_traceability = any("2.traceability" in n for n in sheet_keys)
         v101_signals = sum([has_4_coverage, has_3_consistency, has_2_traceability])
         if v101_signals >= 2:
             # v1.01 양식 감지 — detected_version override (test_summary_labels 보존)
@@ -971,6 +975,85 @@ def inspect_swit_layout(
         return layout
 
 
+# ---------------------------------------------------------------------------
+# SwITCV `4.Coverage` 열 배치 — DV(11열) / PV(10열) 단일 출처
+# ---------------------------------------------------------------------------
+#: `4.Coverage` 시트를 이름으로 찾을 때 쓰는 정규화 키.
+#: ⚠ 정확 매칭(`"4.Coverage"`)을 쓰지 말 것 — 회사 SwUTCV 정본의 시트명은
+#:   `"4. Coverage"`(점 뒤 공백)라 정확 매칭이 통째로 놓친다(2026-08-26 실측).
+COVERAGE_SHEET_KEY = "4.coverage"
+
+
+def normalize_sheet_key(name: str) -> str:
+    """시트명 → 비교용 키(공백 제거 + 소문자)."""
+    return "".join(str(name or "").split()).lower()
+
+
+def find_coverage_sheet(wb: Any) -> Any:
+    """워크북에서 `4.Coverage` 시트를 공백/대소문자 무시로 찾는다. 없으면 ``None``."""
+    for name in getattr(wb, "sheetnames", []) or []:
+        if normalize_sheet_key(name).startswith(COVERAGE_SHEET_KEY):
+            return wb[name]
+    return None
+
+
+def has_component_column(ws: Any, *, max_row: int = 12, max_col: int = 14) -> bool:
+    """헤더 영역에 `Component` 라벨이 있으면 True(= DV 11열 판).
+
+    회사 SwITCV 는 두 판이 유통된다. **Component 열 하나 차이로 그 오른쪽 전부가
+    한 칸씩 밀린다.**
+
+        DV(11열): No=B(2), Component=C(3), Unit ID=D(4), Name=E(5), Functions=F(6) …
+        PV(10열): No=B(2),                 Unit ID=C(3), Name=D(4), Functions=E(5) …
+
+    판정 기준은 `swit_coverage_aggregator._extract_template_coverage_rows`(라운드 102,
+    2026-06-24)가 쓰던 것과 **같다** — 그 인라인 복제본을 여기로 올려 단일 출처로 만들었다.
+
+    ⚠ `swut_coverage_aggregator._write_coverage_sheet` 에도 비슷한 스캔이 있지만 그건
+      **복제본이 아니다.** 거기는 `No` 열까지 함께 찾아 열 번호를 `no_col` 상대로 잡는
+      쓰기 경로 전용 감지기다(회사 표준 C2 시작 / HDPDM01 C1 시작을 함께 흡수한다).
+      절대 기준 하나로 접으면 그 능력을 잃으므로 합치지 않았다.
+    """
+    if ws is None:
+        return False
+    rows = min(int(getattr(ws, "max_row", 0) or 0) + 1, max_row)
+    cols = min(int(getattr(ws, "max_column", 0) or 0) + 1, max_col)
+    for r in range(1, rows):
+        for c in range(1, cols):
+            if str(ws.cell(r, c).value or "").strip() == "Component":
+                return True
+    return False
+
+
+def coverage_column_base(ws: Any) -> int:
+    """`4.Coverage` 데이터 행의 **Unit ID 열 번호**. 오른쪽 열은 전부 여기서 +n.
+
+    DV=4 / PV=3. 이 값 하나가 unit_id·name·O/X·exception·call count 전부의 기준이다.
+    """
+    return 4 if has_component_column(ws) else 3
+
+
+def coverage_summary_col(
+    ws: Any, *, header_row: int = 4, base: int | None = None,
+) -> int:
+    """요약 블록(r5 Functions / r6 Function Calls)의 **Total 열 번호**.
+
+    헤더 행에서 `Total` 라벨을 찾아 쓰고, 없으면 `base + 1` 로 접는다
+    (DV=E, PV=D — 데이터 열과 같은 한 칸 차이를 그대로 따른다).
+
+    ⚠ `Fail Count`/`Exception` 은 라벨로 찾지 않고 `Total + 1 / + 2` 로 잡는다 —
+      회사 정본 SwUTCV 헤더에 `Excpetion` 오타가 실재하기 때문이다(2026-08-26 실측).
+    """
+    if ws is not None:
+        cols = min(int(getattr(ws, "max_column", 0) or 0) + 1, 15)
+        for c in range(2, cols):
+            if str(ws.cell(header_row, c).value or "").strip().lower() == "total":
+                return c
+    if base is None:
+        base = coverage_column_base(ws)
+    return base + 1
+
+
 def clear_layout_cache() -> None:
     """테스트/관리 용 — 캐시 초기화."""
     with _CACHE_LOCK:
@@ -984,9 +1067,15 @@ def cache_size() -> int:
 
 
 __all__ = [
+    "COVERAGE_SHEET_KEY",
     "CellRef",
     "SwitLayout",
-    "inspect_swit_layout",
-    "clear_layout_cache",
     "cache_size",
+    "clear_layout_cache",
+    "coverage_column_base",
+    "coverage_summary_col",
+    "find_coverage_sheet",
+    "has_component_column",
+    "inspect_swit_layout",
+    "normalize_sheet_key",
 ]

@@ -17,6 +17,8 @@ import os
 import re
 import sys
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def _payload_file(payload: dict) -> str:
     return (
@@ -27,12 +29,14 @@ def _payload_file(payload: dict) -> str:
 
 
 def _emit(msg: str) -> None:
+    # ensure_ascii=False — 한글 메시지가 \uXXXX 로 깨지면 읽을 수 없다.
+    # (posttoolbatch_report.py 와 같은 규약)
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
             "additionalContext": f"markdown: {msg}",
         }
-    }))
+    }, ensure_ascii=False))
 
 
 def main(payload: dict | None = None) -> None:
@@ -56,6 +60,53 @@ def main(payload: dict | None = None) -> None:
         return
 
     issues: list[str] = []
+
+    # SKILL.md — frontmatter 는 조용히 실패한다. `trigger:` 같은 미지 필드도,
+    # `when_to_use` 부재도 하네스가 아무 말 없이 넘어가므로 눈으로는 못 본다.
+    # (2026-07-17에 스킬 16개 — 프로젝트 14 + 플러그인 2 — **전부** 트리거 0이었다.)
+    #
+    # "스킬이 뭐냐"는 `check_skill_frontmatter.skill_location()` **단일 정의**를
+    # 따른다. 여기서 basename 만 보고 판정하면 `.venv/**/SKILL.md` 같은 서드파티
+    # 파일까지 우리 규칙으로 신고하게 되고, CLI 스캔과도 갈라진다.
+    if os.path.basename(fpath) == "SKILL.md":
+        try:
+            from pathlib import Path
+
+            _here = os.path.dirname(os.path.abspath(__file__))
+            if _here not in sys.path:
+                sys.path.insert(0, _here)
+            from check_skill_frontmatter import check_file, skill_location
+
+            if skill_location(Path(fpath))[0] != "unknown":
+                issues.extend(f"frontmatter: {m}" for m in check_file(Path(fpath)))
+        except Exception as e:
+            # 침묵하면 "검사했고 깨끗함"과 구분이 안 된다 — 이 저장소의 fake-green.
+            issues.append(f"frontmatter: 검사 불가 ({type(e).__name__}) — 통과 아님")
+
+    # 하네스 문서 **본문**의 코드 참조 실재 검사. frontmatter 검사기는 구조만 보므로
+    # "없는 함수 사용법"·"무관한 줄번호"·"통째로 허구인 에이전트 문서" 를 못 봤다
+    # (2026-08-03 감사에서 9건). 여기서는 **이 파일에 새로 생긴 위반만** 신고한다.
+    _rel = os.path.abspath(fpath)
+    if _rel.startswith(str(_ROOT)) and (
+        os.sep + ".claude" + os.sep in _rel or os.path.basename(fpath) == "CLAUDE.md"
+    ):
+        try:
+            from pathlib import Path
+
+            _here = os.path.dirname(os.path.abspath(__file__))
+            if _here not in sys.path:
+                sys.path.insert(0, _here)
+            import check_doc_references as _cdr
+
+            _md_rel = Path(_rel).relative_to(_ROOT).as_posix()
+            _paths, _by_name = _cdr._tracked_index()
+            issues.extend(
+                f"doc-ref: {h[2]} {h[3]} (L{h[1]})"
+                for h in _cdr.scan([_md_rel], _paths, _by_name)
+            )
+        except Exception as e:
+            issues.append(f"doc-ref: 검사 불가 ({type(e).__name__}) — 통과 아님")
+
     in_code = False
     prev_level = 0
     base_dir = os.path.dirname(fpath)

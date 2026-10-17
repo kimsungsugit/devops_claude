@@ -143,4 +143,58 @@ describe('deriveStatus (backend 동치성)', () => {
   it('아무 필드도 없으면 uncovered', () => {
     expect(deriveStatus({ requirement_id: 'R1' })).toBe('uncovered');
   });
+
+  /* 결정1 재정의: 시스템시험(SyTS/SyITS)은 SW covered에서 제외.
+   * flat tests[]가 SyTS/SyITS를 포함하는 상위집합이라 source 필터로만 걸러진다.
+   * 백엔드 jenkins.py _cache_trace_summary와 lockstep. */
+  it('SyTS-only 시험은 SW 시험 아님 → 설계만 있으면 partial (covered 아님)', () => {
+    // 설계(SDS) 있음 + 시스템시험만 → 이전엔 covered, 이제 partial
+    expect(deriveStatus({
+      requirement_id: 'SwR_1',
+      sds_components: ['SDS-X'],
+      tests: [{ source: 'SyTS' }],
+    })).toBe('partial');
+  });
+
+  it('SyITS-only 시험도 SW 시험 아님 → 설계만 있으면 partial', () => {
+    expect(deriveStatus({
+      requirement_id: 'SwEI_1',
+      sds_components: ['SDS-X'],
+      tests: [{ source: 'SyITS' }],
+    })).toBe('partial');
+  });
+
+  it('SUTS(SW 단위시험)가 있으면 SyTS가 섞여도 covered 유지', () => {
+    expect(deriveStatus({
+      requirement_id: 'SwR_2',
+      sds_components: ['SDS-X'],
+      suts_tests: [{ source: 'SUTS' }],
+      tests: [{ source: 'SyTS' }, { source: 'SUTS' }],
+    })).toBe('covered');
+  });
+
+  it('비기능 요구가 SyTS로만 검증되면 uncovered (결정1: 시스템시험은 SW 검증 아님)', () => {
+    // 이전엔 비기능+시험 → covered. 이제 SyTS는 SW 시험이 아니라 설계·SW시험 모두 없음 → uncovered.
+    expect(deriveStatus({
+      requirement_id: 'SwNTR_1',
+      tests: [{ source: 'SyTS' }],
+    })).toBe('uncovered');
+  });
+
+  it('로컬 모드 flat tests(SUTS, band키 없음)는 SW 시험으로 인정 → covered', () => {
+    // local.py 경로: band-split 키 없이 flat tests[]만. source가 SW면 그대로 SW 시험.
+    expect(deriveStatus({
+      requirement_id: 'SwR_3',
+      source_ids: ['fn_a'],
+      tests: [{ source: 'SUTS' }],
+    })).toBe('covered');
+  });
+
+  it('flat tests에 SW source(STS)와 시스템 source(SyTS)가 섞이면 SW 시험 인정 → covered', () => {
+    expect(deriveStatus({
+      requirement_id: 'SwR_4',
+      sds_components: ['SDS-X'],
+      tests: [{ source: 'SyTS' }, { source: 'STS' }],
+    })).toBe('covered');
+  });
 });

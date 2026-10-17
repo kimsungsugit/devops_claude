@@ -1,0 +1,1119 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>ARIA 문서별 자동화 고도화 계획서</title>
+  <style>
+    :root {
+      --ink: #102033;
+      --muted: #5d6c7e;
+      --line: #dce4ec;
+      --paper: #f4f7fa;
+      --card: #ffffff;
+      --navy: #0d2848;
+      --blue: #1358a8;
+      --blue-2: #2c7be5;
+      --cyan: #08a4b7;
+      --green: #138a62;
+      --green-bg: #e8f7f1;
+      --amber: #a86600;
+      --amber-bg: #fff5df;
+      --red: #bd3045;
+      --red-bg: #fff0f2;
+      --purple: #6d4ad5;
+      --shadow: 0 18px 48px rgba(13, 40, 72, .10);
+      --radius: 22px;
+      --max: 1240px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 92% 3%, rgba(44, 123, 229, .12), transparent 25rem),
+        linear-gradient(180deg, #eef4f9 0, #f8fafc 48rem, #f4f7fa 100%);
+      font-family: "Pretendard", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
+      line-height: 1.65;
+      word-break: keep-all;
+    }
+
+    a { color: inherit; }
+    code {
+      padding: .1rem .38rem;
+      border: 1px solid #d9e4ee;
+      border-radius: 6px;
+      background: #f5f8fb;
+      color: #24415f;
+      font-family: Consolas, monospace;
+      font-size: .9em;
+      word-break: break-all;
+    }
+
+    .wrap { width: min(var(--max), calc(100% - 40px)); margin: 0 auto; }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      min-height: 610px;
+      color: white;
+      background:
+        linear-gradient(120deg, rgba(6, 25, 50, .98), rgba(13, 57, 100, .96) 58%, rgba(16, 105, 130, .94));
+    }
+    .hero::before,
+    .hero::after {
+      content: "";
+      position: absolute;
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .hero::before {
+      width: 540px;
+      height: 540px;
+      right: -220px;
+      top: -260px;
+      border: 80px solid rgba(255,255,255,.05);
+    }
+    .hero::after {
+      width: 360px;
+      height: 360px;
+      left: 51%;
+      bottom: -250px;
+      background: rgba(31, 183, 203, .12);
+    }
+    .hero-inner {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: 1.45fr .8fr;
+      gap: 52px;
+      align-items: center;
+      min-height: 610px;
+      padding: 80px 0 64px;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 18px;
+      color: #86e9f2;
+      font-size: .78rem;
+      font-weight: 800;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before {
+      content: "";
+      width: 30px;
+      height: 2px;
+      background: currentColor;
+    }
+    h1 {
+      max-width: 820px;
+      margin: 0;
+      font-size: clamp(2.45rem, 5.4vw, 4.9rem);
+      line-height: 1.06;
+      letter-spacing: -.045em;
+    }
+    .hero-lead {
+      max-width: 790px;
+      margin: 26px 0 28px;
+      color: rgba(255,255,255,.78);
+      font-size: clamp(1.02rem, 1.7vw, 1.28rem);
+    }
+    .chips { display: flex; flex-wrap: wrap; gap: 9px; }
+    .chip {
+      padding: 8px 12px;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 999px;
+      background: rgba(255,255,255,.075);
+      font-size: .82rem;
+      font-weight: 700;
+    }
+    .hero-panel {
+      padding: 25px;
+      border: 1px solid rgba(255,255,255,.17);
+      border-radius: 24px;
+      background: rgba(255,255,255,.08);
+      box-shadow: 0 25px 70px rgba(0,0,0,.22);
+      backdrop-filter: blur(10px);
+    }
+    .hero-panel h2 {
+      margin: 0 0 15px;
+      font-size: 1.1rem;
+      letter-spacing: -.02em;
+    }
+    .level {
+      display: grid;
+      grid-template-columns: 56px 1fr;
+      gap: 13px;
+      align-items: center;
+      padding: 12px 0;
+      border-top: 1px solid rgba(255,255,255,.12);
+    }
+    .level:first-of-type { border-top: 0; }
+    .level span {
+      display: grid;
+      place-items: center;
+      width: 50px;
+      height: 32px;
+      border-radius: 9px;
+      color: #0d2848;
+      background: #9eeef3;
+      font-size: .8rem;
+      font-weight: 900;
+    }
+    .level strong { display: block; font-size: .92rem; }
+    .level small { display: block; color: rgba(255,255,255,.62); }
+    .hero-note {
+      margin-top: 15px;
+      padding: 12px 14px;
+      border-left: 3px solid #f7bf59;
+      background: rgba(255,255,255,.06);
+      color: rgba(255,255,255,.78);
+      font-size: .86rem;
+    }
+
+    .top-nav {
+      position: sticky;
+      z-index: 20;
+      top: 0;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.94);
+      box-shadow: 0 8px 22px rgba(13,40,72,.06);
+      backdrop-filter: blur(12px);
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .top-nav::-webkit-scrollbar { display: none; }
+    .nav-inner {
+      display: flex;
+      min-width: max-content;
+      gap: 6px;
+      padding: 11px 0;
+    }
+    .top-nav a {
+      padding: 8px 12px;
+      border-radius: 10px;
+      color: #43566b;
+      text-decoration: none;
+      font-size: .84rem;
+      font-weight: 800;
+    }
+    .top-nav a:hover { color: var(--blue); background: #edf5ff; }
+
+    main { padding: 34px 0 90px; }
+    section { scroll-margin-top: 78px; margin-top: 34px; }
+    .section-shell {
+      padding: clamp(24px, 4vw, 44px);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255,255,255,.9);
+      box-shadow: var(--shadow);
+    }
+    .section-kicker {
+      margin: 0 0 8px;
+      color: var(--blue);
+      font-size: .75rem;
+      font-weight: 900;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+    h2.section-title {
+      max-width: 900px;
+      margin: 0;
+      font-size: clamp(1.75rem, 3.2vw, 2.75rem);
+      line-height: 1.18;
+      letter-spacing: -.035em;
+    }
+    .section-desc {
+      max-width: 920px;
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 1rem;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 16px;
+      margin-top: 25px;
+    }
+    .summary-card {
+      position: relative;
+      min-height: 188px;
+      padding: 22px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: white;
+    }
+    .summary-card::after {
+      content: attr(data-no);
+      position: absolute;
+      right: 12px;
+      bottom: -24px;
+      color: rgba(19,88,168,.07);
+      font-size: 7rem;
+      font-weight: 950;
+      line-height: 1;
+    }
+    .summary-card b { position: relative; z-index: 1; color: var(--blue); }
+    .summary-card h3 {
+      position: relative;
+      z-index: 1;
+      margin: 7px 0 8px;
+      font-size: 1.12rem;
+    }
+    .summary-card p {
+      position: relative;
+      z-index: 1;
+      margin: 0;
+      color: var(--muted);
+      font-size: .91rem;
+    }
+
+    .callout {
+      margin-top: 20px;
+      padding: 17px 19px;
+      border: 1px solid #bcd3eb;
+      border-left: 5px solid var(--blue);
+      border-radius: 14px;
+      background: #f0f7ff;
+    }
+    .callout.warn { border-color: #eed5a0; border-left-color: var(--amber); background: var(--amber-bg); }
+    .callout.danger { border-color: #efb9c2; border-left-color: var(--red); background: var(--red-bg); }
+    .callout strong { display: block; margin-bottom: 3px; }
+
+    .blocker-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 12px;
+      margin-top: 24px;
+    }
+    .blocker {
+      padding: 18px 16px;
+      border-radius: 16px;
+      background: #122b49;
+      color: white;
+    }
+    .blocker .tag {
+      display: inline-block;
+      margin-bottom: 11px;
+      padding: 4px 8px;
+      border-radius: 7px;
+      color: #8cecf2;
+      background: rgba(140,236,242,.10);
+      font-size: .7rem;
+      font-weight: 900;
+    }
+    .blocker h3 { margin: 0 0 8px; font-size: .96rem; }
+    .blocker p { margin: 0; color: rgba(255,255,255,.66); font-size: .82rem; }
+
+    .document {
+      margin-top: 22px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: white;
+    }
+    .document-head {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 18px;
+      align-items: start;
+      padding: 24px 26px 20px;
+      color: white;
+      background: linear-gradient(110deg, #102d50, #175b9b);
+    }
+    .document:nth-of-type(even) .document-head {
+      background: linear-gradient(110deg, #17394e, #117e82);
+    }
+    .doc-code {
+      margin-bottom: 5px;
+      color: #8ee8ef;
+      font-size: .72rem;
+      font-weight: 900;
+      letter-spacing: .15em;
+    }
+    .document-head h3 {
+      margin: 0;
+      font-size: clamp(1.4rem, 2.2vw, 2rem);
+      letter-spacing: -.025em;
+    }
+    .document-head p {
+      max-width: 790px;
+      margin: 7px 0 0;
+      color: rgba(255,255,255,.72);
+      font-size: .92rem;
+    }
+    .target {
+      min-width: 150px;
+      padding: 11px 14px;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 13px;
+      background: rgba(255,255,255,.08);
+      text-align: center;
+    }
+    .target small { display: block; color: rgba(255,255,255,.6); }
+    .target b { font-size: 1.1rem; }
+    .document-body { padding: 24px 26px 28px; }
+    .doc-cols {
+      display: grid;
+      grid-template-columns: .85fr 1.15fr;
+      gap: 22px;
+    }
+    .mini-panel {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #f8fafc;
+    }
+    .mini-panel h4 { margin: 0 0 10px; font-size: .97rem; }
+    .mini-panel ul { margin: 0; padding-left: 1.15rem; }
+    .mini-panel li { margin: .42rem 0; color: #526276; font-size: .87rem; }
+
+    .task-list { display: grid; gap: 10px; }
+    .task {
+      display: grid;
+      grid-template-columns: 66px 1fr;
+      gap: 12px;
+      align-items: start;
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+    }
+    .task .phase {
+      padding: 5px 7px;
+      border-radius: 8px;
+      color: white;
+      background: var(--blue);
+      text-align: center;
+      font-size: .68rem;
+      font-weight: 900;
+    }
+    .task .phase.p0 { background: var(--red); }
+    .task .phase.p1 { background: var(--blue); }
+    .task .phase.p2 { background: var(--purple); }
+    .task strong { display: block; font-size: .9rem; }
+    .task span { color: var(--muted); font-size: .82rem; }
+
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .kpi {
+      padding: 13px;
+      border-radius: 13px;
+      background: #edf5ff;
+    }
+    .kpi small { display: block; color: #5c7087; font-size: .72rem; }
+    .kpi b { display: block; color: #0f4d8c; font-size: .92rem; }
+    .manual {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 11px;
+      background: var(--amber-bg);
+      color: #72521d;
+      font-size: .84rem;
+    }
+
+    .table-wrap {
+      margin-top: 22px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+    }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; background: white; }
+    th, td { padding: 14px 15px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: white; background: var(--navy); font-size: .78rem; letter-spacing: .02em; }
+    td { color: #495d73; font-size: .86rem; }
+    tr:last-child td { border-bottom: 0; }
+    td:first-child { color: var(--ink); font-weight: 850; }
+    .status {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: .68rem;
+      font-weight: 900;
+    }
+    .status.p0 { color: var(--red); background: var(--red-bg); }
+    .status.p1 { color: var(--blue); background: #eaf3ff; }
+    .status.p2 { color: var(--purple); background: #f0edff; }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0;
+      margin-top: 25px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: white;
+    }
+    .month {
+      position: relative;
+      min-height: 250px;
+      padding: 21px 17px;
+      border-left: 1px solid var(--line);
+    }
+    .month:first-child { border-left: 0; }
+    .month b { color: var(--blue); font-size: 1.25rem; }
+    .month h3 { margin: 5px 0 10px; font-size: .98rem; }
+    .month p { margin: 0; color: var(--muted); font-size: .8rem; }
+    .month .exit {
+      position: absolute;
+      left: 17px;
+      right: 17px;
+      bottom: 17px;
+      padding-top: 10px;
+      border-top: 1px dashed var(--line);
+      color: var(--green);
+      font-size: .75rem;
+      font-weight: 850;
+    }
+
+    .rag-grid {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 18px;
+      margin-top: 23px;
+    }
+    .flow-box {
+      padding: 21px;
+      border: 1px solid var(--line);
+      border-radius: 17px;
+      background: white;
+    }
+    .flow-box h3 { margin: 0 0 14px; }
+    .flow-step {
+      display: grid;
+      grid-template-columns: 36px 1fr;
+      gap: 11px;
+      align-items: start;
+      padding: 10px 0;
+      border-top: 1px solid var(--line);
+    }
+    .flow-step:first-of-type { border-top: 0; }
+    .flow-step b {
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      color: white;
+      background: var(--cyan);
+      font-size: .75rem;
+    }
+    .flow-step strong { display: block; font-size: .88rem; }
+    .flow-step span { color: var(--muted); font-size: .81rem; }
+
+    .download {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 18px;
+      align-items: center;
+      margin-top: 24px;
+      padding: 22px;
+      border-radius: 18px;
+      background: linear-gradient(110deg, #0e2c4d, #145b88);
+      color: white;
+    }
+    .download h3 { margin: 0 0 4px; }
+    .download p { margin: 0; color: rgba(255,255,255,.7); font-size: .88rem; }
+    .download a {
+      padding: 11px 15px;
+      border-radius: 10px;
+      background: #8cecf2;
+      color: #0e2c4d;
+      text-decoration: none;
+      font-size: .83rem;
+      font-weight: 900;
+    }
+
+    .copy-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 13px;
+      margin-top: 22px;
+    }
+    .copy-card {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: white;
+    }
+    .copy-card header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 9px;
+    }
+    .copy-card b { color: var(--blue); }
+    .copy-card p { margin: 0; color: #4e6073; font-size: .87rem; }
+    .copy-btn {
+      padding: 6px 9px;
+      border: 1px solid #bdd1e6;
+      border-radius: 8px;
+      color: var(--blue);
+      background: #f2f7fd;
+      cursor: pointer;
+      font: inherit;
+      font-size: .72rem;
+      font-weight: 850;
+    }
+
+    footer {
+      padding: 30px 0 45px;
+      color: #6a7786;
+      text-align: center;
+      font-size: .78rem;
+    }
+
+    @media (max-width: 980px) {
+      .hero-inner { grid-template-columns: 1fr; gap: 30px; }
+      .hero-panel { max-width: 680px; }
+      .summary-grid { grid-template-columns: 1fr 1fr; }
+      .blocker-grid { grid-template-columns: repeat(2, 1fr); }
+      .doc-cols, .rag-grid { grid-template-columns: 1fr; }
+      .timeline { grid-template-columns: 1fr 1fr; }
+      .month { border-top: 1px solid var(--line); }
+      .month:nth-child(odd) { border-left: 0; }
+      .month:first-child, .month:nth-child(2) { border-top: 0; }
+    }
+
+    @media (max-width: 620px) {
+      .wrap { width: min(100% - 24px, var(--max)); }
+      .hero-inner { padding: 58px 0 45px; }
+      .hero { min-height: auto; }
+      h1 { font-size: 2.45rem; }
+      .section-shell { padding: 22px 17px; border-radius: 17px; }
+      .summary-grid, .blocker-grid, .kpi-row, .copy-grid, .timeline { grid-template-columns: 1fr; }
+      .month { min-height: 220px; border-left: 0; border-top: 1px solid var(--line); }
+      .month:nth-child(2) { border-top: 1px solid var(--line); }
+      .document-head { grid-template-columns: 1fr; padding: 21px; }
+      .document-body { padding: 20px; }
+      .target { width: 100%; }
+      .task { grid-template-columns: 58px 1fr; }
+      .download { grid-template-columns: 1fr; }
+      .download a { text-align: center; }
+    }
+
+    @media print {
+      body { background: white; }
+      .top-nav, .copy-btn { display: none !important; }
+      .hero { min-height: 0; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      .hero-inner { min-height: 0; padding: 46px 0; }
+      .section-shell, .document { box-shadow: none; break-inside: avoid; }
+      section { break-before: page; }
+      section:first-of-type { break-before: auto; }
+      a { text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap hero-inner">
+      <div>
+        <div class="eyebrow">ARIA · ISO 26262 · 2026 Execution Plan</div>
+        <h1>문서 자동화를<br>“검토 준비 상태”까지</h1>
+        <p class="hero-lead">
+          현재 구현된 초안 생성 기능을 버리지 않고, 거짓 PASS 가능성·입력 baseline 불일치·시험 oracle·VectorCAST 왕복·RAG 데이터 오염을 순서대로 닫는 문서별 고도화 계획입니다.
+        </p>
+        <div class="chips">
+          <span class="chip">UDS</span>
+          <span class="chip">STS</span>
+          <span class="chip">SUTS</span>
+          <span class="chip">SITS</span>
+          <span class="chip">SwUTR / SwUTCV</span>
+          <span class="chip">SwITR / SwITCV</span>
+          <span class="chip">Trace / RAG</span>
+        </div>
+      </div>
+      <aside class="hero-panel">
+        <h2>자동화 성숙도 목표</h2>
+        <div class="level">
+          <span>A1</span>
+          <div><strong>현재 · Draft 생성</strong><small>필드와 템플릿을 자동으로 채움</small></div>
+        </div>
+        <div class="level">
+          <span>A2</span>
+          <div><strong>근거 결합</strong><small>baseline·provenance·confidence 부여</small></div>
+        </div>
+        <div class="level">
+          <span>A3-S</span>
+          <div><strong>명세 · Review-ready</strong><small>문서 BLOCK 0, oracle 상태 명시</small></div>
+        </div>
+        <div class="level">
+          <span>A3-E</span>
+          <div><strong>증거 · Review-ready</strong><small>VectorCAST 결과·coverage 정합</small></div>
+        </div>
+        <div class="level">
+          <span>A4</span>
+          <div><strong>사람 · Approved</strong><small>ASIL·oracle·deviation·서명 확정</small></div>
+        </div>
+        <div class="hero-note">
+          “90% 자동화”는 필수 필드의 검토 준비율 목표입니다. ISO 준수율, 시험 통과율 또는 전체 V-model 완성도를 뜻하지 않습니다.
+        </div>
+      </aside>
+    </div>
+  </header>
+
+  <nav class="top-nav" aria-label="문서 내 이동">
+    <div class="wrap nav-inner">
+      <a href="#decision">결론</a>
+      <a href="#blockers">P0 선행조건</a>
+      <a href="#specs">UDS·STS·SUTS·SITS</a>
+      <a href="#reports">VectorCAST 보고서</a>
+      <a href="#roadmap">2026 일정</a>
+      <a href="#rag">RAG 자산화</a>
+      <a href="#coding">AI 코딩 지침</a>
+      <a href="#copy">PPT 문구</a>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <section id="decision">
+      <div class="section-shell">
+        <p class="section-kicker">01 · Executive decision</p>
+        <h2 class="section-title">거의 자동화할 수 있다. 다만 “문서 생성”과 “승인”의 경계를 분명히 해야 한다.</h2>
+        <p class="section-desc">
+          ARIA에는 parser, 문서 writer, 시험 초안 생성, VectorCAST 결과 수집, trace matrix, quality DB와 RAG가 이미 존재합니다. 남은 일은 각각의 생성 결과가 같은 baseline과 근거를 사용하도록 묶고, 틀린 입력이나 불완전 결과가 PASS·100%로 보이지 않게 만드는 것입니다.
+        </p>
+        <div class="summary-grid">
+          <article class="summary-card" data-no="1">
+            <b>작성 자동화</b>
+            <h3>필드 생성에서 증거 결합으로</h3>
+            <p>값을 채우는 데서 끝내지 않고 source·SwRS·SDS·HSIS·VectorCAST의 위치와 revision을 필드마다 남깁니다.</p>
+          </article>
+          <article class="summary-card" data-no="2">
+            <b>검증 자동화</b>
+            <h3>성공 여부를 fail-closed로</h3>
+            <p>파싱 실패, unresolved, 미실행, 분모 없음은 PASS나 100%가 아니라 BLOCK 또는 not-measured로 처리합니다.</p>
+          </article>
+          <article class="summary-card" data-no="3">
+            <b>개선 자동화</b>
+            <h3>승인 수정사항을 다음 생성에</h3>
+            <p>승인본과 기각본을 revision-aware RAG에 축적해 과거의 검토 결과가 다음 프로젝트 초안 품질로 이어지게 합니다.</p>
+          </article>
+        </div>
+        <div class="callout warn">
+          <strong>자동화 이후에도 사람에게 남는 네 가지</strong>
+          요구 적합성·ASIL 확정·시험 oracle·deviation 수용 및 최종 서명은 자동 승인하지 않습니다. 이는 자동화 미완성이 아니라 안전 증거의 책임성을 지키는 경계입니다.
+        </div>
+      </div>
+    </section>
+
+    <section id="blockers">
+      <div class="section-shell">
+        <p class="section-kicker">02 · P0 foundations</p>
+        <h2 class="section-title">문서별 기능보다 먼저 닫아야 할 다섯 가지</h2>
+        <p class="section-desc">이 항목을 먼저 고치지 않으면 문서 생성량이 늘수록 잘못된 성공 지표와 오래된 데이터도 함께 커집니다.</p>
+        <div class="blocker-grid">
+          <article class="blocker">
+            <span class="tag">P0 · METRIC</span>
+            <h3>STS validator 열 불일치</h3>
+            <p>writer의 Action/Expected/SRS 열과 validator가 읽는 열을 schema SSOT로 통일합니다.</p>
+          </article>
+          <article class="blocker">
+            <span class="tag">P0 · TRACE</span>
+            <h3>Review-only 과대 커버리지</h3>
+            <p>추적 분류 완료와 실행 가능한 시험 준비율을 별도 지표로 나눕니다.</p>
+          </article>
+          <article class="blocker">
+            <span class="tag">P0 · IDENTITY</span>
+            <h3>SITS 합성 SwCom</h3>
+            <p>순번 ID를 SDS component 또는 요구 추적성으로 계산하지 않습니다.</p>
+          </article>
+          <article class="blocker">
+            <span class="tag">P0 · INPUT</span>
+            <h3>워커 경로 누락</h3>
+            <p>생성기와 RAG의 직접 Path 접근을 공통 FileResolver로 전환합니다.</p>
+          </article>
+          <article class="blocker">
+            <span class="tag">P0 · BASELINE</span>
+            <h3>Revision 혼합</h3>
+            <p>요구·소스·템플릿·VectorCAST 결과의 hash와 revision이 다르면 통합을 차단합니다.</p>
+          </article>
+        </div>
+        <div class="callout danger">
+          <strong>가장 먼저 수정할 결함</strong>
+          STS 생성 문서의 Action/Expected/SRS는 11/12/13열인데 현재 공용 validator가 5/6/4열을 검사할 수 있습니다. 이 항목은 다른 STS 고도화보다 먼저 테스트로 재현하고 수정해야 합니다.
+        </div>
+      </div>
+    </section>
+
+    <section id="specs">
+      <div class="section-shell">
+        <p class="section-kicker">03 · Specification documents</p>
+        <h2 class="section-title">UDS·STS·SUTS·SITS 문서별 실행계획</h2>
+        <p class="section-desc">각 문서는 현재 강점을 유지하면서 증거 품질, 실행 가능성, 상위 추적성의 약한 부분만 보강합니다.</p>
+
+        <article class="document">
+          <div class="document-head">
+            <div>
+              <div class="doc-code">UDS · UNIT DESIGN SPECIFICATION</div>
+              <h3>함수 분석 결과를 “근거가 있는 상세설계”로 승격</h3>
+              <p>AST·macro·function pointer·fallback call을 결합하는 기존 강점을 유지하고, 각 판단의 origin과 confidence를 문서에 남깁니다.</p>
+            </div>
+            <div class="target"><small>명세 준비 목표</small><b>Review-ready ≥ 95%</b></div>
+          </div>
+          <div class="document-body">
+            <div class="doc-cols">
+              <div class="mini-panel">
+                <h4>현재 문제가 되는 부분</h4>
+                <ul>
+                  <li>direct call과 추정 call의 확실성이 같은 수준으로 보일 수 있음</li>
+                  <li>semantic warning이 항상 release gate를 막지 않음</li>
+                  <li>rejected LLM 결과가 최종 초안에 남을 가능성</li>
+                  <li>direct 요구 링크와 SDS roll-up의 구분 부족</li>
+                  <li>현재 provenance는 일부 핵심 필드 중심이며 call·I/O 근거 영속화가 필요</li>
+                  <li>AI 2차 refinement에 필요한 body context 전달 경로 보강 필요</li>
+                </ul>
+              </div>
+              <div class="task-list">
+                <div class="task"><span class="phase p0">UDS-01</span><div><strong>Function key·evidence 영속화</strong><span>file·signature·revision reconciliation과 call·I/O origin 저장</span></div></div>
+                <div class="task"><span class="phase p1">UDS-02</span><div><strong>LLM fail-closed</strong><span>body digest·제한 snippet 전달, 근거 없는 변경·rejected 결과 승격 차단</span></div></div>
+                <div class="task"><span class="phase p1">UDS-03</span><div><strong>상위 roll-up graph</strong><span>leaf→UDS→SDS→SwRS를 direct link와 분리해 저장</span></div></div>
+                <div class="task"><span class="phase p2">UDS-04</span><div><strong>승인본 delta·RAG</strong><span>사람 수정 필드 lock, 변경 영향만 재생성</span></div></div>
+              </div>
+            </div>
+            <div class="kpi-row">
+              <div class="kpi"><small>Inventory</small><b>함수 disposition 100%</b></div>
+              <div class="kpi"><small>Evidence</small><b>대상 필드 provenance 100%</b></div>
+              <div class="kpi"><small>Safety trace</small><b>미승인 unresolved 0건</b></div>
+            </div>
+            <div class="manual"><b>사람 승인:</b> 설계 의도, safety mechanism, ASIL, 동적 호출 및 외부 경계, 최종 서명.</div>
+          </div>
+        </article>
+
+        <article class="document">
+          <div class="document-head">
+            <div>
+              <div class="doc-code">STS · SOFTWARE TEST SPECIFICATION</div>
+              <h3>요구 매핑과 실행 가능한 시험을 분리해 진짜 준비율 산출</h3>
+              <p>SwRS를 시험 분모로 유지하되 review-only 후보를 실행 가능한 TC와 분리하고 Expected Result에 근거를 강제합니다.</p>
+            </div>
+            <div class="target"><small>명세 준비 목표</small><b>Review-ready ≥ 90%</b></div>
+          </div>
+          <div class="document-body">
+            <div class="doc-cols">
+              <div class="mini-panel">
+                <h4>현재 문제가 되는 부분</h4>
+                <ul>
+                  <li>writer와 validator의 열 번호 불일치 가능성</li>
+                  <li>review-only TC까지 trace coverage에 포함</li>
+                  <li>LLM 결과의 구조 검증은 있으나 의미 근거 검증이 약함</li>
+                  <li>TC/step cap으로 잘린 경로가 일반 커버리지에 가려질 수 있음</li>
+                </ul>
+              </div>
+              <div class="task-list">
+                <div class="task"><span class="phase p0">STS-01</span><div><strong>Excel schema SSOT</strong><span>header resolver를 writer·validator가 공유하고 실제 열 공백을 BLOCK</span></div></div>
+                <div class="task"><span class="phase p0">STS-02</span><div><strong>지표 분리</strong><span>executable / review-only / excluded / unresolved 상태와 준비율 분리</span></div></div>
+                <div class="task"><span class="phase p1">STS-03</span><div><strong>Evidence-bound Expected</strong><span>citation과 oracle 해결을 분리하고 heuristic만 있으면 ORACLE_REQUIRED</span></div></div>
+                <div class="task"><span class="phase p2">STS-04</span><div><strong>요구 변경분 재생성</strong><span>수정 필드 lock, 삭제 요구는 obsolete candidate로 전환</span></div></div>
+              </div>
+            </div>
+            <div class="kpi-row">
+              <div class="kpi"><small>Truth</small><b>Validator false PASS 0</b></div>
+              <div class="kpi"><small>Requirement</small><b>Disposition 100%</b></div>
+              <div class="kpi"><small>Evidence</small><b>Citation 100%</b></div>
+            </div>
+            <div class="manual"><b>사람 승인:</b> 시험방법 충분성, 상태·경계·오류 oracle, review-only 처리, ASIL별 test adequacy. Citation만 있고 oracle이 해결되지 않은 TC는 명세 준비율에서 제외합니다.</div>
+          </div>
+        </article>
+
+        <article class="document">
+          <div class="document-head">
+            <div>
+              <div class="doc-code">SUTS · SOFTWARE UNIT TEST SPECIFICATION</div>
+              <h3>결정론적 시험 생성에서 VectorCAST 실행 왕복까지</h3>
+              <p>경계·조건·switch·loop·전역상태·MC/DC 후보 생성에 SDS context와 검증 가능한 observable/oracle을 연결합니다.</p>
+            </div>
+            <div class="target"><small>명세 준비 목표</small><b>Review-ready ≥ 95%</b></div>
+          </div>
+          <div class="document-body">
+            <div class="doc-cols">
+              <div class="mini-panel">
+                <h4>현재 문제가 되는 부분</h4>
+                <ul>
+                  <li><code>sds_docx_path</code>가 선언돼 있으나 본문 생성에 실질 반영되지 않음</li>
+                  <li>worker-only 보강 문서가 Path 검사에서 누락 가능</li>
+                  <li>Expected가 타입·패턴 heuristic에 머무는 경우</li>
+                  <li>MC/DC 후보와 독립효과 입증이 분리됨</li>
+                  <li>HSIS 범위를 읽어도 sequence에는 타입 기본경계가 사용될 수 있음</li>
+                  <li>기본 SDS cache와 단순 Covered 상태가 project·oracle·실행 준비를 구분하지 못함</li>
+                </ul>
+              </div>
+              <div class="task-list">
+                <div class="task"><span class="phase p0">SUTS-01</span><div><strong>SDS·HSIS 실사용·resolver</strong><span>supplied SDS 우선, project/revision cache, HSIS 유효범위를 sequence에 적용</span></div></div>
+                <div class="task"><span class="phase p1">SUTS-02</span><div><strong>Observable/oracle 계약</strong><span>mapped draft→oracle verified→export ready→executed 상태 분리</span></div></div>
+                <div class="task"><span class="phase p1">SUTS-03</span><div><strong>MC/DC condition disposition</strong><span>논리 pair 검증·truncation과 VectorCAST 실측 coverage를 분리</span></div></div>
+                <div class="task"><span class="phase p2">SUTS-04</span><div><strong>VectorCAST round-trip</strong><span>내부 schema lint 후 실제 import는 라이선스 Pilot에서 검증</span></div></div>
+              </div>
+            </div>
+            <div class="kpi-row">
+              <div class="kpi"><small>Observable</small><b>자동 ≥95% · disposition 100%</b></div>
+              <div class="kpi"><small>Package</small><b>내부 schema lint 100%</b></div>
+              <div class="kpi"><small>MC/DC</small><b>필수 condition disposition 100%</b></div>
+              <div class="kpi"><small>Round-trip</small><b>TC ID 손실 0건</b></div>
+            </div>
+            <div class="manual"><b>사람 승인:</b> Expected oracle, stub 동작, infeasible MC/DC와 defensive code deviation, 구조 커버리지 목표. 실제 VectorCAST import와 실측 MC/DC는 라이선스 환경 Pilot에서 별도 확인합니다.</div>
+          </div>
+        </article>
+
+        <article class="document">
+          <div class="document-head">
+            <div>
+              <div class="doc-code">SITS · SOFTWARE INTEGRATION TEST SPECIFICATION</div>
+              <h3>파일 간 호출을 실제 component 계약과 통합시험으로 연결</h3>
+              <p>cross-module direct call 중심의 현재 flow에 SDS component, HSIS interface, timing·error propagation과 실행 edge를 결합합니다.</p>
+            </div>
+            <div class="target"><small>명세 준비 목표</small><b>Review-ready ≥ 90%</b></div>
+          </div>
+          <div class="document-body">
+            <div class="doc-cols">
+              <div class="mini-panel">
+                <h4>현재 문제가 되는 부분</h4>
+                <ul>
+                  <li>SDS·HSIS를 로드하지만 flow 생성에 충분히 소비하지 않음</li>
+                  <li>순번형 <code>SwCom_XX</code>가 실제 SDS component처럼 보일 수 있음</li>
+                  <li>function pointer·macro·transitive call·timing 누락 가능</li>
+                  <li>I/O 미발견 시 N/A Expected가 release 후보에 남을 수 있음</li>
+                </ul>
+              </div>
+              <div class="task-list">
+                <div class="task"><span class="phase p0">SITS-01A</span><div><strong>Synthetic trace 제외</strong><span>SwCom_XX와 related 존재를 requirement trace로 계산하지 않음</span></div></div>
+                <div class="task"><span class="phase p1">SITS-01B</span><div><strong>SDS component graph</strong><span>실제 ID·membership 구축, 불명확한 경계는 unresolved 처리</span></div></div>
+                <div class="task"><span class="phase p1">SITS-02</span><div><strong>SDS·HSIS·UDS 실사용</strong><span>interface·range·timeout·state·side effect를 flow에 반영</span></div></div>
+                <div class="task"><span class="phase p1">SITS-03</span><div><strong>동적 호출·순서·시간 모델</strong><span>depth/node cap·cycle·truncation·retry·error propagation 처리</span></div></div>
+                <div class="task"><span class="phase p2">SITS-04</span><div><strong>Integration round-trip</strong><span>SwITC와 함수별 Function Calls 분자·분모 연결; edge 측정은 instrumentation 의존</span></div></div>
+              </div>
+            </div>
+            <div class="kpi-row">
+              <div class="kpi"><small>Graph</small><b>Edge disposition 100%</b></div>
+              <div class="kpi"><small>Oracle</small><b>미승인 N/A 0건</b></div>
+              <div class="kpi"><small>Coverage</small><b>함수별 Function Calls 정합 100%</b></div>
+              <div class="kpi"><small>Edge execution</small><b>Instrumentation 범위만 측정</b></div>
+            </div>
+            <div class="manual"><b>사람 승인:</b> component boundary, dynamic call, timing·concurrency, hardware interaction, integration oracle와 deviation. 실제 VectorCAST import와 edge-level 실행판정은 라이선스·instrumentation 환경에서 별도 확인합니다.</div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="reports">
+      <div class="section-shell">
+        <p class="section-kicker">04 · VectorCAST result documents</p>
+        <h2 class="section-title">결과 보고서는 “예쁘게 채우기”보다 원시 결과와의 정합이 우선</h2>
+        <p class="section-desc">네 문서 모두 <code>auto-generated draft</code>를 유지하고, 기본 OK·분모 없는 100%·미실행 누락을 차단합니다.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>문서</th>
+                <th>현재 위험</th>
+                <th>핵심 구현</th>
+                <th>완료 기준</th>
+                <th>우선순위</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>SwUTR</td>
+                <td>TC 실행률을 구조 커버리지처럼 읽거나 기본 Final OK가 앞설 수 있음</td>
+                <td>PASS/FAIL/NOT_EXECUTED/UNKNOWN/DEVIATED 보존, Final 계산값·템플릿값·승인값 분리</td>
+                <td>실패·미실행이 있는데 Final OK인 산출물 0건</td>
+                <td><span class="status p0">P0</span></td>
+              </tr>
+              <tr>
+                <td>SwUTCV</td>
+                <td>분모 0 또는 header 오인식으로 거짓 100%·거짓 MC/DC 가능</td>
+                <td>covered/total/exception/not-measured 원시값, header+분포 sanity check</td>
+                <td>분자·분모 없는 백분율 0건, 모든 미달 disposition</td>
+                <td><span class="status p1">P1</span></td>
+              </tr>
+              <tr>
+                <td>SwITR</td>
+                <td>SITS SwITC와 VectorCAST 환경/시험케이스 결과가 완전히 묶이지 않을 수 있음</td>
+                <td>SwITC↔VectorCAST TC↔call chain, baseline mismatch 차단, VBA 보존/실행 구분</td>
+                <td>SwITC와 VectorCAST 결과 disposition 100%</td>
+                <td><span class="status p1">P1</span></td>
+              </tr>
+              <tr>
+                <td>SwITCV</td>
+                <td>Function과 Function Call 혼합, leaf vacuous pass 가능</td>
+                <td>entry/call metric 분리, not-applicable leaf, 함수별 분자·분모 정합; edge 대조는 instrumentation 조건부</td>
+                <td>함수별 Function Calls 분자·분모 100% 정합</td>
+                <td><span class="status p2">P2</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout">
+          <strong>공통 결과 gate</strong>
+          raw log의 total·executed·passed·failed·not-executed·unknown 합계가 보고서와 일치하고, 미승인 deviation이 없을 때만 Review-ready로 승격합니다.
+        </div>
+      </div>
+    </section>
+
+    <section id="roadmap">
+      <div class="section-shell">
+        <p class="section-kicker">05 · 2026 roadmap</p>
+        <h2 class="section-title">8월 진실성 확보 → 10월 실행 왕복 → 12월 표준화</h2>
+        <p class="section-desc">병렬 2개 구현 stream 기준의 권고 순서입니다. 일정은 조정할 수 있지만 P0 선후관계는 유지해야 합니다.</p>
+        <div class="timeline">
+          <article class="month">
+            <b>08</b><h3>Metric truth</h3>
+            <p>공통 baseline·evidence contract, STS validator, synthetic SwCom trace 제외, FileResolver를 우선 구현합니다.</p>
+            <div class="exit">Exit · 거짓 PASS와 과대 trace 차단</div>
+          </article>
+          <article class="month">
+            <b>09</b><h3>Specification Review-ready</h3>
+            <p>UDS provenance, STS oracle, SUTS MC/DC disposition, 실제 SDS component graph와 timing을 보강합니다.</p>
+            <div class="exit">Exit · 문서별 BLOCK/WARN gate</div>
+          </article>
+          <article class="month">
+            <b>10</b><h3>Evidence-package Review-ready</h3>
+            <p>SUTS/SITS TC ID를 실행 package와 결과·coverage까지 유지하고 실제 import는 라이선스 환경에서 검증합니다.</p>
+            <div class="exit">Exit · TC와 실행결과 reconciliation</div>
+          </article>
+          <article class="month">
+            <b>11</b><h3>RAG 자산화</h3>
+            <p>승인본·수정본·기각본을 revision-aware로 ingest하고 source citation을 강제합니다.</p>
+            <div class="exit">Exit · 승인본 우선 retrieval</div>
+          </article>
+          <article class="month">
+            <b>12</b><h3>Pilot·표준화</h3>
+            <p>2개 이상 실제 프로젝트에서 불완전 입력·baseline 충돌·deviation 시나리오를 검증합니다.</p>
+            <div class="exit">Exit · KPI·SOP·기능안전 승인</div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="rag">
+      <div class="section-shell">
+        <p class="section-kicker">06 · Data asset and RAG</p>
+        <h2 class="section-title">데이터가 쌓이면 좋아지되, 오래된 답이 섞이지 않게</h2>
+        <p class="section-desc">현재 방향은 온라인 모델 학습이 아니라 승인 근거를 찾아 초안을 보강하는 retrieval loop입니다. 프로젝트·revision·승인 상태를 먼저 고정해야 안전한 자산이 됩니다.</p>
+        <div class="rag-grid">
+          <article class="flow-box">
+            <h3>승인 피드백 loop</h3>
+            <div class="flow-step"><b>1</b><div><strong>생성</strong><span>결정론 초안과 RAG 근거를 분리해 기록</span></div></div>
+            <div class="flow-step"><b>2</b><div><strong>검토</strong><span>accepted·edited·rejected·excluded로 판정</span></div></div>
+            <div class="flow-step"><b>3</b><div><strong>축적</strong><span>원문·최종문·사유·baseline·source hash 저장</span></div></div>
+            <div class="flow-step"><b>4</b><div><strong>검색</strong><span>동일 project·current revision·approved를 hard filter</span></div></div>
+            <div class="flow-step"><b>5</b><div><strong>평가</strong><span>무수정 승인율과 반복 오류 감소 추세 확인</span></div></div>
+          </article>
+          <article class="flow-box">
+            <h3>필수 metadata</h3>
+            <div class="task-list">
+              <div class="task"><span class="phase p0">KEY</span><div><strong>project_id · revision</strong><span>현재 baseline과 과거 항목 분리</span></div></div>
+              <div class="task"><span class="phase p0">DOC</span><div><strong>document_type · document_id</strong><span>요구·설계·시험·결과 provenance</span></div></div>
+              <div class="task"><span class="phase p1">STATE</span><div><strong>approval_state · superseded_by</strong><span>승인본 우선, 폐기본 제외</span></div></div>
+              <div class="task"><span class="phase p1">HASH</span><div><strong>source_sha256 · baseline_id</strong><span>동일 이름의 다른 내용 구분</span></div></div>
+              <div class="task"><span class="phase p2">CITE</span><div><strong>source citation 100%</strong><span>생성 제안의 근거 위치 표시</span></div></div>
+            </div>
+          </article>
+        </div>
+        <div class="callout warn">
+          <strong>표현 원칙</strong>
+          “데이터가 쌓여 모델이 자동 학습한다”가 아니라 “승인된 과거 근거의 검색·순위·프롬프트 활용이 개선된다”고 설명합니다. Fine-tuning은 별도 검증셋과 충분한 데이터가 생긴 뒤 판단합니다.
+        </div>
+      </div>
+    </section>
+
+    <section id="coding">
+      <div class="section-shell">
+        <p class="section-kicker">07 · AI coding handoff</p>
+        <h2 class="section-title">AI 코딩은 Task ID 단위로, 실패 테스트부터</h2>
+        <p class="section-desc">Markdown 구현계획에는 수정 후보 파일, 테스트 명령, Definition of Done과 pilot 시나리오까지 포함했습니다.</p>
+        <div class="summary-grid">
+          <article class="summary-card" data-no="1">
+            <b>1 Task = 1 PR</b>
+            <h3>작게 구현</h3>
+            <p>CORE·UDS·STS·SUTS·SITS·UTR·UTCV·ITR·ITCV·RAG Task ID를 기본 작업 단위로 사용합니다.</p>
+          </article>
+          <article class="summary-card" data-no="2">
+            <b>Red first</b>
+            <h3>문제를 먼저 재현</h3>
+            <p>거짓 PASS, baseline 혼합, worker 누락, 미실행 누락을 실패 테스트로 고정한 뒤 구현합니다.</p>
+          </article>
+          <article class="summary-card" data-no="3">
+            <b>No silent green</b>
+            <h3>실패는 상태로 보존</h3>
+            <p>파싱 실패를 0·100·PASS로 바꾸지 않고 BLOCK, unresolved 또는 not-measured로 유지합니다.</p>
+          </article>
+        </div>
+        <div class="download">
+          <div>
+            <h3>AI 코딩용 상세 구현계획서</h3>
+            <p>파일·함수 영역, 단계별 Task ID, 테스트, DoD, Pilot 시나리오를 포함한 Markdown 원본입니다.</p>
+          </div>
+          <a href="./ARIA_문서별_자동화_고도화_구현계획.md">MD 계획서 열기</a>
+        </div>
+      </div>
+    </section>
+
+    <section id="copy">
+      <div class="section-shell">
+        <p class="section-kicker">08 · Copy for PPT</p>
+        <h2 class="section-title">PPT에 바로 옮길 수 있는 문서별 핵심 문구</h2>
+        <div class="copy-grid">
+          <article class="copy-card">
+            <header><b>UDS</b><button class="copy-btn" type="button">복사</button></header>
+            <p>UDS는 Source 분석 결과에 함수·호출·입출력·전역상태의 provenance를 결합하고, 근거 없는 AI 변경을 차단하여 검토 가능한 상세설계 초안으로 고도화한다.</p>
+          </article>
+          <article class="copy-card">
+            <header><b>STS</b><button class="copy-btn" type="button">복사</button></header>
+            <p>STS는 요구 매핑 완료와 실행 가능한 시험 준비를 분리하고, Expected Result마다 요구·인터페이스·소스 관찰점 근거를 강제하여 거짓 100%를 제거한다.</p>
+          </article>
+          <article class="copy-card">
+            <header><b>SUTS</b><button class="copy-btn" type="button">복사</button></header>
+            <p>SUTS는 경계·분기·MC/DC 후보 생성에 SDS 설계문맥과 검증 가능한 oracle을 연결하고 VectorCAST 실행결과를 동일 TC ID로 회수한다.</p>
+          </article>
+          <article class="copy-card">
+            <header><b>SITS</b><button class="copy-btn" type="button">복사</button></header>
+            <p>SITS는 파일 간 호출을 SDS component·HSIS interface·timing·error propagation과 연결하고, 함수별 Function Calls 실측값을 정합한다. Edge 단위 판정은 instrumentation이 있을 때 수행한다.</p>
+          </article>
+          <article class="copy-card">
+            <header><b>VectorCAST 보고서</b><button class="copy-btn" type="button">복사</button></header>
+            <p>SwUTR·SwUTCV·SwITR·SwITCV는 원시 로그의 PASS·FAIL·미실행·Unknown과 구조 커버리지의 분자·분모를 보존하며 미승인 예외가 있는 기본 OK를 차단한다.</p>
+          </article>
+          <article class="copy-card">
+            <header><b>RAG 자산화</b><button class="copy-btn" type="button">복사</button></header>
+            <p>승인본·수정본·기각본을 프로젝트와 revision 기준으로 축적하고, 현재 baseline의 승인 근거만 우선 검색하여 문서 자동화 품질을 지속적으로 높인다.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    ARIA ISO 26262 Document Automation Advancement Plan · Baseline 2026-07-28 · Final approval remains a human safety responsibility.
+  </footer>
+
+  <script>
+    document.querySelectorAll(".copy-card").forEach((card) => {
+      const button = card.querySelector(".copy-btn");
+      const text = card.querySelector("p")?.textContent?.trim() || "";
+      button?.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          button.textContent = "복사됨";
+        } catch {
+          button.textContent = "직접 복사";
+        }
+        window.setTimeout(() => { button.textContent = "복사"; }, 1500);
+      });
+    });
+  </script>
+</body>
+</html>

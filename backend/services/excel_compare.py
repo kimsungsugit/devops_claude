@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 try:
     from openpyxl import load_workbook
@@ -80,7 +80,7 @@ def read_excel_sheet(filepath: Path, sheet_index: int) -> Optional[List[List[str
                 if cell.value is not None:
                     row_data.append(str(cell.value))
                 elif cell.data_type == 'f':
-                    row_data.append(f"(formula)")  # Formula without cached value
+                    row_data.append("(formula)")  # Formula without cached value
                 else:
                     row_data.append("")
             data.append(row_data)

@@ -57,13 +57,14 @@ from backend.services.excel_template_utils import (
     write_value_after_label,
 )
 from backend.services.swut_builder_helpers import extract_warnings_from_session
-from backend.services.swut_meta import BuildMetaBase
 from backend.services.swut_input_adapter import (
     FunctionCoverage,
     SwUTSession,
     aggregate_session,
+    compute_coverage_final_result,
+    compute_coverage_rollup,
 )
-
+from backend.services.swut_meta import BuildMetaBase
 
 # ---------------------------------------------------------------------------
 # Dialog/meta payload
@@ -297,10 +298,26 @@ def _write_test_summary_sheet(
                          meta.test_engineer,
                          "테스트 엔지니어 이름", out_warnings)
     # 라운드 96-final C-1 — 템플릿 OK/NG 수식 보존 (KJPDS02 v1.01 C10).
+    # ⚠ 수식이 **없는** 양식(HDPDM01 v3.01 등 빈 셀)에서는 예전에 meta 정적 기본값
+    # "PASS" 리터럴이 그대로 들어갔다 — 미달 함수가 있어도 PASS 로 보였다. 수식 보존
+    # 분기는 그대로 두고, 폴백 값만 실측에서 도출한 값으로 바꾼다.
+    # (판정은 커버리지 달성 기준 — pass/fail 기준인 SUTR 과 의미가 다르므로 별도 함수)
+    _cfr = compute_coverage_final_result(
+        agg.get("function_rows") or [], positive_token=meta.final_test_result,
+    )
     _write_label_keep_formula(
         ws, labels.get("final_test_result", "Final Test Result"),
-        meta.final_test_result, out_warnings,
+        _cfr["display"], out_warnings,
     )
+    if _cfr["verdict"] != "ok" and out_warnings is not None:
+        out_warnings.append(
+            f"[final-result] Coverage Final Test Result = '{_cfr['display']}' — {_cfr['reason']}"
+            " (템플릿에 판정 수식이 있으면 수식이 우선)"
+        )
+    if summary is not None:
+        summary["final_result"] = _cfr["display"]
+        summary["final_result_verdict"] = _cfr["verdict"]
+        summary["final_result_reason"] = _cfr["reason"]
 
     # 54차 T283: v2.02 양식 신규 row — TC stats / Requirements
     _write_v202_extra_rows(ws, agg, layout, summary, out_warnings)
@@ -600,6 +617,7 @@ def _write_coverage_sheet(
     out_warnings: list[str] | None = None,
     is_swit_caller: bool = False,
     c_function_map: dict[str, dict[str, Any]] | None = None,
+    out_stats: dict[str, Any] | None = None,
 ) -> int:
     """3. Coverage 시트 — per-function Statement/Branch/Exception 표.
 
@@ -625,7 +643,8 @@ def _write_coverage_sheet(
     # 라운드 76 T1107 — file 정보 사전 주입으로 dedup 정확성 향상.
     if c_function_map:
         from backend.services.swut_input_adapter import (
-            enhance_function_coverage_with_file, merge_function_rows_with_c_parser,
+            enhance_function_coverage_with_file,
+            merge_function_rows_with_c_parser,
         )
         # vcast function_rows에 c_parser file 정보 주입 → dedup key (name, file) 정확
         vcast_rows = list(agg.get("function_rows") or [])
@@ -646,7 +665,17 @@ def _write_coverage_sheet(
             str(c.value).strip() if c.value else ""
             for c in row
         ]
-        if any(label in ("Unit ID", "Function Name", "Component") for label in labels):
+        # 라운드 102 (2026-06-24) — PV v0.10 SwITCV 헤더 인식 추가. PV는 'Unit ID'를
+        # 'Unit'(r9)+'ID'(r10)로 분리, 'Function Name'→'Name', Component 열 없음 →
+        # 기존 라벨로는 header_row 미발견 → return 0(스탬핑 skip, 템플릿 passthrough)
+        # 였다. 단 'Functions'는 상단 요약블록(r3~6)에도 등장하므로, 데이터 표 헤더
+        # 행(r9, 'No'+'Functions' 동시 보유)만 매칭하도록 'No' 동반 조건 부여. DV/
+        # SwUTCV(Component 보유)는 기존 매칭 유지 — 영향 없음.
+        _labels_set = set(labels)
+        if (
+            _labels_set & {"Unit ID", "Function Name", "Component"}
+            or ("Functions" in _labels_set and "No" in _labels_set)
+        ):
             header_row = row[0].row
             break
     if header_row is None:
@@ -707,10 +736,14 @@ def _write_coverage_sheet(
     # F7 stage 10 G3 fix: is_swit_caller 명시 — SwUT 호출 (build_coverage_report)는
     # SwUTCV (회사 표준 v1.01 layout)도 Statement/Branch 매핑. SwIT 호출
     # (build_swit_coverage_report)만 SwIT 분기 (Functions Pass + Function Called).
+    # 라운드 102 (2026-06-24) — has_component_col 의존 제거. PV v0.10 SwITCV는
+    # Component 열이 없어도 function_and_calls 메트릭 양식(Functions Pass + Function
+    # Called)이다. coverage_metric_kind(시트구성 기반 v1.01 감지, DV/PV 공통)로만
+    # 판정 → DV(11열)/PV(10열) 모두 SwIT 메트릭 stamp. 열 오프셋은 아래에서
+    # has_component_col로 별도 보정. is_swit_caller=True(SwIT 호출)만 해당 — SwUTCV 무관.
     is_swit_metric_layout = is_swit_caller and (
         layout is not None
         and getattr(layout, "coverage_metric_kind", "single") == "function_and_calls"
-        and has_component_col
     )
 
     # 라운드 73 T803 — row 자동 확장 (1회 batch insert로 O(N²) 회피).
@@ -720,7 +753,8 @@ def _write_coverage_sheet(
     needed_last_row = data_start + len(function_rows) - 1
     if needed_last_row > ws.max_row:
         from backend.services.excel_template_utils import (
-            auto_expand_row_block, push_sentinel_to_last_row,
+            auto_expand_row_block,
+            push_sentinel_to_last_row,
             update_cross_refs_after_row_expansion,
         )
         # 라운드 76 자체평가 fix — old_totals_row를 ws.max_row가 아닌 양식 R5/R6
@@ -819,24 +853,17 @@ def _write_coverage_sheet(
     spec_stmt_total = 0
     spec_branch_fail = 0
     spec_branch_total = 0
-    spec_stmt_exception_seq = 0
-    spec_branch_exception_seq = 0
-    spec_stmt_exception_base = 0
-    if spec_based and not is_swit_metric_layout:
-        for _fc_for_exception in function_rows:
-            _is_c_parser_only_for_exception = bool(
-                getattr(_fc_for_exception, "unit_id", "")
-                and _fc_for_exception.unit_id.startswith("SwUFn_C_")
-            )
-            if not _is_c_parser_only_for_exception and not _fc_for_exception.statement.passed:
-                spec_stmt_exception_base += 1
+    # 라운드 103 — Exception은 실패행 'O' literal (UT-CVG 시퀀스 폐기, 라운드 92~96
+    # 잔재). 시퀀스 ID/phase prefix/base 누적 로직 제거 (회사 감사본 v0.10 정합).
     spec_unmatched: list[str] = []
     spec_unmatched_count = 0
-    # 라운드 96-final W-8 — exception note ID prefix는 config phase를 따른다
-    # (PV 산출물에 'DV' 고정 방지). build_coverage_report가 config
-    # projects.<id>.swutcr_metadata.phase를 agg["phase"]로 주입. 미정의 시
-    # 기존 'DV' 유지 (HDPDM01/SwIT 등 backward-compat).
-    spec_phase = str(agg.get("phase") or "").strip() or "DV"
+    # §6 후보 8 / UTCV-001 — **미측정(total=0) 행**. 예외(면제 결정)와 엄격히 구분한다.
+    # 섞으면 "한 번도 재지 않은 행" 이 "재고 나서 면제한 행" 으로 기록되고, 요약 분자에만
+    # 더해져 커버리지가 100% 를 넘는다(실측 166.67%).
+    # ⚠ **건수는 여기서 세지 않는다** — 분모를 정하는 `_write_spec_totals` 의 셀 스캔이
+    #   유일한 계수 출처다. 여기는 "어느 함수인가" 만 모은다(같은 수를 두 곳에서 세면
+    #   갈라진다 — 이 저장소 1위 재발 패턴).
+    spec_unmeasured_names: list[str] = []
     last_data_row = data_start - 1
 
     if written == 0 and function_rows:
@@ -905,7 +932,17 @@ def _write_coverage_sheet(
             # display_unit_id 기준으로 도출. 이전엔 SUDS 미매핑이나 vcast가 실 SwUFn을
             # 가진 행(예 SwUFn_3329)은 C 공란, 순차 fallback 행은 env명(Lib_sha256) leak.
             # display_unit_id가 SwUFn_NNNN면 항상 SwCom_NN 부여 → 일관성 확보.
+            # 라운드 102 (2026-06-24) — spec_based Component = VectorCAST 환경명
+            # (회사 감사본 실측: env_name.upper() = SWUT_01_LIB_SHA256 등, 환경별
+            # 세로병합). 라운드 92/96의 SwCom_NN 수식은 감사본 오판독 — 레퍼런스
+            # 직접 비교(scratchpad/refs)로 env_name.upper()가 정답 확인. 환경 그룹·
+            # 크기도 레퍼런스와 정확 일치(Lib_sha256 14, SysOs_Main 22 …).
             if spec_based:
+                _env = (getattr(fc, "env_name", "") or "").strip()
+                if _env:
+                    comp_name = _env.upper()
+            if spec_based and not comp_name:
+                # env_name 부재 시 기존 SwCom_NN fallback (backward-compat).
                 m_swufn = re.match(r"SwUFn_(\d{2})\d{2}", str(display_unit_id))
                 if m_swufn:
                     comp_name = f"SwCom_{m_swufn.group(1)}"
@@ -919,14 +956,11 @@ def _write_coverage_sheet(
             if comp_name:
                 # 라운드 96 — spec_based는 force_write_cell로 orphan MergedCell
                 # (회사 양식 SwCom 그룹 병합 해제 잔존 셀) 강제 기록 → C 공란 해소.
+                # 라운드 102 — 환경명 literal stamp (수식 폐기). 환경별 세로병합은
+                # written 루프 종료 후 최종 패스에서 (연속 동일 env 그룹).
                 # HDPDM01/SwIT는 기존 safe_write 동작 보존.
                 if spec_based:
-                    # C열 테두리 통일은 written 루프 종료 후 최종 패스에서 수행
-                    # (라운드 97 — 루프 중간 복사가 후속 단계에서 리셋되는 문제 회피).
-                    force_write_cell(
-                        ws, r, comp_col,
-                        f'="SwCom_" & MID(D{r}, FIND("_", D{r}) + 1, 2)',
-                    )
+                    force_write_cell(ws, r, comp_col, comp_name)
                 else:
                     safe_write(ws, r, comp_col, comp_name)
 
@@ -937,20 +971,24 @@ def _write_coverage_sheet(
         # 순차 SwUFn fallback은 추정 ID라 audit reviewer가 추적성 수동 검증 필요.
         # SwUDS 매핑 성공 행은 마킹 없음 (회사 감사본 동일).
         if spec_based and not is_c_parser_only and not resolved_swufn:
-            from backend.services.excel_template_utils import _apply_fill
             from backend.services.design_tokens import USER_INPUT_FILL_RGB
+            from backend.services.excel_template_utils import _apply_fill
             _apply_fill(ws, r, unit_id_col, USER_INPUT_FILL_RGB)
 
         if is_swit_metric_layout:
-            # SwITCV — Functions Pass (C6) + Function Called metric (C8/C9/C10)
-            # Functions Pass: function 매핑 여부 — 신규 session에 unit_id 있으면 'O'
-            functions_pass_col = no_col + 4
-            fcalls_count_col = no_col + 6
+            # SwITCV — Functions Pass + Function Called metric.
+            # 라운드 102 — PV 10열(Component 없음) 대응: DV 11열은 Component(no_col+1)
+            # 때문에 Functions=no_col+4 / FCalled Count=no_col+6, PV는 각각 -1 시프트.
+            # DV: No=B Component=C Unit=D Name=E Functions=F(no_col+4) ... FCalled=H(no_col+6).
+            # PV: No=B Unit=C Name=D Functions=E(no_col+3) ... FCalled=G(no_col+5).
+            _comp_off = 1 if has_component_col else 0
+            functions_pass_col = no_col + 3 + _comp_off
+            fcalls_count_col = no_col + 5 + _comp_off
             if is_c_parser_only:
                 # 라운드 74 T906 — c_parser only Functions Pass cell에 '[c_parser]' 안내.
                 # 라운드 76 자체평가 fix — 안내 메시지 보강 + Name col에도 마킹.
-                from backend.services.excel_template_utils import _apply_fill
                 from backend.services.design_tokens import USER_INPUT_FILL_RGB
+                from backend.services.excel_template_utils import _apply_fill
                 safe_write(ws, r, functions_pass_col, "[c_parser only — 미실측]")
                 _apply_fill(ws, r, functions_pass_col, USER_INPUT_FILL_RGB)
                 # Name col(C5)도 [c_parser] suffix로 audit 마킹
@@ -958,39 +996,52 @@ def _write_coverage_sheet(
             else:
                 swit_present = bool(getattr(fc, "swit_function_present", True))
                 safe_write(ws, r, functions_pass_col, "O" if swit_present else "X")
-                # 라운드 96-final QA fix (W#5) — 무사유 자동 Exception 'O' 제거.
-                # 이전: 미실행/미달 함수 전건에 Exception 'O' 자동 stamp →
-                # Coverage 수식 (Total-Fail+Exception)/Total이 항상 100% 표시
-                # (DV 감사본은 X 3건에 각각 Note 사유 기재 후 Exception 처리).
-                # 신규: Exception 셀은 노란 fill만 (값 비움 — totals 카운트/수식
-                # 정합), Note 셀(no_col+10)에 사유 기재 안내. manual reviewer가
-                # 사유 기재 후 Exception 여부를 결정한다 (ISO 26262 evidence 정책).
-                _note_col = no_col + 10
+                # 라운드 102 (2026-06-24) — DV/PV Exception 정책 분기 (회사 양식 버전차).
+                #   PV v0.10 감사본(최신 정본): 미달(X) 함수의 Exception을 'O' 일괄 처리
+                #     (Note 없이) → Coverage=(Total-Fail+Exception)/Total=100%. 레퍼런스
+                #     직접 대조 확인(F=4·J=21·G5/G6=1.0). 사용자 결정: PV 기준 유지.
+                #   DV v1.01 감사본: Exception 비움 + Note 개별 사유(라운드96 W#5) →
+                #     Coverage 실측. manual reviewer가 사유 기재 후 결정.
+                # has_component_col=False(PV 10열) → auto Exception 'O'. True(DV) → W#5.
+                _pv_auto_exception = not has_component_col
+                _note_col = no_col + 10 if has_component_col else None
                 if not swit_present:
-                    mark_user_input_fill_only(ws, r, functions_pass_col + 1)
-                    if not str(ws.cell(r, _note_col).value or "").strip():
-                        mark_user_input_required(
-                            ws, r, _note_col, hint="미실행 사유 (Exception 결정 근거)",
-                        )
+                    if _pv_auto_exception:
+                        safe_write(ws, r, functions_pass_col + 1, "O")
+                    else:
+                        mark_user_input_fill_only(ws, r, functions_pass_col + 1)
+                        if _note_col is not None and not str(ws.cell(r, _note_col).value or "").strip():
+                            mark_user_input_required(
+                                ws, r, _note_col, hint="미실행 사유 (Exception 결정 근거)",
+                            )
                 fcc = getattr(fc, "function_calls_coverage", None)
                 if fcc is not None and fcc.total > 0:
                     safe_write(ws, r, fcalls_count_col, fcc.covered)
                     safe_write(ws, r, fcalls_count_col + 1, fcc.total)
                     safe_write(ws, r, fcalls_count_col + 2, "O" if fcc.passed else "X")
                     if not fcc.passed:
-                        # 동일 정책 — Function Called Exception도 자동 'O' 제거
-                        mark_user_input_fill_only(ws, r, fcalls_count_col + 3)
-                        if not str(ws.cell(r, _note_col).value or "").strip():
-                            mark_user_input_required(
-                                ws, r, _note_col,
-                                hint="Function Call 미달 사유 (Exception 결정 근거)",
-                            )
+                        if _pv_auto_exception:
+                            safe_write(ws, r, fcalls_count_col + 3, "O")
+                        else:
+                            mark_user_input_fill_only(ws, r, fcalls_count_col + 3)
+                            if _note_col is not None and not str(ws.cell(r, _note_col).value or "").strip():
+                                mark_user_input_required(
+                                    ws, r, _note_col,
+                                    hint="Function Call 미달 사유 (Exception 결정 근거)",
+                                )
+                elif getattr(fc, "swit_calls_na", False):
+                    # 라운드 102 (2026-06-24) — Function Call이 없는 leaf 함수는 Pass열에
+                    # 'O'(vacuous pass — 검증할 호출 없음 = 합격). Count/Total은 공백 유지.
+                    # 회사 감사본 정합: REF는 호출없는 425행도 Function Called Pass='O'.
+                    # swit_calls_na는 _align이 Metric 확인 + total_calls==0일 때만 set →
+                    # metric 미수집(blank 유지)과 명확히 구분. legacy 경로 무영향.
+                    safe_write(ws, r, fcalls_count_col + 2, "O")
         else:
             # SwUTCV / HDPDM01 — Statement + Branch metric
             if is_c_parser_only:
                 # 라운드 76 자체평가 fix — c_parser only 안내 메시지 보강 + Name col 마킹.
-                from backend.services.excel_template_utils import _apply_fill
                 from backend.services.design_tokens import USER_INPUT_FILL_RGB
+                from backend.services.excel_template_utils import _apply_fill
                 safe_write(ws, r, stmt_count_col, "[c_parser only — 미실측]")
                 safe_write(ws, r, stmt_count_col + 1, "-")
                 safe_write(ws, r, stmt_count_col + 2, "-")
@@ -1012,31 +1063,45 @@ def _write_coverage_sheet(
                     else ("O" if fc.branch.passed else "X")
                 )
                 if spec_based:
+                    # 라운드 103 (2026-06-24) — 회사 감사본(KJPDS02 v0.10 PV) 4.Coverage
+                    # 데이터행 형식 정합. SwITCV(bc6904d)와 동형 결함 수정:
+                    #   (1) Pass 열(H/L)은 'Pass'/'Fail' 텍스트가 아니라 O/X.
+                    #       레퍼런스 수식: =IF(Count=Total,"O","X").
+                    #   (2) Exception 열(I/M)은 UT-CVG 시퀀스가 아니라 실패행 'O' literal
+                    #       (Coverage 비율 상쇄 → 100%, 레퍼런스 패턴).
+                    #   (3) File 열(N)에 exception_note 미기재 (레퍼런스 데이터행 N 공란).
+                    from openpyxl.utils import get_column_letter as _gcl_row
+                    _f_l = _gcl_row(stmt_count_col)
+                    _g_l = _gcl_row(stmt_count_col + 1)
+                    _j_l = _gcl_row(branch_count_col)
+                    _k_l = _gcl_row(branch_count_col + 1)
+                    # ⚠ **미측정(total=0)을 예외로 위장하지 않는다** (§6 후보 8 / UTCV-001).
+                    #   `passed` 는 `total > 0 and covered == total` 이라 total=0 이면
+                    #   False 다. 예전엔 그걸 그대로 `not passed → Exception 'O'` 로 넘겨,
+                    #   **한 번도 측정하지 않은 행이 "면제 결정된 행"** 으로 기록됐다.
+                    #   Exception 'O' 는 PV 정책상 "미달을 면제한다" 는 **판단**이고
+                    #   (:994 사용자 결정), 미측정은 판단 이전 상태다 — 섞으면 안 된다.
+                    #   게다가 아래 요약이 `(Total - Fail + Exception)/Total` 인데 미측정
+                    #   행은 `f == g`(0==0)라 Fail 로 안 세어져, Exception 만 분자에 더해져
+                    #   **166.67%** 라는 불가능한 커버리지가 나왔다(실측 재현).
+                    #   프로덕션 경로가 실제로 이런 행을 만든다: `swut_input_adapter.py`
+                    #   의 04.MetricsReport HMR merge 와 `_parse_metric_cell` 파싱 실패.
+                    _stmt_unmeasured = int(fc.statement.total or 0) <= 0
+                    _branch_unmeasured = int(fc.branch.total or 0) <= 0
                     safe_write(ws, r, stmt_count_col, fc.statement.covered)
                     safe_write(ws, r, stmt_count_col + 1, fc.statement.total)
-                    safe_write(ws, r, stmt_count_col + 2, f'=IF(F{r}=G{r}, "Pass", "Fail")')
-                    if not fc.statement.passed:
-                        spec_stmt_exception_seq += 1
-                        safe_write(
-                            ws, r, stmt_count_col + 3,
-                            f"UT-CVG-{spec_phase}-{spec_stmt_exception_seq}",
-                        )
+                    safe_write(ws, r, stmt_count_col + 2, f'=IF({_f_l}{r}={_g_l}{r}, "O", "X")')
+                    if not fc.statement.passed and not _stmt_unmeasured:
+                        safe_write(ws, r, stmt_count_col + 3, "O")
                     safe_write(ws, r, branch_count_col, fc.branch.covered)
                     safe_write(ws, r, branch_count_col + 1, fc.branch.total)
-                    safe_write(ws, r, branch_count_col + 2, f'=IF(J{r}=K{r}, "Pass", "Fail")')
-                    if not fc.branch.passed:
-                        spec_branch_exception_seq += 1
-                        safe_write(
-                            ws, r, branch_count_col + 3,
-                            f"UT-CVG-{spec_phase}-"
-                            f"{spec_stmt_exception_base + spec_branch_exception_seq}",
+                    safe_write(ws, r, branch_count_col + 2, f'=IF({_j_l}{r}={_k_l}{r}, "O", "X")')
+                    if not fc.branch.passed and not _branch_unmeasured:
+                        safe_write(ws, r, branch_count_col + 3, "O")
+                    if (_stmt_unmeasured or _branch_unmeasured) and len(spec_unmeasured_names) < 15:
+                        spec_unmeasured_names.append(
+                            f"{getattr(fc, 'unit_id', '?')}({getattr(fc, 'name', '?')})"
                         )
-                    if (not fc.statement.passed) or (not fc.branch.passed):
-                        exception_note = (
-                            agg.get("coverage_exception_note")
-                            or f"({agg.get('project_id', '')}_{spec_phase}_SwUTCV) Software Unit Test Coverage Result"
-                        )
-                        safe_write(ws, r, branch_count_col + 4, exception_note)
                 else:
                     safe_write(ws, r, stmt_count_col, fc.statement.total)
                     safe_write(ws, r, stmt_count_col + 1, fc.statement.covered)
@@ -1185,21 +1250,20 @@ def _write_coverage_sheet(
         except ImportError:
             pass
 
-    # 라운드 92 — spec_based TOTALS 섹션 + 상단 요약 (회사 감사본 일치).
-    # clear 이후 stamp (clear가 default row 비운 뒤). 데이터 끝(last_data_row)
-    # 다음 3행에 Fail/Pass/Total 카운트.
+    # 라운드 103 — spec_based 단일 TOTALS 행 + 상단 요약 (회사 감사본 v0.10 PV 정합).
+    # 기존 3행(Fail/Pass/Total) → 레퍼런스는 단일행 r1024 (COUNTA/SUM/COUNTIF 형식).
+    # clear 이후 stamp (clear가 default row 비운 뒤). 데이터 끝(last_data_row) 다음 1행.
     if spec_based and written > 0 and not is_swit_metric_layout:
         _write_spec_totals(
             ws,
             data_start=data_start,
             last_data_row=last_data_row,
             unit_id_col=unit_id_col,
-            stmt_label_col=stmt_count_col + 1,  # G (Fail/Pass/Total 라벨)
-            stmt_value_col=stmt_count_col + 2,  # H (count 수식)
-            branch_label_col=branch_count_col + 1,  # K
-            branch_value_col=branch_count_col + 2,  # L
             no_col=no_col,
+            stmt_count_col=stmt_count_col,
+            branch_count_col=branch_count_col,
             out_warnings=out_warnings,
+            out_stats=out_stats,
         )
         if out_warnings is not None:
             out_warnings.append(
@@ -1211,6 +1275,15 @@ def _write_coverage_sheet(
                     f"[spec-cov] 함수명↔SwUFn 매핑 실패 {spec_unmatched_count}건 — "
                     f"SwUDS 미등재 함수 (순차 SwUFn fallback). 예: "
                     f"{', '.join(spec_unmatched[:15])}"
+                )
+            if spec_unmeasured_names:
+                # ⚠ **건수는 여기서 세지 않는다.** 분모를 정하는 건 `_write_spec_totals` 의
+                #   셀 스캔이고, 같은 수를 두 곳에서 세면 갈라진다(이 저장소 1위 재발 패턴).
+                #   여기서는 "어느 함수인가" 라는 **다른 사실**만 보탠다.
+                out_warnings.append(
+                    f"[spec-cov] 미측정(Total=0) 함수 예시: "
+                    f"{', '.join(spec_unmeasured_names)}"
+                    f"{' …' if len(spec_unmeasured_names) >= 15 else ''}"
                 )
 
     if is_swit_metric_layout and written > 0:
@@ -1228,18 +1301,27 @@ def _write_coverage_sheet(
                 _dst.alignment = _copy_swit_total.copy(_src.alignment)
                 _dst.fill = _copy_swit_total.copy(_src.fill)
 
+        # 라운드 102 (2026-06-24) — totals 집계/기록 열을 행별 스탬프와 동일하게
+        # Component-aware로 보정 (reviewer Critical #1). 기존 하드코딩(no_col+4/+5/+8/+9)은
+        # DV 11열 전용이라 PV 10열에선 1칸 어긋나 Function Fail이 Exception 열을 읽어
+        # 항상 0 산출 + 잘못된 열 기록. _comp_off=0(PV)/1(DV)로 통일.
+        _tot_comp_off = 1 if has_component_col else 0
+        _fp_col = no_col + 3 + _tot_comp_off   # Functions Pass (O/X)
+        _fe_col = no_col + 4 + _tot_comp_off   # Functions Exception
+        _fcf_col = no_col + 7 + _tot_comp_off  # Function Called Pass (=fcalls_count_col+2)
+        _fce_col = no_col + 8 + _tot_comp_off  # Function Called Exception
         function_fail = 0
         function_exception = 0
         function_call_fail = 0
         function_call_exception = 0
         for rr in range(data_start, last_data_row + 1):
-            if str(ws.cell(rr, no_col + 4).value or "").strip().upper() == "X":
+            if str(ws.cell(rr, _fp_col).value or "").strip().upper() == "X":
                 function_fail += 1
-            if str(ws.cell(rr, no_col + 5).value or "").strip():
+            if str(ws.cell(rr, _fe_col).value or "").strip():
                 function_exception += 1
-            if str(ws.cell(rr, no_col + 8).value or "").strip().upper() == "X":
+            if str(ws.cell(rr, _fcf_col).value or "").strip().upper() == "X":
                 function_call_fail += 1
-            if str(ws.cell(rr, no_col + 9).value or "").strip():
+            if str(ws.cell(rr, _fce_col).value or "").strip():
                 function_call_exception += 1
 
         from openpyxl.cell.cell import MergedCell as _MC_swit_total_label
@@ -1253,11 +1335,16 @@ def _write_coverage_sheet(
             if isinstance(ws.cell(rr, no_col).value, int)
         )
         safe_write(ws, row_total, no_col, total_no_count or written)
-        safe_write(ws, row_total, total_label_col, "Total")
-        safe_write(ws, row_total, no_col + 4, function_fail)
-        safe_write(ws, row_total, no_col + 5, function_exception)
-        safe_write(ws, row_total, no_col + 8, function_call_fail)
-        safe_write(ws, row_total, no_col + 9, function_call_exception)
+        # 라운드 102 (2026-06-24) — 'Total' 라벨은 DV 11열 양식만(Unit ID 열에 기재,
+        # 회사 DV본·테스트 정합). PV 10열 회사 감사본은 totals 행에 'Total' 라벨이
+        # 없음(C1025:D1025 빈 병합 + COUNTA/COUNTIF 수식만) → 라벨 미기재. 기존엔
+        # PV에도 'Total'을 Unit ID(C) 열에 써서 index 열이 오염되는 결함(사용자 지적).
+        if has_component_col:
+            safe_write(ws, row_total, total_label_col, "Total")
+        safe_write(ws, row_total, _fp_col, function_fail)
+        safe_write(ws, row_total, _fe_col, function_exception)
+        safe_write(ws, row_total, _fcf_col, function_call_fail)
+        safe_write(ws, row_total, _fce_col, function_call_exception)
         if out_warnings is not None:
             out_warnings.append(
                 f"[swit-cov] Function/Function Call totals row stamp R{row_total} "
@@ -1302,34 +1389,125 @@ def _write_coverage_sheet(
                 finalize_medium_cols=None,
             )
 
+        # 라운드 102 (2026-06-24) — spec_based Component(C) 환경별 세로병합.
+        # 회사 감사본은 연속 동일 환경명(env_name.upper()) 행을 1셀로 병합
+        # (예 C10:C23=SWUT_01_LIB_SHA256 14행). 라운드 92의 비병합(감사본 오판독)을
+        # 레퍼런스 직접 비교로 반증 → 되돌림. 헤더(C8:C9) 보존 — data_start 이후만.
+        # normalize(테두리 다수결) 이후 실행: 개별 셀 정규화 후 병합해야 anchor 테두리
+        # 보존. slave 셀 값 제거 후 merge (anchor만 값 — 회사본 패턴).
+        from openpyxl.utils import get_column_letter as _gcl_merge
+        _comp_col = no_col + 1
+        _comp_letter = _gcl_merge(_comp_col)
+        _vals = []
+        for _rr in range(data_start, last_data_row + 1):
+            _cv = ws.cell(_rr, _comp_col).value
+            _vals.append(str(_cv).strip() if _cv not in (None, "") else "")
+        _merged_groups = 0
+        _i, _n = 0, len(_vals)
+        while _i < _n:
+            _j = _i
+            while _j + 1 < _n and _vals[_j + 1] == _vals[_i] and _vals[_i] != "":
+                _j += 1
+            if _j > _i:  # run length >= 2 → 병합
+                _a, _b = data_start + _i, data_start + _j
+                for _sr in range(_a + 1, _b + 1):
+                    try:
+                        ws.cell(_sr, _comp_col).value = None
+                    except (ValueError, AttributeError):
+                        pass
+                try:
+                    ws.merge_cells(f"{_comp_letter}{_a}:{_comp_letter}{_b}")
+                    _merged_groups += 1
+                except (ValueError, AttributeError):
+                    pass
+            _i = _j + 1
+        if out_warnings is not None and _merged_groups > 0:
+            out_warnings.append(
+                f"[spec-cov] 라운드 102 — Component(C) 환경별 세로병합 {_merged_groups}그룹 "
+                f"(회사 감사본 일치, env_name.upper())"
+            )
+
     return written
 
 
 def _write_spec_totals(
     ws, *, data_start: int, last_data_row: int,
     unit_id_col: int, no_col: int,
-    stmt_label_col: int, stmt_value_col: int,
-    branch_label_col: int, branch_value_col: int,
+    stmt_count_col: int, branch_count_col: int,
     out_warnings: list[str] | None = None,
+    out_stats: dict[str, Any] | None = None,
 ) -> None:
-    """라운드 92 — 회사 감사본 4.Coverage TOTALS 3행 (Fail/Pass/Total) + 상단 요약.
+    """라운드 103 — 회사 감사본(KJPDS02 v0.10 PV) 4.Coverage 단일 TOTALS 행 + 요약.
 
-    레퍼런스 (KJPDS02 v1.01) 실측 — H/L 열은 모두 수식:
-      r580: D='Total'  G='Fail'  H==COUNTIF(H10:H579,"Fail")  K='Fail'  L=COUNTIF(...)
-      r581:            G='Pass'  H==COUNTIF(H10:H579,"Pass")   K='Pass'  L=COUNTIF(...)
-      r582:            G='Total' H==SUM(H580:H581)             K='Total' L=SUM(...)
+    레퍼런스 실측 (단일행 r1024) — 컬럼은 component 레이아웃 기준:
+      D='Total'  E=COUNTA(name)=함수수  F=SUM(stmt count)  G=SUM(stmt total)
+      H=stmt fail(COUNTIF "X")  I=stmt exception(COUNTIF "O")
+      J=SUM(br count)  K=SUM(br total)  L=br fail  M=br exception
+    상단 요약 r5(Statement)/r6(Branch) (E/F/G/H 고정열):
+      E=Total  F=Fail Count  G=Exception  H=(E-F+G)/E → Exception 상쇄로 100%.
 
-    상단 요약 r5/r6 (양식 표준 v0.10 수식 `=E25`/`=H25` 등은 row 확장으로 cross-ref
-    갱신되나 단일 TOTALS 행을 가정 → 3행 구조와 misalign). 레퍼런스 수식 패턴으로
-    직접 덮어써 정합 보장:
-      r5 Statement: E==B<last_no_row>(함수 수=No 마지막) F==H<row_fail> H==(E5-F5)/E5
-      r6 Branch:    E==B<last_no_row>                   F==L<row_fail>
+    ⚠ **분모는 `E`(전체 행)가 아니라 실측 행 수다** (2026-08-04, §6 후보 8 / UTCV-001).
+    미측정(Total=0) 행은 `f != g` 가 거짓이라 Fail 로 안 세지는데 Exception 으로는
+    세어져 **분자에만** 더해졌다 → 정상 1행 + 미측정 2행이면 `(3-0+2)/3 = 166.67%`.
+    미측정을 분모에서 빼고, 뺀 사실을 `out_warnings` 로 보고한다. 실측 행이 0이면
+    숫자가 아니라 `"미측정"` 을 쓴다 — 0% 도 100% 도 아니다.
+    `E`(Total 행 수) 자체는 감사본 정합을 위해 그대로 둔다.
 
-    `safe_write` 대신 직접 cell.value 할당 — 'Pass'/'Fail'/숫자 수식 모두 stamp.
+    기존(라운드 92~100)은 3행(Fail/Pass/Total)이었으나 회사 v0.10 감사본은 단일행.
+    openpyxl 수식은 캐시가 없어 '안 보임'(라운드 93) → literal 값 stamp. H/L 데이터행은
+    `=IF(Count=Total,"O","X")` 수식이라 값 대신 F/G·J/K 직접 비교로 fail 산출.
+    `safe_write` 대신 직접 cell.value 할당.
     """
-    row_fail = last_data_row + 1
-    row_pass = last_data_row + 2
-    row_total = last_data_row + 3
+    import copy as _copy_tot
+
+    from openpyxl.cell.cell import MergedCell as _MC_tot
+    from openpyxl.styles import Font as _Font_tot
+
+    row_total = last_data_row + 1
+    name_col = unit_id_col + 1            # E
+    stmt_total_col = stmt_count_col + 1   # G
+    stmt_pass_col = stmt_count_col + 2    # H
+    stmt_exc_col = stmt_count_col + 3     # I
+    branch_total_col = branch_count_col + 1   # K
+    branch_pass_col = branch_count_col + 2    # L
+    branch_exc_col = branch_count_col + 3     # M
+    last_col = branch_exc_col + 1             # N (File)
+
+    # --- 집계 (데이터 영역 직접 스캔) ---
+    name_count = 0
+    stmt_cov_sum = stmt_tot_sum = branch_cov_sum = branch_tot_sum = 0
+    stmt_fail = branch_fail = stmt_exc = branch_exc = 0
+    # 미측정(Total=0) 행. **분모에서 뺀다** — 자세한 사유는 아래 `_cov_stmt` 주석.
+    stmt_unmeasured = branch_unmeasured = 0
+    for rr in range(data_start, last_data_row + 1):
+        if str(ws.cell(rr, name_col).value or "").strip():
+            name_count += 1
+        f = ws.cell(rr, stmt_count_col).value
+        g = ws.cell(rr, stmt_total_col).value
+        j = ws.cell(rr, branch_count_col).value
+        k = ws.cell(rr, branch_total_col).value
+        if isinstance(f, (int, float)):
+            stmt_cov_sum += f
+        if isinstance(g, (int, float)):
+            stmt_tot_sum += g
+        if isinstance(j, (int, float)):
+            branch_cov_sum += j
+        if isinstance(k, (int, float)):
+            branch_tot_sum += k
+        if isinstance(f, (int, float)) and isinstance(g, (int, float)) and f != g:
+            stmt_fail += 1
+        if isinstance(j, (int, float)) and isinstance(k, (int, float)) and j != k:
+            branch_fail += 1
+        # ⚠ `f != g` 로는 미측정을 못 본다 — 0/0 은 **같으므로** Fail 로 안 세어진다.
+        #   Total 이 0 인지 따로 봐야 한다(같은 원인으로 166.67% 가 나왔다).
+        if isinstance(g, (int, float)) and g == 0:
+            stmt_unmeasured += 1
+        if isinstance(k, (int, float)) and k == 0:
+            branch_unmeasured += 1
+        if str(ws.cell(rr, stmt_exc_col).value or "").strip().upper() == "O":
+            stmt_exc += 1
+        if str(ws.cell(rr, branch_exc_col).value or "").strip().upper() == "O":
+            branch_exc += 1
 
     def _set(rr, cc, val):
         try:
@@ -1337,94 +1515,100 @@ def _write_spec_totals(
         except (ValueError, AttributeError):
             pass
 
-    # 라운드 93 fix — 레퍼런스는 H/L 열이 (Excel 캐시된) literal 값. openpyxl이 쓴
-    # COUNTIF/SUM 수식은 캐시가 없어 파일 열기 전까지 공란("토탈결과 안 보임"). →
-    # 데이터 행(H/L)에서 직접 Pass/Fail을 count해 **literal 값**을 stamp.
-    def _metric_counts(count_col: int, total_col: int) -> tuple[int, int]:
-        n_fail = n_pass = 0
-        for rr in range(data_start, last_data_row + 1):
-            covered = ws.cell(rr, count_col).value
-            total = ws.cell(rr, total_col).value
-            if covered in (None, "") and total in (None, ""):
-                continue
-            if covered == total:
-                n_pass += 1
-            else:
-                n_fail += 1
-        return n_fail, n_pass
+    # --- 단일 TOTALS 행 (literal) ---
+    _set(row_total, unit_id_col, "Total")
+    _set(row_total, name_col, name_count)
+    _set(row_total, stmt_count_col, stmt_cov_sum)
+    _set(row_total, stmt_total_col, stmt_tot_sum)
+    _set(row_total, stmt_pass_col, stmt_fail)     # H = COUNTIF "X"
+    _set(row_total, stmt_exc_col, stmt_exc)       # I = COUNTIF "O"
+    _set(row_total, branch_count_col, branch_cov_sum)
+    _set(row_total, branch_total_col, branch_tot_sum)
+    _set(row_total, branch_pass_col, branch_fail)  # L
+    _set(row_total, branch_exc_col, branch_exc)    # M
 
-    stmt_fail, stmt_pass = _metric_counts(stmt_label_col - 1, stmt_label_col)
-    br_fail, br_pass = _metric_counts(branch_label_col - 1, branch_label_col)
-    from openpyxl.utils import get_column_letter as _gcl_tot
-    stmt_value_letter = _gcl_tot(stmt_value_col)
-    branch_value_letter = _gcl_tot(branch_value_col)
-    no_letter = _gcl_tot(no_col)
+    # --- 상단 요약 r5(Statement)/r6(Branch) (E/F/G/H 고정열) ---
+    #
+    # ⚠ 분모는 **실측 행 수**다(§6 후보 8 / UTCV-001). 예전엔 `name_count` 를 그대로 써서
+    #   미측정(Total=0) 행이 분모에 남았고, 그 행은 ①`f != g` 가 거짓이라 Fail 로 안 세고
+    #   ②`not passed` 라 Exception 으로는 세어져 **분자에만 더해졌다** →
+    #   실측 재현: 정상 1행 + 미측정 2행 → `(3 - 0 + 2)/3 = 166.67%`.
+    #
+    # ⚠ 산술만 정규화해 `(3-0+0)/3 = 100%` 로 만들면 **더 나쁘다**. 3함수 중 1함수만
+    #   측정했는데 100% 라고 말하는 것이고, 166.67% 라는 불가능한 값이 유일하게 시끄러운
+    #   신호였는데 그걸 조용한 정상값으로 바꾸는 셈이다(이 저장소가 반복해 겪은 fake-green).
+    #   그래서 미측정을 **분모에서 빼고**, 뺐다는 사실을 경고로 남긴다.
+    #
+    # ⚠ 실측 행이 0이면 커버리지는 0% 도 100% 도 아니라 **판정 불가**다. 숫자를 쓰지 않는다.
+    _stmt_den = name_count - stmt_unmeasured
+    _branch_den = name_count - branch_unmeasured
+    _cov_stmt = (
+        (_stmt_den - stmt_fail + stmt_exc) / _stmt_den if _stmt_den > 0 else None
+    )
+    _cov_branch = (
+        (_branch_den - branch_fail + branch_exc) / _branch_den if _branch_den > 0 else None
+    )
+    _set(5, 5, name_count)
+    _set(5, 6, stmt_fail)
+    _set(5, 7, stmt_exc)
+    _set(5, 8, _cov_stmt if _cov_stmt is not None else "미측정")
+    _set(6, 5, name_count)
+    _set(6, 6, branch_fail)
+    _set(6, 7, branch_exc)
+    _set(6, 8, _cov_branch if _cov_branch is not None else "미측정")
+    # 2026-08-26 — 문서에 찍히는 값을 **그대로** 호출부로 돌려준다.
+    #
+    # ⚠ 왜 필요한가: 이 양식(PV 정본)은 미달 행의 Exception 을 'O' 로 일괄 처리해
+    #   요약 Coverage 를 `(분모 - Fail + Exception)/분모` = **100%** 로 만든다
+    #   (:994 사용자 결정 — 회사 감사본 정합). 그런데 품질 게이트는 raw
+    #   `covered/total` 로 채점한다. 실측(KJPDS02 PV): 문서 100% ↔ 게이트 99.45%.
+    #   **같은 산출물을 두고 두 숫자가 다른데 그 격차가 어디에도 안 남았다.**
+    #   감사자가 문서만 보면 "달성", 화면만 보면 "미달"이고 왜 다른지 설명이 없다.
+    #   숫자를 여기서 다시 세면 판정이 두 벌이 되므로(이 저장소가 반복해 겪은 드리프트)
+    #   **라이터가 이미 시트를 스캔해 얻은 값 그대로** 넘긴다.
+    if out_stats is not None:
+        out_stats.update({
+            "coverage_fail_statement_functions": stmt_fail,
+            "coverage_fail_branch_functions": branch_fail,
+            "coverage_exception_statement_functions": stmt_exc,
+            "coverage_exception_branch_functions": branch_exc,
+            "coverage_unmeasured_statement_rows": stmt_unmeasured,
+            "coverage_unmeasured_branch_rows": branch_unmeasured,
+        })
+        # ⚠ 미측정이면 문서도 숫자를 안 쓴다("미측정"). 여기서 0.0 을 지어내지 않는다 —
+        #   부재와 0% 를 같은 값으로 만드는 건 이 파일이 이미 두 번 고친 결함이다.
+        if _cov_stmt is not None:
+            out_stats["doc_reported_statement_pct"] = round(_cov_stmt * 100, 2)
+        if _cov_branch is not None:
+            out_stats["doc_reported_branch_pct"] = round(_cov_branch * 100, 2)
 
-    # D 'Total' 라벨 (Unit ID col, 첫 row)
-    _set(row_fail, unit_id_col, "Total")
-    # Fail / Pass / Total row — literal count
-    _set(row_fail, stmt_label_col, "Fail")
-    _set(row_fail, stmt_value_col, f'=COUNTIF({stmt_value_letter}{data_start}:{stmt_value_letter}{last_data_row},"Fail")')
-    _set(row_fail, branch_label_col, "Fail")
-    _set(row_fail, branch_value_col, f'=COUNTIF({branch_value_letter}{data_start}:{branch_value_letter}{last_data_row},"Fail")')
-    _set(row_pass, stmt_label_col, "Pass")
-    _set(row_pass, stmt_value_col, f'=COUNTIF({stmt_value_letter}{data_start}:{stmt_value_letter}{last_data_row},"Pass")')
-    _set(row_pass, branch_label_col, "Pass")
-    _set(row_pass, branch_value_col, f'=COUNTIF({branch_value_letter}{data_start}:{branch_value_letter}{last_data_row},"Pass")')
-    _set(row_total, stmt_label_col, "Total")
-    _set(row_total, stmt_value_col, f"=SUM({stmt_value_letter}{row_fail}:{stmt_value_letter}{row_pass})")
-    _set(row_total, branch_label_col, "Total ")
-    _set(row_total, branch_value_col, f"=SUM({branch_value_letter}{row_fail}:{branch_value_letter}{row_pass})")
+    if (stmt_unmeasured or branch_unmeasured) and out_warnings is not None:
+        out_warnings.append(
+            f"[spec-cov] 미측정(Total=0) 행 — Statement {stmt_unmeasured}건 / "
+            f"Branch {branch_unmeasured}건 (전체 {name_count}행). Exception 으로 표기하지 "
+            f"않고 커버리지 분모에서 제외했다. 분모: Statement {_stmt_den} / Branch {_branch_den}."
+        )
 
-    # 상단 요약 r5(Statement)/r6(Branch) — literal: E=Total, F=Fail Count,
-    # G=Exception(=Fail, 레퍼런스 패턴), H=Coverage 비율((Total-Fail+Exception)/Total).
-    # 레퍼런스: Fail이 전부 deviation/exception으로 간주되어 H=1.0.
-    _set(5, 5, f"='{getattr(ws, 'title', '4. Coverage')}'!{no_letter}{last_data_row}")
-    _set(5, 6, f"={stmt_value_letter}{row_fail}")
-    _set(5, 7, stmt_fail)
-    _set(5, 8, "=(E5-F5+G5)/E5")
-    _set(6, 5, f"={no_letter}{last_data_row}")
-    _set(6, 6, f"={branch_value_letter}{row_fail}")
-    _set(6, 7, br_fail)
-    _set(6, 8, "=(E6-F6+G6)/E6")
-
-    # 라운드 100 — TOTALS 3행 폰트 통일. _set은 value만 stamp → 양식 기본(11.0)
-    # 잔존 (REF는 맑은 고딕 10.0). 정상 데이터행(data_start) name/size를 기준으로
-    # bold/italic은 명시 off (REF Total 라벨은 not bold/italic — data_start 행이
-    # italic일 수 있어 직접 복제 시 기울임 전파). 사용자 보고 "폰트/셀설정 토탈부분까지".
-    from openpyxl.cell.cell import MergedCell as _MC_tot
-    from openpyxl.styles import Font as _Font_tot
-    _base = ws.cell(data_start, unit_id_col).font
-    _ref_font = _Font_tot(name=_base.name, size=_base.size, bold=False, italic=False)
-    for _rr in (row_fail, row_pass, row_total):
-        for _cc in (unit_id_col, stmt_label_col, stmt_value_col,
-                    branch_label_col, branch_value_col):
-            _cell = ws.cell(_rr, _cc)
-            if not isinstance(_cell, _MC_tot):
-                _cell.font = _ref_font
-
-    # 라운드 96-final W-13 — Total 블록 회색 음영 재배치 (+3 오프셋 보정).
-    # 템플릿(v0.10) 마지막 3행이 Total 블록(회색 음영)인데, row 확장
-    # (auto_expand_row_block, insert_at=data_start+1)이 그 3행을 정확히 마지막
-    # 데이터 3행 위치로 밀어낸다 (shortage = needed_last - old_max → 템플릿 끝
-    # 3행의 신규 위치 = 마지막 함수행-2..마지막 함수행). 한편 실제 Total 블록은
-    # last_data_row+1..+3에 stamp → 음영이 데이터행에 +3 오프셋으로 잘못 표시
-    # (PV 검증 W-13). 마지막 함수행 기준으로: 데이터 3행(row-3)의 음영이 기준
-    # 데이터행(data_start)과 다르면 Total 행으로 fill 이동 + 데이터행 fill 정상화.
-    # ASIL/노란 마킹 등 의도된 마커 fill은 제외 (이동 금지). 음영이 검출되지
-    # 않으면 no-op — row 확장이 없었던 빌드/소형 데이터에 무영향.
-    import copy as _copy_shade
+    # --- 스타일 ---
+    # 폰트: 데이터행(data_start) name/size, bold/italic off (REF Total 라벨 정합).
+    _bf = ws.cell(data_start, unit_id_col).font
+    _ref_font = _Font_tot(name=_bf.name, size=_bf.size, bold=False, italic=False)
 
     from backend.services.design_tokens import (
-        ASIL_A_FILL_RGB, ASIL_B_FILL_RGB, ASIL_C_FILL_RGB, ASIL_D_FILL_RGB,
-        ASIL_QM_FILL_RGB, FAIL_FILL_RGB, USER_INPUT_FILL_RGB,
+        ASIL_A_FILL_RGB,
+        ASIL_B_FILL_RGB,
+        ASIL_C_FILL_RGB,
+        ASIL_D_FILL_RGB,
+        ASIL_QM_FILL_RGB,
+        FAIL_FILL_RGB,
+        USER_INPUT_FILL_RGB,
     )
     _marker_rgbs = {
         ASIL_A_FILL_RGB, ASIL_B_FILL_RGB, ASIL_C_FILL_RGB, ASIL_D_FILL_RGB,
         ASIL_QM_FILL_RGB, FAIL_FILL_RGB, USER_INPUT_FILL_RGB,
     }
 
-    def _fill_sig(_c) -> tuple | None:
+    def _sig(_c) -> tuple | None:
         _f = _c.fill
         try:
             if _f is None or _f.fill_type is None:
@@ -1433,31 +1617,55 @@ def _write_spec_totals(
         except AttributeError:
             return None
 
-    _shade_last_col = branch_value_col + 4  # 데이터 우측 끝 (clear range와 동일 폭)
-    _relocated = 0
-    for _tr in (row_fail, row_pass, row_total):
-        _sr = _tr - 3
-        if _sr <= data_start:  # 데이터 3행 미만 — 비교 기준행과 겹침, skip
+    # 음영: 레퍼런스 Total 행은 회색 solid. auto_expand가 템플릿 footer Total 행(회색)을
+    # 데이터 끝 근처로 밀어냄 → 그 회색을 캡처해 row_total에 적용 + 데이터영역 잔재행은
+    # 백색(data_start fill) 복원. marker(ASIL/노란/FAIL) fill은 보존(이동 금지).
+    _base_sig = _sig(ws.cell(data_start, no_col))
+    _gray_fill = None
+    for _sr in range(max(data_start + 1, last_data_row - 4), last_data_row + 1):
+        _c = ws.cell(_sr, no_col)
+        if isinstance(_c, _MC_tot):
             continue
-        for _cc in range(no_col, _shade_last_col + 1):
-            _src_c = ws.cell(_sr, _cc)
-            _dst_c = ws.cell(_tr, _cc)
-            _base_c = ws.cell(data_start, _cc)
-            if isinstance(_src_c, _MC_tot) or isinstance(_dst_c, _MC_tot):
-                continue
-            _src_sig = _fill_sig(_src_c)
-            if _src_sig is None or _src_sig == _fill_sig(_base_c):
-                continue  # 무음영 또는 정상 데이터행과 동일 — 이동 불필요
-            if _src_sig[1] in _marker_rgbs:
-                continue  # ASIL/노란/FAIL 마커 — 의도된 데이터행 강조, 보존
-            _dst_c.fill = _copy_shade.copy(_src_c.fill)
-            if not isinstance(_base_c, _MC_tot):
-                _src_c.fill = _copy_shade.copy(_base_c.fill)
-            _relocated += 1
-    if _relocated and out_warnings is not None:
+        _s = _sig(_c)
+        if _s is None or _s == _base_sig or (_s[1] in _marker_rgbs):
+            continue
+        if _gray_fill is None:
+            _gray_fill = _copy_tot.copy(_c.fill)
+        for _cc in range(no_col, last_col + 1):
+            _dc = ws.cell(_sr, _cc)
+            _bc = ws.cell(data_start, _cc)
+            if not isinstance(_dc, _MC_tot) and not isinstance(_bc, _MC_tot):
+                _dc.fill = _copy_tot.copy(_bc.fill)
+
+    # row_total 스타일 적용: 테두리/정렬은 마지막 데이터행 복제, 폰트 통일, 회색 음영.
+    _rt_sig = _sig(ws.cell(row_total, no_col))
+    _rt_has_gray = (
+        _rt_sig is not None and _rt_sig != _base_sig and _rt_sig[1] not in _marker_rgbs
+    )
+    for _cc in range(no_col, last_col + 1):
+        _src = ws.cell(last_data_row, _cc)
+        _dst = ws.cell(row_total, _cc)
+        if isinstance(_dst, _MC_tot):
+            continue
+        if not isinstance(_src, _MC_tot):
+            _dst.border = _copy_tot.copy(_src.border)
+            _dst.alignment = _copy_tot.copy(_src.alignment)
+        _dst.font = _ref_font
+        if _gray_fill is not None and not _rt_has_gray:
+            _dst.fill = _copy_tot.copy(_gray_fill)
+
+    if out_warnings is not None:
+        # ⚠ `:.3f` 를 직접 쓰지 않는다 — 실측 행이 0이면 `_cov_*` 가 `None` 이라
+        #   TypeError 로 **경고 자체가 죽는다**(그러면 미측정 사실이 침묵한다).
+        def _cov_text(value):
+            return "미측정" if value is None else f"{value:.3f}"
+
         out_warnings.append(
-            f"[spec-cov] Total 블록 회색 음영 {_relocated}셀 재배치 — 데이터행 "
-            f"잔존(+3 오프셋) → R{row_fail}~R{row_total} (라운드 96-final W-13)"
+            f"[spec-cov] 라운드 103 단일 TOTALS 행 R{row_total} — "
+            f"Statement(함수 {name_count}/Fail {stmt_fail}/Exc {stmt_exc}/"
+            f"Cov {_cov_text(_cov_stmt)}) "
+            f"Branch(Fail {branch_fail}/Exc {branch_exc}/Cov {_cov_text(_cov_branch)})"
+            + ("" if (_gray_fill or _rt_has_gray) else " [경고: Total 회색 음영 미검출]")
         )
 
 
@@ -2190,7 +2398,8 @@ def _write_consistency_sheet_spec(
     old_max = ws.max_row
     if needed_last_row > old_max:
         from backend.services.excel_template_utils import (
-            auto_expand_row_block, push_sentinel_to_last_row,
+            auto_expand_row_block,
+            push_sentinel_to_last_row,
             update_cross_refs_after_row_expansion,
         )
         shortage = needed_last_row - old_max
@@ -2252,6 +2461,8 @@ def _write_consistency_sheet_spec(
 
     from backend.services.design_tokens import (
         INDEX_COL_SHADE_RGB,
+    )
+    from backend.services.design_tokens import (
         USER_INPUT_FILL_RGB as _user_fill_rgb,
     )
     from backend.services.excel_template_utils import (
@@ -2309,6 +2520,7 @@ def _write_consistency_sheet(
     *,
     test_kind: str = "SwUTS",
     agg: dict[str, Any] | None = None,
+    swuds_skip_reason: str = "",
 ) -> int:
     """2.Consistency 시트 — {test_kind} 자체 일관성 + SwUDS↔{test_kind} 매핑 (16차).
 
@@ -2349,16 +2561,30 @@ def _write_consistency_sheet(
     )
 
     # 안내문 + 헤더 + data
+    #
+    # ⚠ **2026-08-04 정직성 수정.** 옛 else 문구는 *"swuds_docx_path 옵션 제공 시 자동
+    #   활성화"* 라 **경로를 안 줬다고 단정**했다. 그런데 `swuds_function_ids is None` 은
+    #   ① 경로 미지정 ② 읽기 실패(cloudium 차단·권한·부재) ③ parse 실패 를 모두 접은 값이다.
+    #   실측(2026-08-04, KJPDS02·HDPDM01): 두 프로젝트 다 `swuds_docx_path` 가 **설정돼
+    #   있는데** allowed_prefixes 밖이라 PermissionError → None. 즉 ISO 26262 감사 증거
+    #   문서가 "엔지니어가 문서를 제공하지 않음" 으로 원인을 **잘못 귀속**하고 있었다.
+    #   미검증 사실은 그대로 두되 **사유를 지어내지 않는다**.
     if swuds_function_ids is not None:
         intro = (
             f"본 시트는 {test_kind} 내부 자체 일관성 + SwUDS↔{test_kind} 함수 ID 매핑 "
             "자동 검증 결과 (16차 v3.02). FAIL 행은 reviewer 검토 + audit evidence 보강 필요."
         )
+    elif swuds_skip_reason:
+        intro = (
+            f"본 시트는 {test_kind} 내부 자체 일관성 4 항목 자동 검증 결과. "
+            f"SwUDS↔{test_kind} 함수 ID 매핑 비교는 **수행되지 않았다** — 사유: "
+            f"{swuds_skip_reason}"
+        )
     else:
         intro = (
             f"본 시트는 {test_kind} 내부 자체 일관성 4 항목 자동 검증 결과. "
-            f"SwUDS↔{test_kind} 함수 ID 매핑 비교는 swuds_docx_path 옵션 제공 시 "
-            "자동 활성화 (16차)."
+            f"SwUDS↔{test_kind} 함수 ID 매핑 비교는 **수행되지 않았다** "
+            "(SwUDS 경로 미지정 / 읽기 실패 / parse 실패 중 하나 — 빌드 warnings 참조). 16차"
         )
     safe_write(ws, 1, 1, intro)
     safe_write(ws, 3, 1, "Item")
@@ -2448,7 +2674,8 @@ def _write_consistency_sheet(
 
         if needed_last_row > ws.max_row:
             from backend.services.excel_template_utils import (
-                auto_expand_row_block, push_sentinel_to_last_row,
+                auto_expand_row_block,
+                push_sentinel_to_last_row,
                 update_cross_refs_after_row_expansion,
             )
             shortage = needed_last_row - ws.max_row
@@ -2601,7 +2828,9 @@ def _write_traceability_spec_diagonal(
     if not ws or not swufn_ids:
         return 0
     from backend.services.excel_template_utils import (
-        auto_expand_row_block, clear_data_range, push_sentinel_to_last_row,
+        auto_expand_row_block,
+        clear_data_range,
+        push_sentinel_to_last_row,
     )
 
     ws_title = getattr(ws, "title", "Traceability").strip()
@@ -2927,7 +3156,8 @@ def _write_traceability_sheet(
         if needed_last_row > ws.max_row:
             try:
                 from backend.services.excel_template_utils import (
-                    auto_expand_row_block, push_sentinel_to_last_row,
+                    auto_expand_row_block,
+                    push_sentinel_to_last_row,
                 )
                 shortage = needed_last_row - ws.max_row
                 auto_expand_row_block(
@@ -3063,7 +3293,8 @@ def _write_traceability_sheet(
     if missing_tcs_with_col:
         try:
             from backend.services.excel_template_utils import (
-                auto_expand_row_block, push_sentinel_to_last_row,
+                auto_expand_row_block,
+                push_sentinel_to_last_row,
             )
             last_existing_row = max(tc_row_index.values()) if tc_row_index else data_start
             inserted = auto_expand_row_block(
@@ -3126,6 +3357,7 @@ def build_coverage_report(
     swuds_function_ids: set[str] | None = None,
     swuts_map: dict[str, Any] | None = None,
     hmr_html_bytes: bytes | None = None,
+    swuds_skip_reason: str = "",
 ) -> CoverageBuildResult:
     """Coverage Report v3.01 xlsx 생성.
 
@@ -3289,6 +3521,9 @@ def build_coverage_report(
         "passed": agg["passed"],
         "failed": agg["failed"],
         "function_rows": agg["function_count"],
+        # Quality DB 기록용 커버리지 roll-up (구문/분기/MC-DC %). MC-DC 표면화.
+        # agg["function_rows"] = aggregate_session 이 반환한 FunctionCoverage 리스트.
+        **compute_coverage_rollup(agg.get("function_rows") or []),
         "swuts_name_to_swufn_used": len(swuts_name_to_swufn),
         "template_mapping_drift": agg.get("template_mapping_drift", {}),
         # 30차 W21 + 31차 W29: ASIL 등급 분포 + 등급별 함수 ID.
@@ -3338,11 +3573,17 @@ def build_coverage_report(
         # (a) enhance_function_coverage_with_file로 dedup key 정확성 향상
         # (b) update_cross_refs_after_row_expansion으로 cross-ref formula 동적 갱신
         # (c) auto_expand_row_block + push_sentinel_to_last_row로 양식 row 확장 + sentinel push
+        # 2026-08-26 — 문서가 적는 값(면제 상쇄 후 Coverage)과 미달/면제 건수를 받아
+        # summary 로 올린다. 게이트는 raw 로 채점하되 **문서와의 격차가 보이게** 한다
+        # (`_write_spec_totals` 의 out_stats 주석 참조).
+        _cov_stats: dict[str, Any] = {}
         n_written = _write_coverage_sheet(
             cov_ws, agg, layout=layout, out_warnings=warnings,
             c_function_map=session.c_function_map or None,
+            out_stats=_cov_stats,
         )
         summary["coverage_rows_written"] = n_written
+        summary.update(_cov_stats)
 
     # 1.Traceability — T133 본격 작성 (TC×Function 매트릭스)
     # 라운드 F7 D1 fix: incomplete_sheets에 실제 시트 이름 보고 — 회사 표준은
@@ -3368,6 +3609,7 @@ def build_coverage_report(
             swuds_function_ids=swuds_function_ids,
             out_warnings=warnings,
             agg=agg,
+            swuds_skip_reason=swuds_skip_reason,
         )
         summary["consistency_self_check_rows"] = n_cons
         # 라운드 95 — spec_based(KJPDS02)는 agg SwUDS name→SwUFn 매핑으로 정합성을
@@ -3420,6 +3662,14 @@ def build_coverage_report(
         warnings.append(
             f"AuditLog 시트 작성 실패 (산출물 영향 0): {type(_e).__name__}: {str(_e)[:80]}"
         )
+
+    # 라운드 107 — 템플릿/기입 수식(요약블록·Coverage·O/X)을 openpyxl이 캐시 미저장
+    # (cached=None) → 재계산 안 하는 뷰어에서 공백. fullCalcOnLoad로 열 때 자동 재계산
+    # (SwITCV 라운드 102 정합). 캐시 미저장은 불변이라 data_only 다운스트림 영향 0.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # pragma: no cover — openpyxl 버전 차 방어
+        pass
 
     # 14차 W1: BytesIO 그대로 result에 저장 — getvalue() copy 회피.
     out = io.BytesIO()
