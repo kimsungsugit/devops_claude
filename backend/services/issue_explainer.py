@@ -121,6 +121,11 @@ _RULE_ACTION: Dict[str, str] = {
                                     "전폭 대조 · 약한 후보 · 설계 밖 입력 행뿐)이면 '밖 없음' 이 아니다 — 설계 범위를 타입보다 좁게 "
                                     "적거나 입력 범위를 적어야 대조가 된다. 같은 이름의 정의가 여럿(APP · BOOT)인 함수의 '밖' 은 "
                                     "단정하지 않았다 — 빌드마다 표를 두거나 표가 어느 빌드의 것인지 밝힌다.",
+    # (R96 review I2) the scope is a fact of the documents (SwUDS vs source), not a generation deficit
+    "disclosure:suts_test_scope": "시험 범위에서 뺀 함수다 — 사유별로 문서를 고친다: SwUDS 에 설계가 없으면 설계를 더하고, 머리말을 "
+                                  "읽지 못했으면 `SwUFn_NNNN: 이름` 으로 고치고, 삭제 표시면 설계와 소스 중 맞는 쪽으로 맞춘다. "
+                                  "동명이인(APP/FBL 쌍둥이)은 이번 판의 한계라 범위 `source` 로 시험할 수 있다. 재생성만으로는 "
+                                  "바뀌지 않는다. SwUDS 범위를 적용하지 못했다고 하면 SwUDS 입력부터 확인한다.",
     "disclosure:suts_range_conflicts": "설계서의 값 범위가 선언 타입 폭을 벗어난다 — 설계서와 소스 중 틀린 쪽을 고친다(시험은 타입 폭으로 했다).",
     "disclosure:suts_asil_evidence": "근거 없는 ASIL 이 있다 — 등급을 지어내지 않았으니 SwUDS·SwDS 에서 정하거나 소스에 @asil 을 단다.",
     "disclosure:sts_mapping_basis": "약한 근거(부분 문자열·추측 매칭)로 요구에 붙은 함수가 있다 — 추적성 판정 때 따로 보고, SwDS Related "

@@ -1945,6 +1945,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     out.extend(_build_assumption_item(qr.get("build_assumptions"), "suts_build_assumptions"))   # (R17)
     out.extend(_body_projection_item(qr.get("body_projection"), "suts_body_projection"))       # (R62)
     out.extend(_uds_reading_item(qr.get("uds_reading")))                                         # (R65)
+    out.extend(_test_scope_item(qr.get("test_scope")))                                           # (R96)
     out.extend(_uds_const_inputs_item(qr.get("uds_const_inputs")))                               # (R67)
     out.extend(_design_check_item(qr.get("design_check")))                                       # (R90)
     out.extend(_pointer_parameters_item(qr.get("pointer_parameters")))                          # (R81)
@@ -2646,6 +2647,68 @@ def _pointer_parameters_item(block: Any) -> List[Dict[str, Any]]:
         tone=_tone(bool(dropped) or bool(over) or bool(errors)))]
 
 
+# (R96) 사유 → (공시 문장, 짧은 이름). 안내는 **실행할 수 있는 것**만 적는다(리뷰 W4 — 동명이인은 대개 APP/FBL 쌍둥이 ·
+#   모듈별 static 이라 소스 이름이 같아, 머리말 이름을 바꾸라는 안내는 두 함수를 모두 '없음' 으로 만든다)
+_SCOPE_REASON = {
+    "absent": ("SwUDS 에 그 이름의 설계가 없음(설계서 누락 후보 — SwUDS 에 설계를 더하면 그 함수의 시험이 생긴다)", "SwUDS 에 없음"),
+    "table_only": ("함수 표는 있는데 설계 머리말을 읽지 못함(머리말 오타 — `SwUFn_NNNN: 이름` 으로 고치면 시험이 생긴다)",
+                   "머리말 못 읽음(표만 있음)"),
+    "heading_unread": ("설계 머리말의 이름 뒤 글을 읽지 못함(`SwUFn_NNNN: 이름` 뒤에 괄호 표시만 두면 읽는다)", "머리말 표기"),
+    "alias_dropped": ("표 Name 행 이름이 머리말과 달라 별칭으로 찾는데, 머리말 이름도 소스 함수라 어느 함수의 표인지 못 정함"
+                      "(머리말과 표 Name 을 맞출 것)", "별칭 충돌"),
+    "ambiguous": ("같은 이름의 설계가 둘 이상이라 이름만으로 어느 설계인지 정하지 못함(APP/FBL 쌍둥이 · 모듈별 static — 이번 판의 "
+                  "한계, 정본은 둘 다 시험한다; 시험 범위 `source` 를 고르면 시험한다)", "동명이인"),
+    "deleted": ("SwUDS 가 그 설계에 삭제 표시(설계 삭제가 맞으면 소스에서 지울 것, 아니면 SwUDS 표시를 고칠 것)", "삭제 표시"),
+}
+
+
+def _test_scope_item(block: Any) -> List[Dict[str, Any]]:
+    """(R96) SUTS 시험 범위 — **실제로 적용한** 범위와, 뺀 소스 함수의 이름 · 사유. 개수만 진행 메시지에 남던 것을 공시로.
+
+    리뷰 C1: 범위가 `source` 이거나, `suds` 를 요청했지만 설계 ID 를 하나도 얻지 못해 좁히지 못했으면(= 소스 전체를 시험) "SwUDS
+    기반 · 정본과 같은 범위" 라고 적지 않는다. 범위 판정 문장(`notes` — 알 수 없는 범위 값 포함)도 싣는다."""
+    if not isinstance(block, dict) or _int(block, "source_functions") is None:
+        return []
+    excluded = [e for e in (block.get("excluded_functions") or []) if isinstance(e, dict)]
+    n_excluded = _int(block, "excluded") or 0
+    why = block.get("by_reason") if isinstance(block.get("by_reason"), dict) else {}
+    notes = [str(n) for n in (block.get("notes") or []) if n]
+    scope, applied = str(block.get("scope") or ""), bool(block.get("applied"))
+    total, tested = _show(_int(block, "source_functions")), _show(_int(block, "tested"))
+    if scope == "source":
+        label, value = "시험 범위(소스 전체)", f"소스 함수 {total} 전부 시험(SwUDS 미대조)"
+        lead = "시험 범위 `source` 로 설계서와 무관하게 소스의 모든 함수를 시험했다 — 정본(SwUDS 기반)보다 넓을 수 있다."
+    elif not applied:
+        label, value = "시험 범위(SwUDS 기반 — 적용 못 함)", f"소스 함수 {total} 전부 시험(SwUDS 설계 ID 0)"
+        lead = ("SwUDS 기반 범위를 요청했지만 SwUDS 설계 ID 를 하나도 얻지 못해 범위를 좁히지 못했다 — 소스 전체를 시험했으므로 "
+                "정본과 같은 범위가 아니다(SwUDS 를 주거나 'SwUDS 판독' 항목을 볼 것).")
+    else:
+        label = "시험 범위(SwUDS 기반)"
+        value = (f"소스 함수 {total} 중 시험 {tested} · 제외 {_show(_int(block, 'excluded'))}"
+                 + (" (" + " · ".join(f"{_SCOPE_REASON.get(k, (k, k))[1]} {v}" for k, v in sorted(why.items())) + ")"
+                    if why else ""))
+        lead = "SwUDS 가 설계 ID 를 준 함수만 시험했다(정본과 같은 범위)."
+    per_reason = []
+    for reason in _SCOPE_REASON:
+        names = [str(e.get("name")) for e in excluded if e.get("reason") == reason]
+        if names:
+            seen: Dict[str, int] = {}
+            for n in names:
+                seen[n] = seen.get(n, 0) + 1
+            shown = [f"{n} ×{c}" if c > 1 else n for n, c in seen.items()]     # (리뷰 I4) 쌍둥이 이름을 두 번 적지 않는다
+            per_reason.append(f"{_SCOPE_REASON[reason][0]} {len(names)}개(예: {_head(shown)})")
+    note = lead
+    if n_excluded:
+        note += (" 시험하지 않은 함수 " + str(n_excluded) + "개 — " + ("; ".join(per_reason) or "이름 목록 없음")
+                 + ". 전체 이름은 품질 보고서 `test_scope.excluded_functions` 에 있다.")
+    elif applied:
+        note += " 뺀 함수 없음."
+    if notes:
+        note += " 범위 판정: " + " ".join(notes)
+    return [_item("suts_test_scope", label, value, note,
+                  tone=_tone(bool(n_excluded) or (scope != "source" and not applied) or bool(block.get("unknown_value"))))]
+
+
 def _uds_reading_item(block: Any) -> List[Dict[str, Any]]:
     """(R65) SwUDS 를 어떻게 읽었나 — 표시 붙은 머리말 · 표 Name 별칭 · 삭제 표시 · 세로 병합으로 이어진 행 · 이름으로 못 읽은 행 ·
     Value Range 판독(범위 · 값 목록 · 사유별 못 읽은 칸과 '고치면' 안내). SwUDS 를 주지 않았으면 말하지 않는다."""
@@ -2665,6 +2728,8 @@ def _uds_reading_item(block: Any) -> List[Dict[str, Any]]:
     deleted = [str(x) for x in (block.get("deleted_headings") or [])]
     dropped = [str(x) for x in (block.get("alias_dropped_source") or [])]
     superseded = [str(x) for x in (block.get("superseded_headings") or [])]
+    variant = [str(x) for x in (block.get("variant_headings") or [])]
+    unattached = [str(x) for x in (block.get("unattached_tables") or [])]
     deleted_src = [str(x) for x in (block.get("deleted_in_source") or [])]
     rows_unread = [r for r in (block.get("rows_unread_samples") or []) if isinstance(r, dict)]
     unread_total = sum(int(v) for v in why.values())
@@ -2681,6 +2746,13 @@ def _uds_reading_item(block: Any) -> List[Dict[str, Any]]:
            + ")는 표시를 떼고 이름을 읽었다"
            + (f" — 이 문서의 unit {len(marked_units)}개가 그 표의 입출력 · 범위 · 설계 ID 를 쓴다." if marked_units else ".")
            if _int(block, "marked_headings") else "")
+        + (f" 표기가 규칙(`SwUFn_NNNN: 이름`)과 다른 설계 머리말 {len(variant)}개(콜론 없음 · `SWUFn_` 대소문자 — 예: "
+           + ", ".join(f"`{x}`" for x in variant[:_HEAD_N])
+           + ")도 머리말로 읽어 설계 ID 를 `SwUFn_` 으로 적었다 — 문서 표기를 규칙대로 맞추면 다른 도구도 같은 함수를 찾는다."
+           if variant else "")
+        + (f" 설계 머리말에 붙지 않은 함수 표 {len(unattached)}개(표 Name 행: {_head(unattached)}) — 앞의 머리말을 읽지 못했다"
+           "(오타 등). 그 함수는 설계 ID · 입출력 표를 받지 못한다 — 머리말을 `SwUFn_NNNN: 이름` 으로 고칠 것."
+           if unattached else "")
         + (" 머리말과 함수 표 Name 행이 다른 함수: " + "; ".join(aliases[:_HEAD_N])
            + " — 표 Name 행 이름으로도 찾는다(문서 안 불일치이므로 한쪽을 고칠 것)"
            + (f"; 그렇게 찾은 unit {len(alias_units)}개." if alias_units else ".") if aliases else "")
@@ -2708,7 +2780,7 @@ def _uds_reading_item(block: Any) -> List[Dict[str, Any]]:
            f"{_show(_int(block, 'unit_vars_uds_values'))}개." if _int(block, "values_read") else "")
         + (" 읽은 표기: " + " · ".join(f"{_UDS_NOTATION_LABELS.get(k, k)} {v}" for k, v in sorted(notation.items()))
            + "." if notation else ""),
-        tone=_tone(bool(_int(block, "rows_unread") or aliases or unit_unread or dropped or deleted_src)))]
+        tone=_tone(bool(_int(block, "rows_unread") or aliases or unit_unread or dropped or deleted_src or unattached)))]
 
 
 def _source_reading_item(block: Any, key: str, doc: str = "suts") -> List[Dict[str, Any]]:

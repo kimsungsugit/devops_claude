@@ -2153,3 +2153,32 @@ MC/DC는 별도 P2로 진행하며, 실제 변수 입력을 평가해 다른 원
   - do-while(0) 매크로를 미지 코드로 읽는다.
   - G7~G13.
   - 다음 단계는 정밀도 회복이다. 루프 없는 비해석 callee 는 쓰지 않는 레지스터를 보존한다(HD havoc callee 13 중 11).
+
+## R96 기록 — SwUDS 설계 머리말의 표기 흔들림을 읽고, 시험 범위가 실제로 무엇이었는지와 뺀 함수를 이름 · 사유로 공시 (2026-10-17, R168)
+
+- **왜**: 사용자 "필요한 문서들 필요한 부분들 근본적인것들 다 잘 체크해서". 능력치 수치를 점검하다 측정기의 분모를 열어 봤다.
+  - 세 묶음 판정기(`r94_three.py`)는 정본 SwUTS 가 시험하는데 **우리 SUTS 에 없는 함수를 분모에서 뺐다**(`all(n in gen[g][0] …)`). 정렬된 정본 함수 중 HD 11 · PV 37 이 그렇게 빠져 있었다 — "정본만 잡은 결함 0" 은 그 함수들을 빼고 낸 수치였다.
+  - 빠진 이유는 SUTS 의 SwUDS 기반 시험 범위다(설계 ID 가 있는 함수만 시험).
+    - HD 11: SwUDS v1.07 에 **있다**. 머리말 13 개가 `SwUFn_NNNN: 이름` 규칙과 달랐다 — 콜론 없음 8(`SwUFn_1343 s_GetTemperature`), 대문자 `SWUFn_` 2, 둘 다 2, 개명 꼬리 1(`SWUFn_1132 s_TunningParamRead <- g_SysEepromCtrl_TunningParamRead (New)`). 판독기가 머리말로 보지 않아 설계 ID · 입출력 표를 잃었다(우리 결함).
+    - PV 37: SwUDS v3.03 에 이름 자체가 **없다**(소스 · 정본 SwUTS 에는 있다 — `s_DoorHolding_*` 19 · `g_Ap_MotorCtrl_GetSlip*` 4 · `s_UDS_*` 4 …). 설계서 누락 후보인데, 범위 판정 문장은 진행 메시지로만 나가 산출물 · 공시 어디에도 이름이 남지 않았다.
+- **무엇**:
+  - `generators/uds_design_ids.py`(설계 ID · 입출력 두 로더의 단일 판독기):
+    - 설계 ID 낱말 `(?i:SwUFn)_\d+`, `canonical_design_id`(`SWUFn_1133` → `SwUFn_1133` — 정본 SwUTS 도 그렇게 적는다: sharedStrings 대소문자 구분 0 · 무시 2).
+    - 콜론 없는 머리말 `_BARE_HEADING`: 문단 **전체**가 ID · 식별자 · (선택) `<- 옛이름` · (선택) 괄호 표시 하나일 때만. 설명 글이 붙으면(`SwUFn_0101 main 함수`) 본문 문장일 수 있어 머리말이 아니다(콜론 꼴은 그대로).
+    - 빠른 거름(`iter_design_entries`)도 대소문자 무관 — 문법만 넓혔을 때 문서 단위 시험이 `SWUFn_` 4 개가 여전히 빠지는 것을 잡았다.
+    - 개명 꼬리 `<- 옛이름` 은 `renamed_from` 으로 떼고 남은 표시로 상태를 판정한다(리뷰 W3 — 떼지 않으면 `<- g_Y (삭제)` 가 살아 있는 설계로 읽혀 같은 이름 `(New)` 와 동명이인이 된다). 꼬리 뒤에 붙은 글은 이름을 바꾸지 않는다(2차 W1 — HEAD 와 같은 plain).
+    - 머리말에 붙지 않은 **함수 표**(`[ Function Information ]`)의 Name 행을 `unattached_tables` 로 낸다(리뷰 W2 — HD `EnUserSwUFn_2302: PP0_MOTOR_PWM_Init` 은 머리말 앞 글자 오타로 표가 조용히 버려졌다).
+    - `variant`(`no_colon` · `case`) · `variant_headings` · `unattached_tables` 를 두 로더가 같게 내고 SwUDS 판독 공시가 적는다(고아 표는 경고).
+  - `generators/suts.py` `scope_units(units, scope, design_ids)`: 범위 적용과 요약을 한 함수로(`apply_scope` 는 그 앞 두 값). 요약은 **실제로 적용한 범위**(`scope` · `applied` — `suds` 를 요청해도 설계 ID 가 0 이면 소스 전체를 시험한 것) · 알 수 없는 범위 값 · 뺀 함수 이름 · 파일 · 사유(`deleted` · `ambiguous` · `table_only` · `heading_unread` · `alias_dropped` · `absent`) · 판정 문장. 품질 보고서 `test_scope`, 공시 `suts_test_scope` 가 범위별 라벨 · 톤과 사유별 실행 가능한 안내를 보이고, 화면 설명 키를 더했다(재생성으로 사라지지 않는 사실).
+- **측정**:
+  - 두 실제 SwUDS 전수: PV 머리말 989 는 원래도 전부 읽었고 개명 꼬리 0 → 변화 0. HD 머리말 416 → 429, 설계 ID 390 → 403(기존 390 의 (이름, ID) 는 해시로 같음), 고아 함수 표 1(`PP0_MOTOR_PWM_Init`).
+  - SUTS: 시험 unit 391 → 404(설계 ID 를 되찾은 13). 정본이 시험하는데 우리에게 없던 11 함수가 들어와 그 함수들의 판별 가능 결함 294 를 전부 잡는다(정본 173, 정본만 0). 기존 223 함수는 R95 와 같다(3,321/3,321 · 확장 행 10,757). HD 전체: 판별 가능 3,615 중 우리 3,615 · 정본 1,723 · 정본만 0 — R95 의 정직한 수치(분모 밖 173 포함 정본만 173)가 해소됐다. 정렬된 정본 함수 234 중 우리 문서에 없는 함수 0.
+  - SITS: 확정 기대값 21,358 → 21,362(+4) · 잃음 0. 값이 바뀐 103 칸은 전부 같은 행의 입력도 바뀐 칸이다(새로 읽은 SwUDS 입출력 표가 입력 범위를 정함 — `SwITC_SwUFn_1120` 13 · `SwITC_SwUFn_3334` 90). 합성 TC ID 2 개가 설계 ID 를 얻었다(`SwITC_132` → `SwITC_SwUFn_1130`, `SwITC_137` → `SwITC_SwUFn_1131`). 인터페이스 결함 판별 497 — 판별한 결함 집합 동일.
+  - 시험: 측정 트리에서 R96 대상 392 통과.
+- **검증**: 시험 48 신규(문법 · 개명 꼬리 · 문서 두 로더 · 고아 표 · 공시 · 범위 요약 · 작은 소스와 합성 SwUDS 로 `generate_suts` 실제 생성 · 실제 HD 문서 해시 고정), 관련 회귀 464 통과. 변이 27/27 kill(리뷰가 찾은 생존 변이 — 생성기가 설계 판독을 비워 넘기기 · 목록 기준 분기 — 포함).
+- **리뷰(deep 2회)**: 1차 Critical 1(C1 범위 공시가 실제 범위와 무관하게 "SwUDS 기반 · 정본과 같은 범위" — `source` · SwUDS 미판독에서도) · Warning 4(W1 판정과 요약이 호출부에서 갈림 · W2 고아 표 오분류 · W3 개명 꼬리 뒤 삭제 표시 · W4 실행할 수 없는 동명이인 안내) 반영. 2차 Warning 2(꼬리 뒤 붙은 글 회귀 · 고아 표 톤) 반영 후 LGTM.
+- **남은 것**:
+  - 같은 머리말을 읽는 다른 판독기 4 곳이 옛 문법이다(STS · SUTS · SITS 생성 경로 밖 — 리뷰 확인): `report_gen/requirements.py:334 · 1821`(UDS 생성 텍스트 블록), `backend/services/swut_swuds_parser.py:48 · 209`(SwUT/SwIT 빌더 — 대소문자 구분, SUTS 가 이제 내는 `SwUTC_SwUFn_1130~1134` 를 못 찾는다; 다음 라운드 첫 후보), `backend/services/iso26262_doc_asil_extractor.py:508`(영향도), `report_gen/validation.py:251`.
+  - 동명이인 설계(HD 8 이름 · PV 9 — APP/FBL 쌍둥이 · 모듈별 static)는 이름만으로 설계 ID 를 못 정해 범위에서 빠진다. 정본은 둘 다 시험한다. R89 빌드 분리 위에서 파일 → SwCom → `SwUFn_{SwCom}xx` 로 고를 수 있는지 후보.
+  - 고아 표는 표 자신의 ID · Name 행으로 회수할 수 있다(정책 판단 — 이번 판은 공시까지).
+  - PV 37 은 문서 쪽(설계서 누락 후보) — 이번 판은 이름을 보이는 데까지. 확장 프로파일에서 시험할지는 범위 정책 결정.

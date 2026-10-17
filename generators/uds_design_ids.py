@@ -54,9 +54,20 @@ _logger = logging.getLogger(__name__)
 
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
+# 설계 ID 낱말 — 대소문자 표기 흔들림(`SWUFn_1133`)도 같은 ID 다(정본 SwUTS 는 그 함수를 `SwUFn_1133` 으로 적는다; R96).
+_ID = r"(?i:SwUFn)_\d+"
 # 본문 문단 `SwUFn_0101: main` — 설계 ID 머리말인지 판정만 한다(이름은 `read_design_heading`).
-_DESIGN_ID_PAT = re.compile(r"^(SwUFn_\d+)\s*[:：]\s*(\S+)")
-_HEADING = re.compile(r"^(SwUFn_\d+)\s*[:：]\s*([A-Za-z_]\w*)(.*)$")
+_DESIGN_ID_PAT = re.compile(rf"^({_ID})\s*[:：]\s*(\S+)")
+_HEADING = re.compile(rf"^({_ID})\s*[:：]\s*([A-Za-z_]\w*)(.*)$")
+# (R96) 콜론 없는 머리말 `SwUFn_1343 s_GetTemperature` — 문단 **전체**가 ID · 이름 · (선택) 개명 꼬리 `<- 옛이름` · (선택) 괄호
+#   표시 하나일 때만 머리말이다. 콜론 꼴과 달리 설명 글이 붙으면(`SwUFn_0101 main 함수`) 본문 문장일 수 있어 머리말로 보지 않는다.
+_BARE_HEADING = re.compile(rf"^({_ID})\s+([A-Za-z_]\w*)((?:\s*<-\s*[A-Za-z_]\w*)?\s*(?:\([^()]*\)|\[[^\[\]]*\])?)$")
+
+
+def canonical_design_id(raw: Any) -> str:
+    """`SWUFn_1133` → `SwUFn_1133`(번호는 그대로). 설계 ID 꼴이 아니면 입력 그대로."""
+    s = str(raw or "").strip()
+    return "SwUFn_" + s.split("_", 1)[1] if re.fullmatch(_ID, s) else s
 # 문서가 그 설계를 지웠다는 표시 — 괄호 안 어디에 있든(`(삭제)` · `(New, 삭제)` · `(삭제됨)`) 이 표는 소스 함수의 설계가
 #   아니다(리뷰 R65 W2: 공백 뒤 `(삭제)` 를 이름으로 읽어 같은 이름의 `(New)` 설계와 동명이인이 됐다)
 _DELETED_WORD = (r"(?:(?:삭제|폐기)\s*(?:되었음|하였음|했음|됨|함|된|처리\s*됨|처리)?|미사용|"
@@ -126,15 +137,30 @@ def read_design_heading(text: Any) -> Optional[Dict[str, str]]:
     `(New, 삭제)` · ` - 삭제` · `[삭제]`, 붙었든 공백 뒤든; 매핑하지 않는다) · `marked`(그 밖의 괄호 표시 — `(New)` ·
     `(Internal -> Interface 이동)` · `(DTC 이력 삭제)`; 이름은 그대로, 표시는 공시) · `unread`(이름이 식별자로 시작하지
     않거나 괄호가 아닌 글이 이름에 붙음 — `main-old`). 같은 이름 머리말 사이의 선택은 `select_live_headings`.
+
+    (R96) 규칙(`SwUFn_NNNN: 이름`)과 표기가 다른 머리말도 읽는다 — 콜론 없음(`_BARE_HEADING`) · 대소문자(`SWUFn_`). 그런
+    머리말에는 `variant`(`no_colon` · `case` 목록)가 붙고 ID 는 `canonical_design_id` 로 적는다. HDPDM01 SwUDS v1.07 의 13 머리말이
+    이 꼴이었고, 놓친 동안 그 함수들은 설계 ID · 입출력 표를 잃어 SwUDS 기반 시험 범위에서 빠졌다(정본 SwUTS 는 시험한다).
     """
     s = " ".join(str(text or "").split())
-    head = _DESIGN_ID_PAT.match(s)
-    if not head:
-        return None
     m = _HEADING.match(s)
+    variant: List[str] = []
     if not m:
-        return {"id": head.group(1), "name": "", "mark": "", "status": "unread", "text": s}
-    did, name, rest = m.group(1), m.group(2), m.group(3)
+        head = _DESIGN_ID_PAT.match(s)
+        if head:
+            return {"id": canonical_design_id(head.group(1)), "name": "", "mark": "", "status": "unread", "text": s}
+        m = _BARE_HEADING.match(s)
+        if not m:
+            return None
+        variant.append("no_colon")
+    did, name, rest = canonical_design_id(m.group(1)), m.group(2), m.group(3)
+    if did != m.group(1):
+        variant.append("case")
+    # (R96 리뷰 W3) 개명 꼬리 `<- 옛이름` 은 표시가 아니다 — 떼고 **남은 글**로 상태를 판정한다. 떼지 않으면
+    #   `s_X <- g_Y (삭제)` 가 삭제를 못 보고 살아 있는 설계로 읽혀, 같은 이름의 `(New)` 머리말과 동명이인이 된다
+    renamed = re.match(r"\s*<-\s*([A-Za-z_]\w*)", rest)
+    if renamed:
+        rest = rest[renamed.end():]
     mark = rest.strip()
     paren = re.fullmatch(r"\(([^()]*)\)", mark)
     if not mark or mark == "()":
@@ -143,11 +169,18 @@ def read_design_heading(text: Any) -> Optional[Dict[str, str]]:
         status = "deleted"
     elif paren:
         status = "marked"
-    elif rest[:1].isspace():
+    elif rest[:1].isspace() or renamed:
+        # (R96 리뷰 2차 W1) 이름은 `<-` 앞에서 이미 정해졌다 — 꼬리 뒤에 붙은 글(`<- g_Y.` · `<- g_Y, 함수명 변경`)은 옛 이름
+        #   쪽 글이라 설계를 읽지 못할 이유가 아니다(HEAD 는 이 꼴을 plain 으로 읽었다)
         status = "plain"
     else:
         status = "unread"
-    return {"id": did, "name": name, "mark": mark if status != "plain" else "", "status": status, "text": s}
+    out = {"id": did, "name": name, "mark": mark if status != "plain" else "", "status": status, "text": s}
+    if variant:
+        out["variant"] = variant
+    if renamed:
+        out["renamed_from"] = renamed.group(1)
+    return out
 
 
 # 문단 글에 넣지 않는 하위 트리 — 글상자 · 도형 · 대체 콘텐츠(python-docx `Paragraph.text` 도 넣지 않는다). HDPDM01
@@ -257,18 +290,31 @@ def read_error_text(exc: BaseException, p: Path) -> str:
     return f"{type(exc).__name__}: {msg}"[:200]
 
 
-def iter_design_entries(body, toc_styles: Optional[set] = None) -> Iterator[Dict[str, Any]]:
+def is_function_table(tbl) -> bool:
+    """`[ Function Information ]` 로 시작하는 함수 표인가(첫 행 첫 칸)."""
+    tr = tbl.find(f"{_W}tr")
+    tc = tr.find(f"{_W}tc") if tr is not None else None
+    return tc is not None and bool(re.match(r"^\[\s*Function\s+Information", _text(tc), re.I))
+
+
+def iter_design_entries(body, toc_styles: Optional[set] = None,
+                        unattached: Optional[List[str]] = None) -> Iterator[Dict[str, Any]]:
     """body 의 설계 ID 머리말마다 `read_design_heading` 결과 + `table`(다음 머리말 전의 첫 표 — 없으면 None).
 
     머리말과 표는 body 바로 아래 형제다(python-docx `doc.paragraphs` 와 같은 범위 — 표 안 문단은 머리말이 아니다).
     목차 문단(`toc_styles` — `read_toc_style_ids` — 또는 ID 가 `TOC` 로 시작하는 스타일)은 건너뛴다.
+
+    (R96 리뷰 W2) `unattached` 를 주면 어느 머리말에도 붙지 않은 **함수 표**의 `Name` 행(없으면 `?`)을 담는다 — 머리말을 읽지
+    못하면(HDPDM01 v1.07 `EnUserSwUFn_2302: PP0_MOTOR_PWM_Init` — 앞에 글자가 붙은 오타) 그 표는 조용히 버려졌고, 시험 범위
+    공시는 설계가 있는 함수를 "SwUDS 에 없음" 으로 적었다.
     """
     toc = set(toc_styles or ())
     cur: Optional[Dict[str, Any]] = None
     for el in body:
         if el.tag == f"{_W}p":
-            # 빠른 거름(리뷰 R65 2차 N14) — 설계 ID 가 없는 문단은 정밀 판독하지 않는다(run 이 갈라도 이어 붙여 본다)
-            if "SwUFn" not in "".join(t.text or "" for t in el.iter(f"{_W}t")):
+            # 빠른 거름(리뷰 R65 2차 N14) — 설계 ID 가 없는 문단은 정밀 판독하지 않는다(run 이 갈라도 이어 붙여 본다).
+            #   (R96) 대소문자를 가리지 않는다 — 판독기가 `SWUFn_` 을 읽어도 여기서 먼저 버리면 그 머리말은 여전히 없다
+            if "swufn" not in "".join(t.text or "" for t in el.iter(f"{_W}t")).lower():
                 continue
             ps = el.find(f"{_W}pPr/{_W}pStyle")
             if ps is not None and ((ps.get(f"{_W}val") or "") in toc or _TOC_STYLE.match(ps.get(f"{_W}val") or "")):
@@ -279,8 +325,11 @@ def iter_design_entries(body, toc_styles: Optional[set] = None) -> Iterator[Dict
                     yield cur
                 cur = {**h, "table": None}
             continue
-        if el.tag == f"{_W}tbl" and cur is not None and cur["table"] is None:
-            cur["table"] = el
+        if el.tag == f"{_W}tbl":
+            if cur is not None and cur["table"] is None:
+                cur["table"] = el
+            elif unattached is not None and is_function_table(el):
+                unattached.append(table_name_row(el) or "?")
     if cur is not None:
         yield cur
 
@@ -312,6 +361,11 @@ def name_row_aliases(entries: List[Dict[str, Any]]) -> Tuple[Dict[str, str], Lis
         else:
             aliases[row] = heads[0]
     return aliases, dropped
+
+
+def variant_headings(entries: List[Dict[str, Any]]) -> List[str]:
+    """(R96) 표기가 규칙과 달랐지만 머리말로 읽어 **쓴** 것(`plain` · `marked`)의 원문 — 두 로더가 같은 목록을 공시한다."""
+    return [e["text"] for e in entries if e.get("variant") and e.get("status") in ("plain", "marked")]
 
 
 def restrict_aliases(mapping: Optional[Dict[str, Any]], source_functions: Any) -> Optional[Dict[str, Any]]:
@@ -359,7 +413,8 @@ def load_uds_design_ids(uds_path: str, source_functions: Any = None) -> Dict[str
 
 def _load_uds_design_ids(uds_path: str) -> Dict[str, Any]:
     empty: Dict[str, Any] = {"by_name": {}, "ambiguous": [], "total": 0, "source": "", "aliases": {},
-                             "marked": [], "deleted": [], "unread_headings": [], "alias_conflicts": []}
+                             "marked": [], "deleted": [], "unread_headings": [], "alias_conflicts": [],
+                             "variant_headings": [], "unattached_tables": []}
     raw = str(uds_path or "").strip()
     if not raw:
         return empty
@@ -383,7 +438,8 @@ def _load_uds_design_ids(uds_path: str) -> Dict[str, Any]:
         _logger.warning("uds design-id: cannot open %s: %s", p.name, exc)
         return {**empty, "read_error": read_error_text(exc, p)}
 
-    entries = list(iter_design_entries(body, read_toc_style_ids(p)))
+    unattached: List[str] = []
+    entries = list(iter_design_entries(body, read_toc_style_ids(p), unattached))
     select_live_headings(entries)
     seen: Dict[str, str] = {}
     ambiguous: set[str] = set()
@@ -427,11 +483,15 @@ def _load_uds_design_ids(uds_path: str) -> Dict[str, Any]:
         "unread_headings": unread,
         "superseded_headings": superseded,
         "alias_conflicts": alias_conflicts,
+        "variant_headings": variant_headings(entries),
+        "unattached_tables": unattached,
     }
     _CACHE[key] = (sig, now, result)
     _logger.info(
-        "uds design-id: %s → %d ids (문단 %d · 동명이인 %d 제외 · 표시 붙은 머리말 %d · 삭제 %d · 표 Name 별칭 %d)",
+        "uds design-id: %s → %d ids (문단 %d · 동명이인 %d 제외 · 표시 붙은 머리말 %d · 삭제 %d · 표 Name 별칭 %d · "
+        "표기가 다른 머리말 %d)",
         p.name, len(seen), len(entries), len(ambiguous), len(marked), len(deleted), len(aliases),
+        len(result["variant_headings"]),
     )
     return result
 

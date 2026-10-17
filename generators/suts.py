@@ -202,7 +202,14 @@ def normalize_scope(scope: Any) -> "tuple[str, str]":
 
 def apply_scope(units: List[Dict[str, Any]],
                 scope: Any) -> "tuple[List[Dict[str, Any]], List[str]]":
-    """시험 범위를 적용해 ``(남길 unit, 보고할 문장들)`` 을 돌려준다.
+    """``scope_units`` 의 앞 두 값 — ``(남길 unit, 보고할 문장들)``. 판정은 `scope_units` 하나다."""
+    kept, notes, _summary = scope_units(units, scope)
+    return kept, notes
+
+
+def scope_units(units: List[Dict[str, Any]], scope: Any, design_ids: Optional[Dict[str, Any]] = None
+                ) -> "tuple[List[Dict[str, Any]], List[str], Dict[str, Any]]":
+    """시험 범위를 적용해 ``(남길 unit, 보고할 문장들, 요약)`` 을 돌려준다 — 요약은 품질 보고서 `test_scope`.
 
     SUTS 는 SwUDS(단위 설계서)를 근거로 만드는 문서이고 정본도 그 범위다 — 정본 1,005
     함수는 SwUDS 설계 ID 1,026 과 교집합 1,001 로 사실상 일치한다(실측 2026-08-11).
@@ -219,7 +226,17 @@ def apply_scope(units: List[Dict[str, Any]],
 
     ⚠ 본체에 인라인으로 두면 시험할 수가 없어, 가장 무거운 판정(어떤 함수가 ISO 26262
       산출물에 들어가는가)이 **전체 생성 없이는 검증 불가**였다. 그래서 뽑아 둔다.
+
+    (R96) 범위를 좁힌 문장은 진행 메시지로만 나가 산출물 어디에도 남지 않았다 — 개수만으로는 정본이 시험하는 함수가 빠졌는지
+    알 수 없다(실측: HDPDM01 은 SwUDS 머리말 표기 흔들림으로 11, KJPDS02_PV 는 SwUDS v3.03 에 이름이 없는 37 함수를 정본
+    SwUTS 가 시험하는데 우리는 시험하지 않았고, 정본 대조 판정기도 그 함수들을 분모에서 뺐다). 그래서 요약이 뺀 함수를 이름과
+    사유로 담고, **실제로 적용한 범위**(`scope` · `applied`)를 적는다 — 요청이 `suds` 여도 설계 ID 를 하나도 얻지 못하면 소스
+    전체를 시험한 것이다(리뷰 C1: 요약을 호출부에서 따로 만들었을 때 공시가 그 경우에도 "SwUDS 기반" 이라 단정했다).
+    사유(`design_ids` — `load_uds_design_ids` 결과): `deleted`(SwUDS 가 삭제 표시) · `ambiguous`(같은 이름의 설계가 둘 이상) ·
+    `table_only`(함수 표는 있는데 머리말을 읽지 못함 — 리뷰 W2) · `heading_unread`(머리말 이름 뒤 글을 읽지 못함) ·
+    `alias_dropped`(표 Name 행 별칭이 소스의 다른 함수 이름과 겹쳐 쓰지 않음) · `absent`(그 밖 — SwUDS 에 그 이름이 없다).
     """
+    before = list(units)
     notes: List[str] = []
     _scope, _bad = normalize_scope(scope)
     if _bad:
@@ -247,7 +264,38 @@ def apply_scope(units: List[Dict[str, Any]],
         msg = f"소스 전체 범위: {len(units)}개 함수 전부를 시험합니다(SwUDS 미대조)."
         _logger.info("SUTS scope=source: %s", msg)
         notes.append(msg)
-    return units, notes
+    applied = _scope == SCOPE_REFERENCE and any(str(u.get("suds_id") or "").strip() for u in before)
+    return units, notes, _scope_summary(before, units, notes, design_ids, scope=_scope, unknown=_bad, applied=applied)
+
+
+def _scope_summary(before: List[Dict[str, Any]], after: List[Dict[str, Any]], notes: List[str],
+                   design_ids: Optional[Dict[str, Any]], *, scope: str, unknown: str, applied: bool) -> Dict[str, Any]:
+    """`scope_units` 의 요약 — 뺀 함수(이름 · 파일 · 사유)와 실제로 적용한 범위."""
+    from generators.uds_design_ids import read_design_heading
+
+    d = design_ids or {}
+
+    def _names(texts: Any) -> set:
+        return {h["name"].lower() for t in (texts or ()) for h in [read_design_heading(t)] if h and h.get("name")}
+
+    reasons = (("deleted", _names(d.get("deleted"))),
+               ("ambiguous", {str(n).lower() for n in (d.get("ambiguous") or ())}),
+               ("table_only", {str(n).lower() for n in (d.get("unattached_tables") or ())}),
+               ("heading_unread", _names(d.get("unread_headings"))),
+               ("alias_dropped", {str(x).split("→", 1)[0].strip().lower() for x in (d.get("alias_dropped_source") or ())}))
+    kept = {id(u) for u in after}
+    dropped = [u for u in before if id(u) not in kept]
+    excluded: List[Dict[str, str]] = []
+    by_reason: Dict[str, int] = {}
+    for u in dropped:
+        name = str(u.get("name") or "")
+        why = next((r for r, names in reasons if name.lower() in names), "absent")
+        excluded.append({"name": name, "file": Path(str(u.get("source_path") or "")).name, "reason": why})
+        by_reason[why] = by_reason.get(why, 0) + 1
+    return {"scope": scope, "applied": applied, "unknown_value": unknown,
+            "source_functions": len(before), "tested": len(after), "excluded": len(dropped), "by_reason": by_reason,
+            "excluded_functions": sorted(excluded, key=lambda e: (e["reason"], e["file"], e["name"])),
+            "notes": list(notes)}
 
 
 _GEN_METHODS = {"AEC, ABV", "ABV, AOR", "AOR", "ABV"}
@@ -2317,7 +2365,8 @@ def summarize_uds_reading(io_map: Optional[Dict[str, Any]], units: List[Dict[str
     out: Dict[str, Any] = {"given": True, "read": bool((io_map or {}).get("by_name"))}
     for k in ("read_error", "headings", "tables", "functions", "ambiguous", "param_rows", "rows_continued", "range_read",
               "values_read", "range_unread_by_reason", "range_unread_samples", "range_notation", "deleted_headings",
-              "alias_conflicts", "unread_headings", "superseded_headings"):
+              "alias_conflicts", "unread_headings", "superseded_headings", "variant_headings",
+              "unattached_tables"):
         if k in r:
             out[k] = r[k]
     # 별칭은 **쓴 것**만 적는다(리뷰 R65 2차 N3 — 소스에 둘 다 있어 뺀 별칭을 '찾는다' 고 공시했다)
@@ -8646,6 +8695,7 @@ def generate_suts(
 
     # ── UDS function description enrichment ──────────────────────────────
     _open_rec = {}
+    _design: Dict[str, Any] = {}    # (R96) 설계 ID 판독 — 아래 시험 범위 요약이 뺀 사유(동명이인 · 삭제)를 읽는다
     with _resolved_doc_input(uds_path, "UDS", report=_open_rec) as _uds_local:
         note_input_document(_input_docs, "UDS", uds_path, "uds_description_design_ids", _open_rec, input_skips)
         if _uds_local:
@@ -8701,7 +8751,7 @@ def generate_suts(
     #
     # 범위를 좁힌 사실은 **반드시 보고한다** — 조용히 자르면 커버리지가 또 자기 자신을
     # 분모로 삼게 된다.
-    units, _scope_notes = apply_scope(units, scope)
+    units, _scope_notes, _test_scope = scope_units(units, scope, _design)
     for _n in _scope_notes:
         _progress(40, _n)
 
@@ -8916,6 +8966,7 @@ def generate_suts(
     quality["uds_reading"] = summarize_uds_reading(_uds_io, units, bool(_input_docs["UDS"].get("given")),
                                                    _source_function_names(function_details))
     quality["uds_const_inputs"] = summarize_uds_const_inputs(units)     # (R67)
+    quality["test_scope"] = _test_scope                                  # (R96)
     quality["pointer_parameters"] = _pointer_parameters                  # (R81)
     # (R68, 감사 #16) 소스 단계가 끝내 읽지 못한 파일과, 그 파일에 정의가 있어 원문 없이 남은 unit
     quality["source_read_failures"] = summarize_source_read_failures(report_data.get("source_read_failures"), units)

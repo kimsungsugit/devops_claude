@@ -75,6 +75,7 @@ from generators.uds_design_ids import (
     restrict_aliases,
     select_live_headings,
     text_of_node,
+    variant_headings,
 )
 
 _logger = logging.getLogger(__name__)
@@ -648,7 +649,8 @@ def _load_uds_unit_io(uds_path: Any) -> Dict[str, Any]:
     marked: List[str] = []
     deleted: List[str] = []
     unread_headings: List[str] = []
-    entries = list(iter_design_entries(body, read_toc_style_ids(p)))
+    unattached: List[str] = []
+    entries = list(iter_design_entries(body, read_toc_style_ids(p), unattached))
     select_live_headings(entries)
     superseded: List[str] = []
     for e in entries:
@@ -685,6 +687,10 @@ def _load_uds_unit_io(uds_path: Any) -> Dict[str, Any]:
         "headings": headings, "tables": total, "functions": len(by_name), "ambiguous": len(ambiguous),
         "marked_headings": marked, "deleted_headings": deleted, "unread_headings": unread_headings,
         "superseded_headings": superseded,
+        # (R96) 표기가 규칙과 달랐지만 읽어 쓴 머리말(콜론 없음 · `SWUFn_`) — 설계 ID 로더와 같은 목록
+        "variant_headings": variant_headings(entries),
+        # (R96 리뷰 W2) 머리말 없이 남은 함수 표의 Name 행 — 설계 ID 로더와 같은 목록
+        "unattached_tables": unattached,
         # 매핑에 쓰인 머리말 이름(표가 없어도 — 설계 ID 로더는 그 이름을 매핑한다; 리뷰 R65 4차 I1)
         "live_heading_names": sorted({e["name"] for e in entries if e["status"] in ("plain", "marked")}),
         "name_row_aliases": [f"{h} ← 표 Name `{a}`" for a, h in sorted(aliases.items())],
