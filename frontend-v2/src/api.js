@@ -106,16 +106,25 @@ export function buildUrl(path) {
   return API_BASE.replace(/\/$/, '') + path;
 }
 
-/** 응답을 파싱해 throw할 Error 생성 (code/message 정규화). */
+/** 응답을 파싱해 throw할 Error 생성 (code/message 정규화).
+ *
+ * (R97 리뷰3 W1) 구조화된 사유도 싣는다 — `err.detail`. 이 앱의 HTTPException 은 `http_exception_handler`
+ * (`backend/error_handler.py`)가 `{ok:false, error:{code, message, detail:{…}}}` 봉투로 바꾸고, dict detail 의
+ * code/message 밖 키(예: 설정 엔드포인트의 `reason_code` · `roots_moved` · `key`)를 `error.detail` 로 옮긴다.
+ * FormData 라 raw fetch 를 쓰는 호출처도 **이 해석**을 쓰도록 `toApiError` 로 내보낸다 — 봉투를 모르고 `j.detail`
+ * 만 읽으면 실서버에서 사유 · 표지가 사라진다(ProjectSetupSection 의 덮어쓰기 가드가 그렇게 무력화됐었다).
+ */
 async function _toError(res) {
   const text = await res.text();
   let msg = text || `HTTP ${res.status}`;
   let code = `HTTP_${res.status}`;
+  let detail = null;
   try {
     const j = JSON.parse(text);
     if (j?.error?.message) {
       msg = j.error.message;
       code = j.error.code || code;
+      if (j.error.detail && typeof j.error.detail === 'object') detail = j.error.detail;
     } else if (typeof j.detail === 'string') {
       msg = j.detail;
     } else if (j?.detail && typeof j.detail === 'object') {
@@ -125,6 +134,7 @@ async function _toError(res) {
       // 경로(starlette 기본 처리 등)뿐이고, 그때 원시 JSON 이 뜨는 걸 막는다.
       if (typeof j.detail.message === 'string') msg = j.detail.message;
       if (typeof j.detail.code === 'string') code = j.detail.code;
+      detail = j.detail;
     } else if (typeof j.message === 'string') {
       msg = j.message;
     } else if (j?.error?.code) {
@@ -134,8 +144,12 @@ async function _toError(res) {
   const err = new Error(msg);
   err.status = res.status;
   err.code = code;
+  err.detail = detail;
   return err;
 }
+
+/** raw fetch(FormData 등) 호출처용 — `api()` 와 같은 오류 해석(봉투 `error.*` 우선, `detail` 폴백). */
+export const toApiError = _toError;
 
 /** Generic JSON fetch helper.
  *

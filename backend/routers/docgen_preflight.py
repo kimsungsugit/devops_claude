@@ -1628,7 +1628,8 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
         # ⚠ `has_cached()` 로 먼저 묻지 않는다 — 둘 다 내용 서명을 계산하느라 소스
         #   트리를 os.walk 한다(실측 99파일 33ms). `cached()` 는 없으면 `None` 이라
         #   물음 하나로 충분하다.
-        tm = _tm.cached(src, **_tm_paths)
+        # (R97) 측정과 같은 SCM id — 키는 고른 프로젝트 맵의 지문이다(`docgen_test_materials._key`)
+        tm = _tm.cached(src, **_tm_paths, scm_id=req.scm_id)
         if tm is None:
             steps.append(_step(
                 "test_materials", "material", S_UNMEASURED, _MATERIAL_LABEL,
@@ -1793,8 +1794,16 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                 a = tm.get("suts_asil") or {}
                 if a.get("measured"):
                     _fz, _cf = a.get("fuzzy", 0), a.get("fuzzy_conflict", 0)
-                    # (R70 N83) 저장소 override 스냅샷이 **혼자** 정한 등급도 약한 근거다(프로젝트 확인 없음, R68).
+                    # (R70 N83) override 스냅샷이 **혼자** 정한 등급도 약한 근거다(R68).
                     #   예전엔 `source` 로 접혀 이 행이 KJPDS02 에서 228 unit 을 "소스 근거" 로 말했다.
+                    # (R97) 그 228 은 HDPDM01 의 스냅샷이 이름으로 걸린 것이었다 — 스냅샷은 HDPDM01 정본 SwUDS 역추출이고
+                    #   이제 소스 루트 · SCM id 로 그 프로젝트일 때만 걸린다. 어느 프로젝트의 맵인지는 측정이 적은 `project_maps`.
+                    _ov_pm = (tm.get("project_maps") or {}).get("override") or {}
+                    _ov_src = (f"프로젝트 {_ov_pm.get('project')} 의 override 맵(`docs/project_maps/{_ov_pm.get('file')}` — "
+                               "정본 SwUDS 역추출 스냅샷, 프로젝트는 소스 루트 · SCM id 로 확인했지만 문서 판은 대조하지 않음)"
+                               if isinstance(_ov_pm, dict) and _ov_pm.get("status") == "applied" else
+                               # 맵 기록이 없는 R97 이전 측정 — 그때는 프로젝트 확인 없이 저장소 파일이 걸렸다
+                               "override 스냅샷(`uds_function_swcom_override.json`, 이 측정은 어느 프로젝트의 맵인지 기록하지 않음)")
                     _ov = int(a.get("override", 0) or 0)
                     _ph = int(a.get("override_only_units", 0) or 0)
                     _weak_total = _fz + _cf + _ov
@@ -1805,8 +1814,7 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
                             + (f" (그중 {_cf}개는 후보 등급까지 갈립니다 = 사전 순서가 등급을 정했습니다)" if _cf else ""))
                     if _ov:
                         _parts.append(
-                            f"{_ov}개 unit 의 안전 등급은 저장소 override 스냅샷(`docs/uds_function_swcom_override.json`, "
-                            "이 프로젝트의 값인지 확인되지 않음)이 혼자 정했습니다"
+                            f"{_ov}개 unit 의 안전 등급은 {_ov_src}이 혼자 정했습니다"
                             + (f" — 그중 소스에 없는 스냅샷 전용 unit {_ph}개" if _ph else ""))
                     # 표 없이 잰 값인지는 문장에 남긴다(리뷰 W2) — 생성 시엔 SwUDS 표가 먼저 결정하므로 그때 수치가 더 작다.
                     _uds_map = bool(a.get("uds_map"))
@@ -2060,7 +2068,7 @@ def _compute_preflight(req: PreflightRequest) -> Dict[str, Any]:
     # 경로**라, 같은 자료로 잰 다른 문서 게이트의 측정은 여기서도 그대로 쓰인다.
     _tm_cached: Dict[str, Any] = {}
     if src and available.get(_req.IN_SOURCE_ROOT):
-        _tm_cached = _tm.cached(src, **_tm_paths) or {}
+        _tm_cached = _tm.cached(src, **_tm_paths, scm_id=req.scm_id) or {}
 
     for cap_name, cap in (spec.get("caps") or {}).items():
         adjustable = bool(cap.get("adjustable"))
@@ -2766,7 +2774,8 @@ def docgen_measure_source(req: MeasureSourceRequest) -> Dict[str, Any]:
             "srs_path": req.srs_path or _resolved["srs_path"],
             "uds_path": req.uds_path or _resolved["uds_path"],
         }
-        out["test_materials"] = _tm.measure(req.source_root, **paths)
+        # (R97) SCM id 는 프로젝트 맵(component_map · override)을 고르는 데 쓴다 — 조회(preflight)도 같은 id 를 넘긴다
+        out["test_materials"] = _tm.measure(req.source_root, **paths, scm_id=req.scm_id)
         # 어느 문서로 쟀는지를 응답에 남긴다 — 캐시가 안 맞을 때 되짚을 유일한 단서다.
         out["measured_with"] = paths
     return out

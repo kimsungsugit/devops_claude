@@ -23,12 +23,20 @@
 
 가드: `tests/unit/test_source_roots_single_source.py` 가 저장소를 훑어 이 모듈 밖의
 분해 코드를 막는다.
+
+## 경로 동일성 (R97)
+
+`normalize_root_key` 는 `scm_registry._normalize_path_key` 가 쓰던 정규화(normcase+normpath)를 그대로 옮긴 것이다 —
+레지스트리는 이제 이 함수에 위임한다. 프로젝트 맵(`report_gen.project_maps`)이 "이 생성 루트가 어느 프로젝트의 것인가"
+를 레지스트리 조회와 **같은 정규화**로 판정해야 `D:/A` 와 `d:\\a\\` 가 한쪽에서만 같은 경로가 되는 일이 없다
+(R47 이 분해 규약 두 갈래에서 겪은 결함과 같은 모양이다). 분해(`split_source_roots`)와 달리 이 함수는 조각 하나만 받는다.
 """
 from __future__ import annotations
 
+import os
 from typing import Iterable, List
 
-__all__ = ["split_source_roots", "first_source_root", "join_source_roots", "SEPARATORS"]
+__all__ = ["split_source_roots", "first_source_root", "join_source_roots", "normalize_root_key", "SEPARATORS"]
 
 #: 허용 구분자 — 새 구분자를 더할 일이 생기면 여기 한 곳이다.
 SEPARATORS: tuple[str, ...] = (",", ";")
@@ -59,3 +67,20 @@ def first_source_root(raw: object) -> str:
 def join_source_roots(roots: Iterable[str]) -> str:
     """생성기에 넘길 표준 결합 — 콤마."""
     return SEPARATORS[0].join(r for r in (str(x).strip() for x in roots) if r)
+
+
+def normalize_root_key(text: object) -> str:
+    """경로 비교용 정규화 — 대소문자·구분자·후행 슬래시 차이를 흡수(`"D:/A"` 와 `"d:\\a\\"` 가 같은 키).
+
+    `scm_registry._normalize_path_key` 의 본문을 바이트 단위로 옮겼다(그쪽은 이제 여기에 위임한다). 동작을 바꾸려면
+    레지스트리 조회 · 프로젝트 맵 판정이 같이 바뀐다는 뜻이다.
+    """
+    s = str(text or "").strip().strip('"').strip("'")
+    if not s:
+        return ""
+    try:
+        return os.path.normcase(os.path.normpath(s))
+    except (TypeError, ValueError):
+        # normpath 는 embedded null 같은 병적 입력에만 던진다. 값을 버리지 않고
+        # 손수 정규화한 결과를 돌려주므로 판정이 사라지지 않는다(침묵 아님).
+        return s.replace("\\", "/").rstrip("/").lower()

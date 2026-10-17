@@ -2182,3 +2182,27 @@ MC/DC는 별도 P2로 진행하며, 실제 변수 입력을 평가해 다른 원
   - 동명이인 설계(HD 8 이름 · PV 9 — APP/FBL 쌍둥이 · 모듈별 static)는 이름만으로 설계 ID 를 못 정해 범위에서 빠진다. 정본은 둘 다 시험한다. R89 빌드 분리 위에서 파일 → SwCom → `SwUFn_{SwCom}xx` 로 고를 수 있는지 후보.
   - 고아 표는 표 자신의 ID · Name 행으로 회수할 수 있다(정책 판단 — 이번 판은 공시까지).
   - PV 37 은 문서 쪽(설계서 누락 후보) — 이번 판은 이름을 보이는 데까지. 확장 프로파일에서 시험할지는 범위 정책 결정.
+
+## R97 기록 — 프로젝트 맵(component_map · override)을 그 프로젝트에만: 소스 루트 · SCM id 로 귀속을 판정하고, 맞지 않으면 쓰지 않고 공시 (2026-10-17, R169)
+
+- **왜**: 사용자 "필요한 문서들 필요한 부분들 근본적인것들 다 잘 체크해서". 저장소 공용 `docs/` 의 두 파일이 프로젝트를 가리지 않고 파일 · 함수 이름으로 적용되고 있었다(계획서 P7 · N45).
+  - 귀속 실측: `docs/uds_function_swcom_override.json` 251 항목은 **HDPDM01** 것이다 — HD SwUDS v1.07 대비 이름 251/251 · ASIL 250/250 · Related 245/251, KJPDS02_PV SwUDS v3.03 대비 223 · 220/222 · 190. 주석 · 공시 · P7 이 "KJPDS02 정본 스냅샷" 이라 적은 것은 틀린 전제였다(같은 계열이라 이름 · 값이 겹쳐 그럴듯했다). `docs/component_map.json` 도 경로 키(`PDS64_FBL/…` · `PDS64_RD_LIN/…`)로 HDPDM01 것.
+  - 오염은 PV 쪽이었다: PV 생성에 HD 의 두 맵이 적용돼 PV 파일 35 개가 시험 면제(verify=X)로 판정돼 UDS 소스 단계에서 빠졌다(SITS 에 영향; SUTS 는 unit 을 지우지 않고 면제로 세기만 했다 — 그 파일들의 함수 115 중 PV SwUDS 가 설계한 25: FBL `lin.c` 24 · `lin_lld_sci_init`), PV 함수 223 개가 HD 의 Related/ASIL 을 받았다. HD 는 자기 맵이라 옳았다.
+  - 프로젝트 설정 엔드포인트가 맵을 공용 `docs/` 에 써서 다른 프로젝트의 맵을 덮었고, 생성기는 SDS 의 구조 표가 아니라 파티션 이름 유사도로 맵을 추정했다.
+- **무엇**:
+  - `report_gen/project_maps.py`: `docs/project_maps/<key>/project.json`(매니페스트: scm_id · project · source_roots · 맵 출처) + 맵 파일(형식 그대로). `resolve_project_maps(source_root, *, scm_id=None)` 가 종류별 `MapUse(status applied · none · not_this_project · ambiguous · invalid · no_roots)` 를 낸다 — 생성 루트가 한 프로젝트 매니페스트 루트 안에 모두 들 때만 적용(fail-closed), SCM id 는 루트가 겹칠 때만 고르고, id 로 찾은 매니페스트도 루트가 안 들면 루트 판정과 같은 답 + `roots_moved` 문제. 옛 공용 파일은 더 읽지 않는다. 지문(상태 · 프로젝트 · 읽은 바이트 sha1)이 소스 단계 캐시 키 · 서명 · 준비 게이트 캐시에 들어간다(sections 스키마 v59). 깨진 매니페스트는 `invalid`(경고).
+  - 소비처: `requirements._load_component_map`(얇은 래퍼) · `component_map_from_rows` · `component_path_key_matches`(경로 키 normcase 비교 단일 출처 — `resolve_component_entry` · uds_generator 두 루프), `generate_uds_source_sections`(명시 인자 > 프로젝트 맵 > 없음), SUTS `supplement_override_only(fd, override)` · `collect_unit_functions(component_map=)`, SUTS/SITS/STS 품질 보고서 `project_maps`, UDS 이슈 `project_map_not_applied`. 한 생성 · 한 측정에서 맵은 한 번만 판정해 끝까지 넘긴다.
+  - 이동: 두 HD 파일을 `docs/project_maps/hdpdm01/` 로 바이트 그대로(HD 출력 불변). PV 는 PV SwDS 의 **소프트웨어 구조 표**(Layer1~4 · Component Name)로 만든 맵 `docs/project_maps/kjpds02_pv/`(99 행, verify=X 없음 — 문서에 면제 근거가 없다; 두 트리에 같은 이름이 있는 파일은 구조 이름이 맞는 쪽만 경로 키 행; 표에만 있고 소스에 없는 이름 4 개는 매니페스트 · 공시에 이름과 비슷한 이름 힌트로).
+  - 설정 엔드포인트: 구조 표 우선(없으면 옛 추정, 어느 쪽인지 응답), 프로젝트 디렉터리에 매니페스트와 함께 UTF-8 로, 같은 프로젝트 재생성은 409(overwrite + `.prev`), 쓰기 3 개(생성 2 · 새 `update-roots`)는 관리자 전용, 내보내기가 `docs/project_maps` · `docs/` 를 덮지 못하게(403), pdf · 비 docx 는 422, 오류 본문은 앱 봉투(`error.message` · `error.detail.reason_code` …)로 — 화면이 같은 해석(`api.js` `toApiError`)을 쓴다(계약 시험).
+  - "KJPDS02 스냅샷" 표기를 HDPDM01 로 정정(주석 · 공시 · 계획서 P7).
+- **측정**:
+  - HD: SITS 가 R96 과 칸 단위로 같다(확정 21,362 · 값 바뀜 0 · 행 2,574). 소스 단계 payload 가 AST · 텍스트 폴백 두 루프 모두 e26ff669 와 같다(리뷰어 독립 비교, 파일 모드 고정). SUTS(확장)도 R96 과 칸 단위로 같다 — 시트 9 개 전부(시험 명세 16,160 행 · Test Evidence 270,464 행 · MCDC Design 1,284 행 포함) 차이 0, 품질 보고서 23 항목 동일. 생성 정점 메모리 5,372 MB(xlsm 쓰기 단계 — Test Evidence 를 쓰는 동안; R96 정점은 기록이 없어 비교 못 함).
+  - PV SITS(HD 맵이 섞인 R96 판 대비): TC 361 동일, 확정 기대값 40,281 → 47,488(+7,207), 인터페이스 결함 판별 402 → 438(정본 246 · 정본만 83 → 65). 잃은 확정 1,601 칸은 열 상한(입력 82 · 기대 113) 안에서 고른 변수가 바뀐 몫(값이 미상으로 1,007 — 경로를 정하던 입력이 열에서 밀림, 기대 변수 교체 563, 서브케이스 31) — 판별 결함 기준 잃음 25 · 새로 61.
+  - PV SUTS: unit 932 그대로(R92 판 r92x 와 같은 집합). 세 묶음 판정(oracle wt_h94) — R92 판정 대비로, 사이에 R93~R97 생성 변화와 판정 oracle 판 변화가 섞여 있다(R96 PV 단독 측정은 없음): 판별 가능 3,833 → 3,846, 우리 3,831 → 3,844(잃음 0 · 새로 13), 정본 1,999 → 2,008, 정본만 0. 확정 기대값 칸 298,611 → 299,982(저장소 모델 9,149). 분모 밖(정본이 시험하는데 우리 SUTS 에 없는 함수 37): 판별 가능 266 · 정본 238 — 그대로(33 은 등록 SwUDS v3.03 이 우리 소스보다 새 코드 판을 설계한 몫, 3 은 단위 목록 표 미판독, 1 은 이름 오타 — R99 대상). 생성 정점 메모리 7,546 MB(xlsm 쓰기 단계 — 후속 개선 대상).
+- **검증**: 시험 `test_project_maps.py` 89 + 관련 회귀 약 3,000(직렬), vitest ProjectSetupSection 17 · api 계열 46. 변이: 1차 17 중 생존 9 → 0, 2차 32 kill(동치 1), 3차 10/10.
+- **리뷰(deep 3회 + 확인)**: 1차 Critical 0 · W9(내보내기로 HD 맵 우회 덮기 · UDS 만 id 로 판정 · 깨진 매니페스트에서 override 조용히 빠짐 · 배선 시험 공백 · CRLF · 관리자 게이트 · 루트 이동 안내 · PV FBL EEPROM 라벨 · 비 docx 500). 2차 W1(id 판정과 루트 판정이 갈림). 3차 W1(화면이 앱 오류 봉투를 못 읽어 루트 이동 409 의 덮어쓰기 가드가 실서버에서 무력 — 목이 FastAPI 기본 모양이라 시험은 초록이었다). 모두 반영.
+- **남은 것**:
+  - PV 구조 표에 없는 소스 파일 77 개는 맵 행이 없다(LIN 드라이버 · FBL · Generated_Code 일부). PV SwUDS 가 설계한 FBL 함수는 이제 면제되지 않는다.
+  - 이름 키 조회는 여전히 대소문자 구분(R97 이전부터). SITS/STS 지문엔 이웃 매니페스트 문제가 안 들어간다(I-b). Jenkins STS 공시는 resolve 한 첫 루트로 다시 판정(I-j). 측정 스냅샷은 `docs/project_maps/` 를 통째로 복사해야 한다.
+  - 잠재 결함(R97 밖): `_uds_generate_from_paths` 의 `current_collector() or IssueCollector()` — 빈 바깥 수집기를 버린다(production 호출 0).
+  - SwUT 빌더 등 다른 SwUDS 판독기 4 곳의 옛 머리말 문법(R96 남은 것).

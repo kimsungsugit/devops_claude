@@ -681,8 +681,8 @@ def test_the_scan_records_stray_directives_and_the_cache_versions_move_together(
         "directives"]] == [("undef", "B")]
     from backend.helpers.uds import _SOURCE_SECTIONS_SCHEMA_VERSION
     # (R82) struct member `pointer_depth` · (R89) per-build globals of a function · (R90) union / bit-field members · storage order pragmas
-    # · (callee contract G5) per-function termination facts
-    assert (cpc.SCHEMA_VERSION, _SOURCE_SECTIONS_SCHEMA_VERSION) == (28, "v58")
+    # · (callee contract G5) per-function termination facts · (R97) payload `project_maps` (the project context is unchanged)
+    assert (cpc.SCHEMA_VERSION, _SOURCE_SECTIONS_SCHEMA_VERSION) == (28, "v59")
 
 
 def test_undecided_reasons_say_whether_an_input_can_settle_them():

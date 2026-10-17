@@ -260,8 +260,9 @@ def _empty_docx(path: Path) -> str:
 class TestSutsGeneratorRecordsInputs:
     def test_input_documents_reach_the_quality_report_and_the_disclosure(self, tmp_path, monkeypatch):
         calls = _boom_extractor(monkeypatch)
-        # 저장소 override 스냅샷(`docs/uds_function_swcom_override.json`)은 따로 다룬다(백로그) — 여기선 SDS 축만 본다
-        monkeypatch.setattr(gsuts, "_OVERRIDE_JSON_CANDIDATES", ())
+        # override 맵(R97: 프로젝트 맵)은 따로 다룬다(`test_project_maps.py`) — 여기선 SDS 축만 본다
+        # (R97) 프로젝트 맵 없음 — 예전엔 저장소 전역 override 를 끄던 자리
+        monkeypatch.setattr("report_gen.project_maps.PROJECT_MAPS_DIR", tmp_path / "no_project_maps")
         (tmp_path / "m.c").write_text("typedef unsigned char U8;\nU8 Fn(U8 a)\n{\n    return a;\n}\n", encoding="utf-8")
         srs = _empty_docx(tmp_path / "(P_SRS) Software Requirements Specification.docx")
         out = gsuts.generate_suts(source_root=str(tmp_path), output_path=str(tmp_path / "u.xlsm"), scope="source",
@@ -294,7 +295,8 @@ class TestSutsGeneratorRecordsInputs:
         입력 문서 항목이 그 블록을 말한다."""
         import contextlib
 
-        monkeypatch.setattr(gsuts, "_OVERRIDE_JSON_CANDIDATES", ())
+        # (R97) 프로젝트 맵 없음 — 예전엔 저장소 전역 override 를 끄던 자리
+        monkeypatch.setattr("report_gen.project_maps.PROJECT_MAPS_DIR", tmp_path / "no_project_maps")
         (tmp_path / "m.c").write_text("typedef unsigned char U8;\nU8 Fn(U8 a)\n{\n    return a;\n}\n", encoding="utf-8")
         uds = _empty_docx(tmp_path / "(P_SwUDS) Software Unit Design Specification.docx")
         real = gsuts._resolved_doc_input
@@ -458,8 +460,15 @@ class TestDisclosure:
               "asil_evidence_distribution": {"override": 28, "uds+override": 200, "uds": 900, "none": 3},
               "asil_decided_by_override": 31}
         it = next(i for i in build_disclosures("suts", qr) if i["key"] == "suts_input_documents")
-        assert "예외: 저장소 override 스냅샷" in it["note"] and "unit 228개" in it["note"]
+        # (R97) 맵 기록이 없는 산출물(R97 이전)은 어느 프로젝트의 맵인지 모른다고만 말한다 — 지어내지 않는다
+        assert "예외: override 스냅샷" in it["note"] and "unit 228개" in it["note"]
+        assert "어느 프로젝트의 맵인지 기록하지 않았다" in it["note"]
         assert "그중 31개는 SwUDS 가 없거나 더 낮아" in it["note"]
+        # (R97) 기록이 있으면 그 프로젝트의 맵이라고 말한다 — 예전 "프로젝트 확인 없음" 대신 남은 약함(문서 판 미대조)을
+        pm = {"override": {"status": "applied", "project": "HDPDM01", "file": "hdpdm01/uds_function_swcom_override.json"}}
+        it = next(i for i in build_disclosures("suts", dict(qr, project_maps=pm)) if i["key"] == "suts_input_documents")
+        assert "예외: 프로젝트 HDPDM01 의 override 맵(`docs/project_maps/hdpdm01/uds_function_swcom_override.json`" in it["note"]
+        assert "판은 대조하지 않음" in it["note"] and "프로젝트 확인 없음" not in it["note"]
         it = next(i for i in build_disclosures("suts", dict(qr, asil_evidence_distribution={"none": 3}))
                   if i["key"] == "suts_input_documents")
         assert "예외" not in it["note"]
@@ -497,7 +506,7 @@ class TestDisclosure:
         note = next(i for i in build_disclosures("suts", {"input_documents": block,
                                                           "asil_evidence_distribution": {"override": 4}})
                     if i["key"] == "suts_input_documents")["note"]
-        assert note.startswith("저장소 override 스냅샷") and "예외" not in note
+        assert note.startswith("override 스냅샷") and "예외" not in note
 
     def test_specified_document_replaced_by_the_request_list_is_said(self):
         """(리뷰 2차 I5) 지정한 SRS 를 못 열고 요구 문서 목록의 SRS 가 쓰였으면 그 사실을 말한다."""

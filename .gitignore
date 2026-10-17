@@ -62,6 +62,10 @@ docs/*
 !docs/api/
 !docs/plans/
 !docs/admin-operations.md
+# (R97) 프로젝트별 맵(component_map · override + 매니페스트) — 생성 입력이라 추적한다. 설정 화면의 덮어쓰기 백업은 제외
+!docs/project_maps/
+docs/project_maps/**/*.prev
+docs/project_maps/**/*.tmp
 project_docs/
 *.log
 # ⚠ 회전 로그(`backend.log.1`)는 `*.log` 에 안 걸린다 — 실측 21MB 짜리가 untracked 로

@@ -292,7 +292,7 @@ class TestGeneratorRecordsScope:
     def _gen(self, tmp_path, monkeypatch, body_xml, scope="suds"):
         from generators import suts as gsuts
 
-        monkeypatch.setattr(gsuts, "_OVERRIDE_JSON_CANDIDATES", ())
+        # (R97) 프로젝트 맵은 생성 루트가 매니페스트 루트 안일 때만 적용된다 — tmp_path 는 어느 프로젝트도 아니라 격리 patch 가 필요 없다
         (tmp_path / "m.c").write_text(
             "typedef unsigned char U8;\n"
             "U8 f_a(U8 a)\n{\n    return a;\n}\n"

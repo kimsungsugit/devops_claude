@@ -66,8 +66,15 @@ _CACHE_LOCK = threading.RLock()
 _CACHE_TTL_S = 900.0
 
 
+def _project_maps_fp(source_root: str, scm_id: str = "") -> str:
+    """(R97) 이 측정이 쓰는 프로젝트 맵(component_map · override)의 지문 — 키와 서명에 든다. 소스 단계와 같은 판정
+    (`report_gen.project_maps.resolve_project_maps`)이라 맵을 고치거나 다른 프로젝트 맵이 골라지면 캐시가 깨진다."""
+    from report_gen.project_maps import resolve_project_maps
+    return resolve_project_maps(source_root, scm_id=scm_id or None).fingerprint
+
+
 def _key(source_root: str, sds_path: str = "", srs_path: str = "",
-         uds_path: str = "") -> str:
+         uds_path: str = "", *, scm_id: str = "", pm_fp: Optional[str] = None) -> str:
     """캐시 키 — **결과를 바꾸는 입력을 전부** 담는다.
 
     ⚠ 오래 `source_root` 하나였다. 그런데 `measure()` 는 SwDS·SwRS·SwUDS 를 읽어
@@ -80,10 +87,12 @@ def _key(source_root: str, sds_path: str = "", srs_path: str = "",
 
     ⚠ 파일 **내용** 변경(같은 경로, 편집됨)은 여기서 못 잡는다. mtime 조회가 cloudium
       worker IPC 라 preflight 마다 물으면 비싸다. 그 축은 TTL 이 담당한다.
+    ⚠ (R97) 맵 지문도 결과를 바꾸는 입력이다(SwCom 라벨 · 시험 범위 · override 보충) — `scm_id` 가 아니라 **고른 맵**을 담는다.
     """
     parts = [str(p or "").strip().lower().replace("\\", "/")
              for p in (source_root, sds_path, srs_path, uds_path)]
-    return "\x1f".join(parts)
+    # (R97 리뷰 I1) `pm_fp` — 측정이 실제로 쓴 판정의 지문. 측정 끝에 다시 고르면 그 사이 바뀐 맵의 지문으로 옛 결과를 저장한다
+    return "\x1f".join(parts + [pm_fp if pm_fp is not None else _project_maps_fp(source_root, scm_id)])
 
 
 def _doc_signature(paths: Tuple[str, ...]) -> Optional[str]:
@@ -109,7 +118,7 @@ def _doc_signature(paths: Tuple[str, ...]) -> Optional[str]:
 
 
 def signature_for(source_root: str, sds_path: str = "", srs_path: str = "",
-                  uds_path: str = "") -> Optional[str]:
+                  uds_path: str = "", *, scm_id: str = "", pm_fp: Optional[str] = None) -> Optional[str]:
     """측정 입력의 내용 서명 — 같은 경로를 **편집한 경우**를 잡는다.
 
     ⚠ 캐시 키(`_key`)는 경로만 담는다. 그래서 SwDS 를 열어 고치고 저장해도 키가 같아
@@ -131,7 +140,9 @@ def signature_for(source_root: str, sds_path: str = "", srs_path: str = "",
     except Exception:  # noqa: BLE001 - 서명 불가는 "모른다"
         src_sig = None
     doc_sig = _doc_signature((sds_path, srs_path, uds_path))
-    return None if (src_sig is None or doc_sig is None) else f"{src_sig}|{doc_sig}"
+    # (R97) 맵 지문 — 소스 단계 캐시(`_get_source_sections_cached`) 서명과 같은 축
+    return (None if (src_sig is None or doc_sig is None)
+            else f"{src_sig}|{doc_sig}|pm={pm_fp if pm_fp is not None else _project_maps_fp(source_root, scm_id)}")
 
 
 def clear_cache() -> None:
@@ -152,23 +163,23 @@ def _fresh(hit: Optional[Tuple[Any, ...]], sig: Optional[str]) -> bool:
 
 
 def has_cached(source_root: str, *, sds_path: str = "", srs_path: str = "",
-               uds_path: str = "") -> bool:
+               uds_path: str = "", scm_id: str = "") -> bool:
     """측정된 결과가 있는가 — preflight 가 이걸 먼저 본다.
 
     ⚠ 호출부는 `measure()` 에 넘긴 것과 **같은 경로**를 넘겨야 한다. 안 그러면 캐시가
       영영 안 맞아 게이트가 계속 `unmeasured` 다. 그래서 양쪽 다 `_resolve_inputs`
       한 곳에서 경로를 얻는다(`test_docgen_preflight.py` 가 그 일치를 강제한다).
     """
-    sig = signature_for(source_root, sds_path, srs_path, uds_path)
+    sig = signature_for(source_root, sds_path, srs_path, uds_path, scm_id=scm_id)
     with _CACHE_LOCK:
-        return _fresh(_CACHE.get(_key(source_root, sds_path, srs_path, uds_path)), sig)
+        return _fresh(_CACHE.get(_key(source_root, sds_path, srs_path, uds_path, scm_id=scm_id)), sig)
 
 
 def cached(source_root: str, *, sds_path: str = "", srs_path: str = "",
-           uds_path: str = "") -> Optional[Dict[str, Any]]:
-    sig = signature_for(source_root, sds_path, srs_path, uds_path)
+           uds_path: str = "", scm_id: str = "") -> Optional[Dict[str, Any]]:
+    sig = signature_for(source_root, sds_path, srs_path, uds_path, scm_id=scm_id)
     with _CACHE_LOCK:
-        hit = _CACHE.get(_key(source_root, sds_path, srs_path, uds_path))
+        hit = _CACHE.get(_key(source_root, sds_path, srs_path, uds_path, scm_id=scm_id))
         if _fresh(hit, sig):
             out = dict(hit[1])
             # 언제 잰 것인지와 **변경을 감지할 수 있는지**를 함께 싣는다. 신선도를
@@ -395,6 +406,7 @@ def _measure_suts_inputs(
     *,
     units_out: Optional[List[Any]] = None,
     uds_io_map: Optional[Dict[str, Any]] = None,
+    component_map: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """**입력 변수가 하나도 없는 unit** 과 그 사유.
 
@@ -411,6 +423,7 @@ def _measure_suts_inputs(
             부르면 같은 일을 두 번 한다. 저장소의 `stats_out` 규약과 같은 모양이다.
         uds_io_map: SwUDS 입출력·ASIL 표(`load_uds_unit_io`). (R70 리뷰 W2) 생성기는 이 표를 넘겨 등급을
             `uds+…` 로 정하는데 측정이 안 넘기면 같은 unit 이 `override`(약함)로 잡혀 근거 축이 과대 보고된다.
+        component_map: (R97) 이 프로젝트의 component_map 조회 맵 — 생성기와 같은 시험 범위(`verify_scope`) 판정.
     """
     from generators.suts import collect_unit_functions
 
@@ -418,7 +431,7 @@ def _measure_suts_inputs(
         # ⚠ `globals_info_map` 을 빠뜨리면 이 패널이 **실제 산출물과 다른 unit 목록**을
         #   센다 — const 전역 억제가 여기서만 안 걸려 "입력 0개" 판정이 어긋난다.
         units = collect_unit_functions(fd, globals_info_map or {}, sds_map=sds_map or {},
-                                       uds_io_map=uds_io_map)
+                                       uds_io_map=uds_io_map, component_map=component_map)
     except Exception as exc:  # noqa: BLE001 — 생성기 계열이 광범위
         _logger.warning("test_materials: SUTS unit 수집 실패 — %s", exc, exc_info=True)
         return {"measured": False, "reason": f"unit 수집 실패 ({type(exc).__name__})"}
@@ -528,9 +541,10 @@ def _measure_suts_asil(units: List[Any], *, uds_map: bool = False) -> Dict[str, 
 
     weak: List[str] = []
     conflict: List[str] = []
-    # (R70 N83) 저장소 override 스냅샷(`docs/uds_function_swcom_override.json`)이 **혼자** 정한 등급. SwUDS 가
-    #   같이 말했으면(`uds+override`) 표가 결정한 것이라 여기 안 센다. 이 스냅샷은 프로젝트 확인이 없는 값이라
-    #   (R68) 부분문자열 매칭과 같은 급의 "근거 약함" 이다 — 예전엔 `source` 로 접혀 이 축이 조용했다.
+    # (R70 N83) override 스냅샷이 **혼자** 정한 등급. SwUDS 가 같이 말했으면(`uds+override`) 표가 결정한 것이라 여기 안
+    #   센다. 이 스냅샷은 (R68) 부분문자열 매칭과 같은 급의 "근거 약함" 이다 — 예전엔 `source` 로 접혀 이 축이 조용했다.
+    # (R97) 스냅샷은 HDPDM01 정본 SwUDS 역추출(`docs/project_maps/hdpdm01/`)이고 이제 소스 루트 · SCM id 로 그 프로젝트일 때만
+    #   걸린다 — 문서 판(版)은 대조하지 않으므로 여전히 약한 근거다.
     override_only_grade: List[str] = []
     # 소스에 없고 스냅샷에만 있어 빈 엔트리로 보충된 unit(prototype 자리표시).
     phantom: List[str] = []
@@ -720,15 +734,24 @@ def _fid_lists(req_to_fids: Dict[str, List[Any]]) -> List[List[int]]:
 
 
 def measure(source_root: str, *, sds_path: str = "", srs_path: str = "",
-            uds_path: str = "") -> Dict[str, Any]:
-    """시험 문서 재료를 측정한다. **느리다** — 전용 엔드포인트에서만 부를 것."""
+            uds_path: str = "", scm_id: str = "") -> Dict[str, Any]:
+    """시험 문서 재료를 측정한다. **느리다** — 전용 엔드포인트에서만 부를 것.
+
+    (R97) `scm_id` 는 프로젝트 맵(component_map · override)을 고르는 데만 쓴다 — 생성기(`generate_suts`)와 **같은 판정**
+    (`report_gen.project_maps.resolve_project_maps`)으로 소스 단계 · override 보충 · 시험 범위를 잰다. 조회(`cached`)도 같은 id 를
+    넘겨야 같은 키가 된다(키는 id 가 아니라 고른 맵의 지문이라, id 로 고르든 루트로 고르든 같은 맵이면 같은 키다).
+    """
     if not str(source_root or "").strip():
         return {"ok": False, "reason": "소스 루트가 지정되지 않았습니다"}
 
     t0 = time.time()
+    from report_gen.project_maps import resolve_project_maps
+    from report_gen.requirements import component_map_from_rows
+    _pmaps = resolve_project_maps(source_root, scm_id=scm_id or None)
     try:
         from report_generator import generate_uds_source_sections
-        _sections = generate_uds_source_sections(source_root) or {}
+        # (R97 리뷰 I1) 위에서 고른 판정 하나로 파싱 · 보충 · 범위 · 캐시 키를 다 한다 — 측정 중 맵이 바뀌어도 한 판정이다
+        _sections = generate_uds_source_sections(source_root, scm_id=scm_id or None, project_maps=_pmaps) or {}
         fd = _sections.get("function_details", {}) or {}
         # 전역 선언 정보(타입·배열 차원). 이걸 안 넘기면 아래 SUTS 측정이 실제
         # 산출물과 다른 규칙으로 돈다 — `collect_unit_functions` 참조.
@@ -748,7 +771,8 @@ def measure(source_root: str, *, sds_path: str = "", srs_path: str = "",
     fd_suts: Dict[str, Any] = dict(fd)
     try:
         from generators.suts import supplement_override_only
-        supplement_override_only(fd_suts)
+        # (R97) 이 프로젝트의 override 맵만 — 생성기와 같은 인자
+        supplement_override_only(fd_suts, _pmaps.override.data if _pmaps.override.applied else None)
     except Exception as exc:  # noqa: BLE001 — 보충 실패는 생성기와 같이 경고 후 소스 함수만으로 잰다
         _logger.warning("test_materials: override 보충 실패 — 소스 함수만 잰다: %s", exc)
     # (R70 리뷰 W2) SwUDS 표도 생성기와 같이 넘긴다 — 없이 재면 표가 정할 등급이 `override`(약함)로 잡혀 과대 보고.
@@ -775,7 +799,10 @@ def measure(source_root: str, *, sds_path: str = "", srs_path: str = "",
         "sits": _measure_sits(fd, sds_map, sds_reason, uds_path,
                               source_roots=list((_sections.get("project_context") or {}).get("roots") or [])),
         "suts": _measure_suts_types(fd),
-        "suts_inputs": _measure_suts_inputs(fd_suts, sds_map, gim, units_out=_units, uds_io_map=_uds_io),
+        "suts_inputs": _measure_suts_inputs(
+            fd_suts, sds_map, gim, units_out=_units, uds_io_map=_uds_io,
+            component_map=(component_map_from_rows(_pmaps.component_map.data)
+                           if _pmaps.component_map.applied else None)),
         "suts_asil": _measure_suts_asil(_units, uds_map=bool(_uds_io)),
         "sts_mapping": _measure_sts_mapping(fd, sds_map, sds_reason, srs_path, uds_path),
         # UDS 분류 상한이 **실제로 무엇을 잘랐는가**(`uds_generator` 의 `category_caps`).
@@ -785,9 +812,11 @@ def measure(source_root: str, *, sds_path: str = "", srs_path: str = "",
         # 소스 파일 상한(1200)에 닿았는가. 닿으면 그 뒤 파일의 함수가 규격서에 **아예
         # 없다** — 게이트가 이 값 없이는 "확인됨" 이라고만 말할 수 있었다.
         "uds_file_scan": _sections.get("file_scan") or {},
+        # (R97) 어느 프로젝트의 맵으로 쟀나 — 게이트가 "SwCom 라벨 · 시험 범위가 왜 비었나" 를 말할 근거
+        "project_maps": _pmaps.describe(),
     }
-    _sig = signature_for(source_root, sds_path, srs_path, uds_path)
+    _sig = signature_for(source_root, sds_path, srs_path, uds_path, scm_id=scm_id, pm_fp=_pmaps.fingerprint)
     with _CACHE_LOCK:
-        _CACHE[_key(source_root, sds_path, srs_path, uds_path)] = (
+        _CACHE[_key(source_root, sds_path, srs_path, uds_path, scm_id=scm_id, pm_fp=_pmaps.fingerprint)] = (
             time.time(), result, _sig)
     return result

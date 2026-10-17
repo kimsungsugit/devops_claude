@@ -1253,6 +1253,23 @@ def annotate_sds_coarse(rows: Optional[List[Dict[str, Any]]]) -> Tuple[int, int]
     return total, coarse_count
 
 
+def component_path_key_matches(file_path: Any, key: Any) -> bool:
+    """소스 경로가 component_map 경로 키(`"PDS64_FBL/Sources/main.c"`)로 끝나는가 — **OS 경로 규칙으로**(Windows 는 대소문자 ·
+    구분자 무시, `os.path.normcase`). 경로 키가 없는 키(`/` 없음)는 False.
+
+    (R97 리뷰2 I-c) 예전 비교는 문자열 `endswith` 라 대소문자를 봤다 — 레지스트리 루트 철자만 다른 Windows 경로
+    (`ne1aw_porting` vs `NE1AW_PORTING`)는 맵이 `applied` 인데 PV 의 경로 키 행(`EEPROM.c`)만 조용히 놓쳤다. 이 판정은
+    `resolve_component_entry` 와 소스 단계(`uds_generator` 두 루프)가 같이 쓴다 — 한쪽만 고치면 라벨과 범위가 갈린다.
+    """
+    import os
+
+    k = str(key or "").replace("\\", "/")
+    if "/" not in k:
+        return False
+    fp = str(file_path or "").replace("\\", "/").strip()
+    return bool(fp) and os.path.normcase(fp).endswith(os.path.normcase(k))
+
+
 def resolve_component_entry(
     file_path: Any, component_map: Optional[Dict[str, Dict[str, str]]]
 ) -> Dict[str, str]:
@@ -1273,7 +1290,7 @@ def resolve_component_entry(
     if not fp:
         return {}
     for key, val in component_map.items():
-        if "/" in key and fp.endswith(key) and isinstance(val, dict):
+        if isinstance(val, dict) and component_path_key_matches(fp, key):
             return val
     name = fp.rsplit("/", 1)[-1]
     stem = name.rsplit(".", 1)[0] if "." in name else name
@@ -1288,28 +1305,31 @@ def component_verify_of(
     return str((resolve_component_entry(file_path, component_map) or {}).get("verify") or "").strip().upper()
 
 
-def _load_component_map() -> Dict[str, Dict[str, str]]:
-    # report_gen/docs/ → 프로젝트 루트 docs/ 순으로 탐색
-    candidates = [
-        Path(__file__).resolve().parent / "docs" / "component_map.json",
-        Path(__file__).resolve().parent.parent / "docs" / "component_map.json",
-    ]
-    path = None
-    for c in candidates:
-        try:
-            if c.exists():
-                path = c
-                break
-        except Exception:
-            continue
-    if not path:
+def _load_component_map(source_root: str = "", *, scm_id: Optional[str] = None) -> Dict[str, Dict[str, str]]:
+    """이 생성(소스 루트 · SCM id)의 프로젝트 component_map → 조회 맵. 프로젝트가 안 정해지면 `{}`.
+
+    (R97) 예전엔 인자 없이 저장소 `docs/component_map.json`(HDPDM01 자료)을 **모든 프로젝트에** 읽었다 — KJPDS02_PV 소스 178
+    파일 중 110 이 이름으로 맞아 35 가 HD 의 verify=X 를 받았다. 판정은 `report_gen.project_maps.resolve_project_maps` 단일 출처다.
+    ⚠ 인자 없는 호출은 프로젝트를 모르는 호출이다 — 옛 동작(전역 파일)으로 돌아가지 않고 `{}` 를 낸다(디버그 로그).
+    """
+    if not str(source_root or "").strip() and not str(scm_id or "").strip():
+        _logger.debug("_load_component_map: 소스 루트 · SCM id 없이 불렸다 — 프로젝트를 몰라 맵 없음({})")
         return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    from report_gen.project_maps import resolve_project_maps
+
+    use = resolve_project_maps(source_root, scm_id=scm_id).component_map
+    return component_map_from_rows(use.data) if use.applied else {}
+
+
+def component_map_from_rows(rows: Any) -> Dict[str, Dict[str, str]]:
+    """component_map 행 목록(`[{structure, file, component, verify}]`) → 조회 맵(파일 이름 · stem · 경로 키).
+
+    (R97) `_load_component_map` 본문에서 뽑았다 — 프로젝트 맵(`report_gen.project_maps`)이 읽은 행과 업로드된 목록이 같은
+    변환을 타야 한다. 목록이 아니면 `{}`.
+    """
+    if not isinstance(rows, list):
         return {}
-    if not isinstance(data, list):
-        return {}
+    data = rows
     mapping: Dict[str, Dict[str, str]] = {}
     for row in data:
         if not isinstance(row, dict):
@@ -1326,6 +1346,13 @@ def _load_component_map() -> Dict[str, Dict[str, str]]:
             "verify": verify,
             "structure": structure,
         }
+        if str(row.get("match") or "").strip().lower() == "path" and ("/" in file_name or "\\" in file_name):
+            # (R97 리뷰 W8) 경로로만 맞는 행 — 같은 이름이 다른 트리에도 있어(KJPDS02_PV `EEPROM.c`: APP `Generated_Code` · FBL
+            #   `Sources/Eeprom`) 이름 · stem · `_it_` 별칭 키를 등록하면 다른 트리의 같은 이름 파일이 이 컴포넌트를 받는다.
+            #   경로 키 하나만 둔다(`resolve_component_entry` · 소스 단계 조회가 경로 키를 먼저 본다). 이 표지가 없는 옛 행
+            #   (HDPDM01 `PDS64_FBL/…`)은 종전대로 이름 키도 둔다 — HD 산출물 불변.
+            mapping[file_name.replace("\\", "/")] = entry
+            continue
         mapping[file_name] = entry
         mapping[Path(file_name).stem] = entry
         # Fuzzy: _it_PDS ↔ _PDS 변환 매칭 (소스 파일명 규칙 차이 대응)

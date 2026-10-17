@@ -45,8 +45,10 @@ PLACEHOLDER_VALUES = frozenset({"", "tbd", "n/a", "na", "-", "none"})
 #   - "module_inherit": 모듈에서 물려받음 (0.70)
 #   - "rule"          : 이름 규칙 등 기계적 규칙 (0.75)
 #   - "generated_doc" : 자기 산출물(생성 DOCX)에서 회수, 원 유래 불명 (0.30)
-#   - "override"      : 저장소의 정본 역추출 스냅샷 `docs/uds_function_swcom_override.json`
-#                       (2026-04-09, 함수 이름 키 — 프로젝트 확인 없음) 이 채움 (0.60).
+#   - "override"      : 프로젝트 override 맵 — HDPDM01 은 정본 SwUDS 역추출 스냅샷
+#                       (2026-04-09, 함수 이름 키) 이 채움 (0.60). (R97) 예전엔 저장소 `docs/` 의 그 파일이 어느 프로젝트에나
+#                       걸렸다 — 이제 `docs/project_maps/<프로젝트>/` 에 있고 소스 루트 · SCM id 로 그 프로젝트일 때만 걸린다
+#                       (`report_gen.project_maps`). 문서 판(版)은 대조하지 않으므로 약한 점수(0.60)는 그대로 둔다.
 #                       (R68 N72) 예전엔 이 값이 `inference`/`sds` 로 찍혔다(값과 라벨의 출처가 달랐다).
 #                       점수·약함 판정은 `inference` 와 같게 둔다 — override 가 준 값의 점수·덮어쓰기
 #                       규칙(SwDS·정본이 덮는다)이 종전과 같다. ⚠ 값 없는 TBD 축은 라벨과 무관하다:

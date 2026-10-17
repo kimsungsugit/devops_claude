@@ -29,7 +29,20 @@ import pytest
 from report_gen.uds_generator import _OVERRIDE_SOURCE, _source_stage_provenance
 
 REPO = Path(__file__).resolve().parents[2]
-OVERRIDE_PATH = REPO / "docs" / "uds_function_swcom_override.json"
+# (R97) 저장소 전역 `docs/uds_function_swcom_override.json` 은 HDPDM01 자료라 그 프로젝트 폴더로 옮겼다 — 이제 맵은 소스 루트 ·
+#   SCM id 로 그 프로젝트일 때만 걸리므로, 아래 생성기 통합 시험은 tmp 소스 트리를 이 맵의 프로젝트로 **등록해서** 쓴다.
+OVERRIDE_PATH = REPO / "docs" / "project_maps" / "hdpdm01" / "uds_function_swcom_override.json"
+
+
+def _register_override(maps_dir: Path, root: Path, ovr: dict) -> Path:
+    """tmp 소스 루트를 override 맵을 가진 프로젝트로 등록(`report_gen.project_maps` 매니페스트)."""
+    d = maps_dir / "r68"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "uds_function_swcom_override.json").write_text(json.dumps(ovr), encoding="utf-8")
+    (d / "project.json").write_text(json.dumps({"schema": 1, "project": "R68", "source_roots": [str(root)],
+                                                "maps": {"override": {"file": "uds_function_swcom_override.json"}}}),
+                                    encoding="utf-8")
+    return maps_dir
 
 
 # ─── 1. 헬퍼 — 값을 준 단계가 라벨을 단다 ──────────────────────────────────────────
@@ -153,7 +166,8 @@ class TestValueChainUnchanged:
 
 class TestVocabularyParityWithInference:
     def test_override_is_a_weak_source(self):
-        """약해야 SwDS(`docx_builder`)·정본이 종전대로 덮는다 — 강하게 두면 KJPDS02 스냅샷이 다른 프로젝트에 굳는다."""
+        """약해야 SwDS(`docx_builder`)·정본이 종전대로 덮는다 — 강하게 두면 override 스냅샷(R97: HDPDM01 자료로 확인)이 문서
+        근거를 이긴다."""
         from report_gen.provenance import WEAK_SOURCES, is_weak_source
 
         assert "override" in WEAK_SOURCES
@@ -190,7 +204,9 @@ class TestVocabularyParityWithInference:
 
     def test_confidence_report_names_the_label_and_its_evidence(self, tmp_path):
         """신뢰도 사이드카가 새 라벨을 어휘로 알아야 한다 — 모르면 `미상(분류 불가)` 로 접히고 드리프트 카운터만 오른다.
-        근거 문구는 파일 출처와 "이 프로젝트의 값인지 확인되지 않았다" 를 말해야 한다(X8 — 정본 그 자체로 읽히면 안 된다)."""
+        근거 문구는 파일 출처와 "정본의 판은 대조하지 않았다" 를 말해야 한다(X8 — 정본 그 자체로 읽히면 안 된다).
+        (R97) 예전 문구 "이 프로젝트의 값인지 확인되지 않았다" 는 맵이 어느 프로젝트에나 걸리던 때의 사실이다 — 이제 프로젝트는
+        소스 루트 · SCM id 로 확인하므로 남은 약함(문서 판 미대조)을 말한다."""
         from report_gen.validation import generate_asil_related_confidence_report
 
         out = tmp_path / "conf.md"
@@ -199,8 +215,8 @@ class TestVocabularyParityWithInference:
             "related": "SwCom_01", "related_source": "override"}}}, str(out))
         text = out.read_text(encoding="utf-8")
         assert "함수 override 맵(정본 역추출 스냅샷): `1` / `1`" in text, text[:1500]
-        assert "docs/uds_function_swcom_override.json" in text
-        assert "확인되지 않았다" in text
+        assert "docs/project_maps/" in text and "uds_function_swcom_override.json" in text
+        assert "대조하지 않았다" in text
         assert "미상(분류 불가): `1`" not in text
 
     def test_docgen_field_sources_treats_it_as_ungrounded(self):
@@ -218,11 +234,17 @@ class TestVocabularyParityWithInference:
 
 @pytest.fixture(scope="module")
 def sections(tmp_path_factory):
-    """`main` 은 저장소 override 에 ASIL·Related 가 있다(2026-04-09 이래). 주석 없는 함수 하나·`@asil` 주석 함수 하나를 곁들인다."""
+    """`main` 은 저장소 override 에 ASIL·Related 가 있다(2026-04-09 이래). 주석 없는 함수 하나·`@asil` 주석 함수 하나를 곁들인다.
+
+    (R97) tmp 루트를 그 override 맵의 프로젝트로 등록한다 — 등록 없이는(남의 프로젝트 루트) 맵이 안 걸리는 것이 새 계약이다
+    (`test_project_maps.py::TestSourceStage`)."""
+    import report_gen.project_maps as pmod
+
     ovr = json.loads(OVERRIDE_PATH.read_text(encoding="utf-8"))
     if not (ovr.get("main") or {}).get("asil"):
         pytest.skip("override JSON 에 main/asil 이 없다 — 전제가 바뀌었다")
     root = tmp_path_factory.mktemp("r68src")
+    maps_dir = _register_override(tmp_path_factory.mktemp("r68maps"), root, ovr)
     (root / "app.c").write_text(
         "#include <stdint.h>\n"
         "static uint8_t g_cnt;\n"
@@ -233,7 +255,9 @@ def sections(tmp_path_factory):
         encoding="utf-8")
     from report_gen.uds_generator import generate_uds_source_sections
 
-    out = generate_uds_source_sections(str(root))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(pmod, "PROJECT_MAPS_DIR", maps_dir)
+        out = generate_uds_source_sections(str(root))
     by_name = {str(i.get("name")): i for i in (out.get("function_details") or {}).values() if isinstance(i, dict)}
     return ovr, by_name
 
@@ -261,12 +285,17 @@ class TestGeneratedSections:
     def test_fallback_loop_uses_the_same_chain(self, tmp_path, monkeypatch):
         """AST 가 놓친 함수는 텍스트 폴백 루프로 간다(R62 기법: `parse_c_project` 결과에서 빼낸다). (R70 N84) 그 루프의
         Related 사슬에도 override 가 선다 — R68 까지는 ASIL 만 override 를 봐 같은 함수가 루프에 따라 다른 Related 를 받았다."""
+        import report_gen.project_maps as pmod
         import workflow.code_parser as pkg
         from report_gen.uds_generator import generate_uds_source_sections
 
         ovr = json.loads(OVERRIDE_PATH.read_text(encoding="utf-8"))
         if not ((ovr.get("main") or {}).get("asil") and (ovr.get("main") or {}).get("related")):
             pytest.skip("override JSON 에 main 의 asil/related 가 없다")
+        src = tmp_path / "src"
+        src.mkdir()
+        monkeypatch.setattr(pmod, "PROJECT_MAPS_DIR", _register_override(tmp_path / "maps", src, ovr))   # (R97)
+        tmp_path = src
         (tmp_path / "fb.c").write_text(
             "static int g;\nvoid main(void)\n{\n    g = 1;\n}\nvoid r68_seen(void)\n{\n    g = 2;\n}\n", encoding="utf-8")
         real = pkg.parse_c_project

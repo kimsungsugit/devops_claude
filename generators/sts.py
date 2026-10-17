@@ -3647,6 +3647,7 @@ def generate_sts(
     hwrs_path: Optional[str] = None,
     hwds_path: Optional[str] = None,
     input_skips: Optional[List[str]] = None,
+    project_maps: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Top-level STS generation pipeline.
 
@@ -3681,6 +3682,9 @@ def generate_sts(
             미정인 감시 경로를 좁힌다.
         input_skips: (R66) 호출자가 SRS · SDS · UDS · STP 를 로컬화하지 못한 사유 ``"<라벨>: <사유>"`` — 그 문서는 '주지
             않음' 이 아니라 '지정했지만 열지 못함' 으로 공시한다(시스템 문서 · HSIS 는 ``system_input_skips``).
+        project_maps: (R97) `function_details` 를 만든 소스 단계의 `project_maps`(어느 프로젝트의 component_map · override 를
+            썼나) — 호출자가 소스 단계 결과에서 그대로 넘긴다. 없으면 `source_root` 로 같은 판정을 다시 해서 적는다(STS 는
+            function_details 를 받기만 해서 스스로는 그 기록을 못 본다). 품질 리포트 `generation_stats.project_maps`.
 
     Returns:
         Dict with keys: output_path, quality_report, trace_coverage
@@ -3794,6 +3798,12 @@ def generate_sts(
         input_documents_record({"SRS": srs_docx_path, "UDS": uds_path, "STP": stp_path}, input_skips),
         SDS=dict(_sds_reading, blocks_unopened=[] if _sds_reading.get("read") or not _sds_reading.get("given")
                  else ["sds_partitions"]))
+    # (R97) 함수 집합 · 모듈 라벨 · Related 를 정한 프로젝트 맵 — 공시 `project_maps_*`(공통 항목)
+    if isinstance(project_maps, dict):
+        gen_stats["project_maps"] = project_maps
+    elif str(source_root or "").strip():
+        from report_gen.project_maps import describe_for_report, resolve_project_maps
+        gen_stats["project_maps"] = describe_for_report(resolve_project_maps(source_root), None)
     _srs_doc = gen_stats["input_documents"]["SRS"]
     if srs_docx_path:
         _srs_doc["requirements"] = _srs_table_n

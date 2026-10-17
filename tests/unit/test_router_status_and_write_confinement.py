@@ -184,7 +184,8 @@ class TestClientWritePathsAreConfined:
 
     @pytest.mark.parametrize("fn,kwargs", [
         ("local_generate_component_map", {"sds_path": "x.docx", "source_root": "y"}),
-        ("local_generate_override", {"uds_path": "x.docx"}),
+        # (R97) override 도 source_root 가 있어야 한다(없으면 400) — 봉인 검사까지 가도록 준다
+        ("local_generate_override", {"uds_path": "x.docx", "source_root": "y"}),
     ])
     def test_project_setup_output_dir_outside_is_403(self, fn, kwargs, outside_dir):
         with pytest.raises(HTTPException) as ei:
@@ -227,10 +228,14 @@ class TestReadPathsStayOpenOnPurpose:
             "읽기까지 봉인됐다 — 저장소 밖 요구문서/산출물을 못 읽게 된다")
 
     def test_sds_and_uds_reads_are_not_confined(self):
+        # (R97 리뷰 W1) 쓰기 봉인은 공용 헬퍼 `_setup_export_dir`(봉인 + 프로젝트 맵 폴더 거부)로 옮겼다 — 두 핸들러가 그것을 부르고,
+        #   헬퍼가 `confine(output_dir` 를 한다. 행동 검증(403 · 맵 폴더 거부)은 위 클래스 · `test_project_maps.py` 가 한다.
+        helper = "\n".join(ln for ln in source_of(L._setup_export_dir).splitlines() if not ln.lstrip().startswith("#"))
+        assert "confine(output_dir" in helper, "_setup_export_dir: 쓰기 봉인이 사라졌다"
         for fn in (L.local_generate_component_map, L.local_generate_override):
             src = source_of(fn)
             code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
-            assert "confine(output_dir" in code, f"{fn.__name__}: 쓰기 봉인이 사라졌다"
+            assert "_setup_export_dir(output_dir)" in code, f"{fn.__name__}: 쓰기 봉인이 사라졌다"
             for read_arg in ("sds_path", "source_root", "uds_path"):
                 assert f"confine({read_arg}" not in code, (
                     f"{fn.__name__}: 읽기 인자 {read_arg} 까지 봉인됐다")

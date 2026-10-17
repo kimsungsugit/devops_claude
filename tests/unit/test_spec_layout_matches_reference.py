@@ -378,10 +378,12 @@ def test_override_map_is_not_used_as_a_filter():
 
     # 보충 기능 자체는 남아 있어야 한다(필터를 걷어내며 같이 지우면 안 된다).
     # (R70) 보충은 `supplement_override_only` 로 뽑혀 생성기와 준비 게이트가 같이 부른다 — 생성기 본체의 호출이 앵커다.
+    # (R97) 보충 목록은 이제 **이 프로젝트의** override 맵(`report_gen.project_maps`)이다 — 생성기는 판정한 맵을 넘긴다.
     body = src.read_text(encoding="utf-8", errors="ignore")
     assert "uds_function_swcom_override.json" in body
     gen_body = body[body.index("def generate_suts("):]
-    assert "supplement_override_only(function_details)" in gen_body
+    assert "supplement_override_only(function_details, _pmaps.override.data if _pmaps.override.applied else None)" \
+        in gen_body
 
 
 def test_suts_validators_count_the_real_rows(tmp_path):

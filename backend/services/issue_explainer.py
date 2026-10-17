@@ -89,6 +89,11 @@ _RULE_ACTION: Dict[str, str] = {
     "reference_id_numbering_differs": "정본 SwUDS 의 함수 ID 와 생성본 ID 가 다른 함수를 가리킨다 — 매칭은 이름으로 했으니 결과는 맞다. 정본 ID 로 함수를 찾지 말 것.",
     "reference_twin_definitions": "같은 이름의 함수가 여러 파일(APP/FBL 등)에 정의돼 있다 — 정본 블록의 피호출자로 어느 정의인지 골랐다. 두 표의 내용이 각자의 소스와 맞는지 확인한다.",
     "sds_partition_map_failed": "SwDS 에서 파티션 맵을 못 뽑았다 — 문서 양식(표 구조)을 확인한다. 정본·소스만으로 채운 문서다.",
+    # (R97) 프로젝트 맵(component_map · override)을 이 프로젝트에 못 썼다 — 남의 맵 · 모호 · 손상
+    "project_map_not_applied": "이 프로젝트의 component_map/override 를 쓰지 못했다 — 이미 맵이 있는데 소스 루트만 바뀐 것이면 맵을 "
+                               "다시 만들지 말고 관리자가 프로젝트 설정에서 루트를 다시 등록한다(손으로 정한 verify=X 가 사라지지 "
+                               "않게). 맵이 없으면 관리자가 이 프로젝트의 SDS 로 맵을 만들면 SwCom 라벨 · 시험 범위 판정이 생긴다"
+                               "(맵 만들기 · 루트 등록은 관리자 전용; 모호 · 손상이면 docs/project_maps 의 매니페스트를 고친다).",
     "sds_partition_map_empty": "요구 문서는 있는데 SwDS 파티션이 0건이다 — 파일명에 SwDS 가 있는지, 표 구조가 맞는지 확인한다.",
     "payload_sidecar_failed": "payload 기록 실패 — 채점기가 자기 대조로 강등됐다. 디스크를 확인하고 재생성한다.",
     "report_timeout": "후처리 리포트가 시간 안에 끝나지 못했다 — 그 리포트 없이 산출물이 나갔다. 예산(UDS_REPORT_TIMEOUT)이나 리포트 성능을 본다.",

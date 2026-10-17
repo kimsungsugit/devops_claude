@@ -257,8 +257,22 @@ _INPUT_DOC_GIVES = {
 _INPUT_DOC_UNUSED = {"sits": {"HSIS"}}
 
 
+def _override_source_text(override_map: Optional[Dict[str, Any]]) -> str:
+    """(R97) override 값이 **어느 프로젝트의 맵**에서 왔나 — 산출물이 적은 `project_maps.override` 로 말한다.
+
+    예전 문구는 "저장소 override 스냅샷(`docs/uds_function_swcom_override.json`, 프로젝트 확인 없음)" 이었다 — 그 파일은 HDPDM01
+    자료였고 어느 프로젝트에나 걸렸다. 이제 맵은 소스 루트 · SCM id 로 그 프로젝트일 때만 걸리지만, 정본의 판(版)까지는 대조하지
+    않으므로 약한 근거(0.60)라는 사실은 그대로 말한다. 맵 기록이 없는 산출물(R97 이전)은 기록이 없다고만 적는다(지어내지 않는다).
+    """
+    if isinstance(override_map, dict) and override_map.get("status") == "applied":
+        return (f"프로젝트 {override_map.get('project') or '?'} 의 override 맵(`docs/project_maps/{override_map.get('file') or '?'}`"
+                " — 정본 SwUDS 역추출 스냅샷, 프로젝트는 소스 루트 · SCM id 로 확인했지만 그 정본의 판은 대조하지 않음)")
+    return "override 스냅샷(`uds_function_swcom_override.json` — 이 산출물은 어느 프로젝트의 맵인지 기록하지 않았다)"
+
+
 def _input_documents_item(block: Any, doc: str, override_units: int = 0,
-                          override_decided: Optional[int] = None) -> List[Dict[str, Any]]:
+                          override_decided: Optional[int] = None,
+                          override_map: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """(R66, 감사 #1 · #62 · #63 · #83) 입력 문서를 무엇을 읽었나 — 문서마다 지정했나 · 열었나(SDS 는 파티션 수, SRS 는 요구 수) ·
     못 쓴 사유와 그 때문에 이 문서에 없는 것. 주지 않은 문서는 '주면 무엇이 채워지는가' 를 말하고, 어떤 경우에도 저장소
     `docs/` 의 다른 프로젝트 문서로 대체하지 않았다는 사실을 적는다. 기록이 없는 구판 산출물이면 항목을 만들지 않는다."""
@@ -335,14 +349,104 @@ def _input_documents_item(block: Any, doc: str, override_units: int = 0,
         # (리뷰 2차 I9 · 3차 W-E) 다 읽었으면 대체 이야기는 잡음이다 — 없거나 못 읽은 문서가 있을 때만(목록 문서 사용은 위 문장)
         + ("없거나 못 읽은 문서는 저장소 docs/ 의 다른 프로젝트 문서로 대체하지 않는다 — 그 값은 비우거나 TBD 로 둔다. "
            if (no_substitute := bool(missing or absent or unused_missing)) else "")
-        # (리뷰 W5 · 2차 W-B) 저장소 override 스냅샷은 아직 프로젝트 확인 없이 쓰인다(백로그 13) — 숨기지 않는다.
+        # (리뷰 W5 · 2차 W-B) override 스냅샷이 근거에 든 사실은 숨기지 않는다(백로그 13).
         #   `uds+override` 도 센다(SwUDS 와 함께 있어도 더 높으면 스냅샷 등급이 이긴다). '예외:' 는 위 문장이 있을 때만(3차 I-b)
+        #   (R97) 어느 프로젝트의 맵인지는 `project_maps.override` 가 말한다 — 예전 "프로젝트 확인 없음" 은 R97 이전 산출물에만
         + ((("예외: " if no_substitute else "")
-            + f"저장소 override 스냅샷(`docs/uds_function_swcom_override.json`, 프로젝트 확인 없음)이 unit {override_units}개의 "
+            + f"{_override_source_text(override_map)}이 unit {override_units}개의 "
             "ASIL 근거에 들었다" + (f"(그중 {override_decided}개는 SwUDS 가 없거나 더 낮아 그 스냅샷 등급이 최종 등급이다)"
                                  if override_decided is not None else "")
             + " — 'ASIL 근거 분포' 항목의 override.") if override_units else "")).strip(),
         tone=_tone(warn))]
+
+
+# ── 프로젝트 맵 (R97) ──────────────────────────────────────────────────────
+_PROJECT_MAP_LABEL = {"component_map": "프로젝트 맵 — component_map(파일 → SwCom · 시험 범위)",
+                      "override": "프로젝트 맵 — override(함수 → SwCom · Related · ASIL)"}
+_PROJECT_MAP_STATUS_KO = {
+    "applied": "적용",
+    "none": "없음",
+    "not_this_project": "다른 프로젝트 맵만 있음 — 쓰지 않음",
+    "ambiguous": "프로젝트가 둘 이상에 맞음 — 쓰지 않음",
+    "invalid": "맵을 읽지 못함 — 쓰지 않음",
+    "no_roots": "프로젝트 미상 — 쓰지 않음",
+}
+# (R97 리뷰 I8) 경고 판정은 `report_gen.project_maps.needs_attention`(`WARN_STATUSES` · 읽지 못한 매니페스트) 단일 출처 — UDS 항목과 같다.
+# (R97 리뷰 W7) 안내가 "맵을 다시 만들라" 만 말하면, 레지스트리 루트가 바뀌어 HD 맵이 안 걸린 경우 사람이 손으로 정한 verify=X 맵을
+#   자동 생성물(전부 O)로 덮게 된다 — 루트를 다시 등록하는 길을 먼저 말한다.
+# (R97 리뷰2 I-f) 맵 만들기 · 루트 다시 등록은 **관리자 전용**이다 — 안내가 그 사실을 말해야 일반 사용자가 403 을 헤매지 않는다.
+_PROJECT_MAP_GUIDE = {
+    "component_map": "이미 이 프로젝트의 맵이 있는데 소스 루트만 바뀐 것이면 맵을 다시 만들지 말고 관리자가 프로젝트 설정에서 **루트를 다시 "
+                     "등록**할 것(맵을 다시 만들면 손으로 정한 verify=X 가 사라진다). 맵이 없는 프로젝트면 관리자가 프로젝트 설정에서 이 "
+                     "프로젝트의 SDS 로 맵을 만들면 SwCom 라벨 · 시험 범위 판정이 생긴다(맵 만들기 · 루트 등록은 관리자 전용).",
+    "override": "이미 이 프로젝트의 override 가 있는데 소스 루트만 바뀐 것이면 관리자가 루트를 다시 등록할 것. override 는 정본 SwUDS "
+                "에서 역추출하는 보조 맵이다 — 없으면 ASIL · Related 는 소스 주석 · SwUDS · SwDS 에서만 온다(관리자가 프로젝트 설정에서 "
+                "참조 SwUDS 로 만들 수 있다 — 맵 만들기 · 루트 등록은 관리자 전용).",
+}
+
+
+def _project_map_defects(d: Dict[str, Any]) -> str:
+    """(R97 리뷰 W8b) 매니페스트가 맵 옆에 적은 **문서 결함 후보**(구조 표에는 있는데 소스에 없는 파일)를 이름으로 — 개수만 말하면
+    아무도 문서를 못 고친다. 비슷한 소스 이름은 '힌트' 로만(자동 대응하지 않았다)."""
+    det = d.get("details") if isinstance(d.get("details"), dict) else {}
+    missing = [str(x) for x in (det.get("table_files_not_in_source") or [])]
+    if not missing:
+        return ""
+    hints = det.get("table_files_not_in_source_hints") if isinstance(det.get("table_files_not_in_source_hints"), dict) else {}
+    named = ", ".join(f"`{m}`" + (f"(비슷한 소스: {', '.join(hints[m])})" if hints.get(m) else "") for m in missing)
+    return (f" 구조 표에는 있는데 소스에 없는 파일 {len(missing)}개(문서 결함 후보 — 이 이름으로는 행을 만들지 않았고 비슷한 이름으로 "
+            f"바꿔 대응하지도 않았다; 헤더 · 소스 짝(`_it_PDS` ↔ `_PDS`) 규칙으로 같은 컴포넌트를 받는 파일은 있을 수 있다): {named}.")
+
+
+def _project_maps_items(pm: Any) -> List[Dict[str, Any]]:
+    """(R97) 어느 프로젝트의 component_map · override 를 썼나 — 종류마다 한 줄.
+
+    예전엔 저장소 `docs/` 의 HDPDM01 맵 두 개가 어느 프로젝트에나 파일 · 함수 이름으로 걸렸고 그 사실이 어디에도 안 남았다
+    (KJPDS02_PV: verify=X 35 파일 · override 223 함수). 이제 맵은 그 프로젝트에만 걸린다 — 안 걸린 사유(남의 맵 · 모호 · 손상 ·
+    읽지 못한 매니페스트)는 warning 으로, 맵이 없는 것은 info 로 말한다. 기록이 없는 구판 산출물이면 항목을 만들지 않는다(모듈 계약).
+    """
+    from report_gen.project_maps import needs_attention
+
+    if not isinstance(pm, dict):
+        return []
+    out: List[Dict[str, Any]] = []
+    for kind in ("component_map", "override"):
+        d = pm.get(kind)
+        if not isinstance(d, dict):
+            continue
+        status = str(d.get("status") or "")
+        entries = d.get("entries")
+        n = f" {entries}{'행' if kind == 'component_map' else '개'}" if isinstance(entries, int) and not isinstance(
+            entries, bool) else ""
+        stage = str(d.get("source_stage") or "")
+        probs = [str(x) for x in (d.get("problems") or [])]
+        prob_note = (f" ⚠ 읽지 못한 매니페스트 {len(probs)}개({'; '.join(probs[:3])}) — 같은 루트를 주장했을 수 있다. "
+                     "docs/project_maps 의 매니페스트를 고칠 것." if probs else "")
+        if stage == "argument":
+            out.append(_item(
+                f"project_maps_{kind}", _PROJECT_MAP_LABEL[kind], f"업로드 목록 {_show(_int(d, 'argument_entries'))}행",
+                "생성 요청에 실린 component 목록을 썼다 — 프로젝트 맵 판정(" + _PROJECT_MAP_STATUS_KO.get(status, status)
+                + ")보다 먼저다. 소스 단계의 SwCom 라벨 · 파일 범위는 업로드 목록, 시험 범위 판정은 프로젝트 맵을 따른다."))
+            continue
+        if status == "applied":
+            value = f"{d.get('project') or '?'}{n}"
+            defects = _project_map_defects(d)
+            note = (f"`docs/project_maps/{d.get('file') or '?'}` — 소스 루트 · SCM id 로 이 프로젝트의 맵을 골랐다."
+                    + (f" 출처: {d.get('origin')}." if d.get("origin") else "") + defects + prob_note)
+            warn = bool(defects) or needs_attention(d)
+            if stage == "differs":
+                warn = True
+                note += (f" ⚠ 소스 단계는 다른 판정({d.get('source_stage_status')} · {d.get('source_stage_project') or '-'})으로 "
+                         "만들어졌다 — 생성 중 맵이 바뀐 것이다. 다시 생성할 것.")
+            out.append(_item(f"project_maps_{kind}", _PROJECT_MAP_LABEL[kind], value, note, tone=_tone(warn)))
+            continue
+        warn = needs_attention(d)
+        note = str(d.get("reason") or "")
+        if warn:
+            note = (note + (". " if note and not note.endswith(".") else " ") + _PROJECT_MAP_GUIDE[kind]).strip()
+        out.append(_item(f"project_maps_{kind}", _PROJECT_MAP_LABEL[kind],
+                         _PROJECT_MAP_STATUS_KO.get(status, status or "(미기록)"), note, tone=_tone(warn)))
+    return out
 
 
 # ── 공통 ───────────────────────────────────────────────────────────────────
@@ -434,6 +538,9 @@ def _common_items(qr: Dict[str, Any], alt: Dict[str, Any], doc_type: str = "") -
             "gen_method_distribution", "생성 방법 분포", _dist(dist) or "(0건)",
             "시험을 만든 방법의 분포다(AOR 요구 기반 · ECA 동치분할 · BAA 경계값 · ABV 동작 · AEC 예외). "
             "한 방법으로 쏠리면 같은 결함 유형만 반복해 겨눈다."))
+
+    # (R97) 어느 프로젝트의 맵을 썼나 — 세 생성기가 같은 키(`project_maps`)를 쓴다(STS 는 generation_stats 폴백도 본다)
+    out.extend(_project_maps_items(qr.get("project_maps")))
     return out
 
 
@@ -1483,7 +1590,8 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
         none_cnt = _int(dist, "none") or 0
         out.append(_item(
             "suts_asil_evidence", "ASIL 근거 분포", _dist(dist) or "(0건)",
-            "uds=SwUDS 표가 정한 등급 · source=소스 주석 @asil · override=저장소 스냅샷(프로젝트 확인 없음) · "
+            "uds=SwUDS 표가 정한 등급 · source=소스 주석 @asil · override=프로젝트 override 맵(정본 역추출 스냅샷 — "
+            "문서 판은 대조 안 함) · "
             "sds-*=설계서 파티션 · none=근거 없음."
             + (f" 근거 없는 unit 이 {none_cnt}개다 — 등급을 지어내지 않고 비운 것이라 사람이 정해야 한다."
                if none_cnt else ""),
@@ -1494,15 +1602,17 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     if ovr:
         out.append(_item(
             "suts_override_only", "소스에 없는 unit", f"{ovr}개",
-            "저장소 스냅샷에만 있고 이번 소스에서는 찾지 못한 함수다 — 스냅샷이 낡았거나 함수가 삭제됐다."
+            "override 맵(스냅샷)에만 있고 이번 소스에서는 찾지 못한 함수다 — 스냅샷이 낡았거나 함수가 삭제됐다."
             + (f" 예: {_head(qr.get('override_only_units'))}" if qr.get("override_only_units") else ""),
             tone="warning"))
 
     # (R66) 입력 문서를 무엇을 읽었나 — 보강 블록은 문서를 못 열면 예외 없이 건너뛰어 아래 '보강 실패' 가 세지 못한다
     _ev = qr.get("asil_evidence_distribution") if isinstance(qr.get("asil_evidence_distribution"), dict) else {}
     _ovr_units = sum(v for k, v in _ev.items() if "override" in str(k) and isinstance(v, int) and not isinstance(v, bool))
+    _pm = qr.get("project_maps") if isinstance(qr.get("project_maps"), dict) else {}
     out.extend(_input_documents_item(qr.get("input_documents"), "suts", override_units=_ovr_units,
-                                     override_decided=_int(qr, "asil_decided_by_override")))
+                                     override_decided=_int(qr, "asil_decided_by_override"),
+                                     override_map=_pm.get("override") if isinstance(_pm.get("override"), dict) else None))
 
     # 설계 근거 보강 단계 실패 — 있으면 그 단계의 값이 통째로 빠진 채 문서가 나갔다는 뜻이다.
     errs = qr.get("enrichment_errors")

@@ -1,6 +1,7 @@
 """R70 (N83 · N88) — SUTS 의 안전 등급 근거는 값을 준 단계가 말하고, Jenkins 라우터는 프론트가 보낸 문서를 버리지 않는다.
 
-N83: `docs/uds_function_swcom_override.json`(정본 역추출 스냅샷, 프로젝트 확인 없음)이 준 등급을 SUTS 가 소스 `@asil`
+N83: override 스냅샷(정본 역추출, 당시 저장소 전역 `docs/uds_function_swcom_override.json` — R97 에서 HDPDM01 자료로 확인돼
+     `docs/project_maps/hdpdm01/` 로 옮겼고 그 프로젝트에만 걸린다)이 준 등급을 SUTS 가 소스 `@asil`
      로 표시했다 — `collect_unit_functions` 의 근거 표지가 `asil` 진리값만 봤다(KJPDS02 실측 228 unit). 스냅샷에만 있고
      소스에 없는 함수의 자리표시 엔트리는 라벨을 아예 안 적었다.
 N88: `/api/jenkins/suts/generate-async` 는 프론트가 보내는 `srs_path/sds_path/uds_path/hsis_path` 를 선언하지 않아
@@ -14,9 +15,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
-import generators.suts as suts_mod
 from generators.suts import (
     _override_only_entry,
     collect_unit_functions,
@@ -66,31 +64,27 @@ class TestSupplement:
     """보충은 생성기와 준비 게이트가 **같은 함수**로 한다(리뷰 W1) — 인라인 시절엔 게이트만 보충을 안 타서 스냅샷 전용 unit 이
     구조적으로 0 이었다."""
 
-    def test_adds_placeholders_for_snapshot_only_names_and_reports_stats(self, tmp_path, monkeypatch):
-        ovr = tmp_path / "o.json"
-        ovr.write_text(json.dumps({"Seen_Fn": {"asil": "A", "related": "SwCom_01", "swcom": 1},
-                                   "Ghost_A": {"asil": "QM", "related": "SwCom_03", "swcom": 3},
-                                   "ghost_b": {"asil": None, "swcom": 3}}), encoding="utf-8")
-        monkeypatch.setattr(suts_mod, "_OVERRIDE_JSON_CANDIDATES", (ovr,))
+    def test_adds_placeholders_for_snapshot_only_names_and_reports_stats(self):
+        # (R97) 맵은 호출자가 이 프로젝트의 것으로 골라 준다(`report_gen.project_maps`) — 예전엔 저장소 전역 파일을 읽었다
+        ovr = {"Seen_Fn": {"asil": "A", "related": "SwCom_01", "swcom": 1},
+               "Ghost_A": {"asil": "QM", "related": "SwCom_03", "swcom": 3},
+               "ghost_b": {"asil": None, "swcom": 3}}
         fd = {"SwUFn_0101": {"name": "seen_fn", "asil": "A"}}
-        st = supplement_override_only(fd)
+        st = supplement_override_only(fd, ovr)
         assert st["found"] and st["list_size"] == 3 and st["source"] == 1
         assert st["in_list"] == 1, "이름 대조는 대소문자 무시(소스 `seen_fn` ↔ 목록 `Seen_Fn`)"
         assert st["added"] == 2 and st["added_names"] == ["Ghost_A", "ghost_b"]
         assert set(fd) == {"SwUFn_0101", "SwUFn_0399", "SwUFn_0398"}, "id 는 인라인 판과 같은 규칙(SwUFn_{swcom}{99-n})"
         assert fd["SwUFn_0399"]["override_only"] and fd["SwUFn_0399"]["asil_source"] == "override"
         assert fd["SwUFn_0398"]["asil_source"] == "default"
-        assert supplement_override_only(fd)["added"] == 0, "두 번 불러도 다시 보충하지 않는다"
+        assert supplement_override_only(fd, ovr)["added"] == 0, "두 번 불러도 다시 보충하지 않는다"
 
-    def test_placeholder_ids_never_overwrite_a_real_function(self, tmp_path, monkeypatch):
+    def test_placeholder_ids_never_overwrite_a_real_function(self):
         """(N89) 함수 99개 이상인 모듈은 `SwUFn_1399`·`SwUFn_1398` 이 실 함수다 — 옛 식은 그 자리에 자리표시를 덮어써
         라이브 5개(`s_Ap_PreviousCtrl_ResetFlags` 등)를 SUTS 에서 지웠다. 빈 번호로 비켜 선다."""
-        ovr = tmp_path / "o.json"
-        ovr.write_text(json.dumps({"Ghost_A": {"asil": "A", "swcom": 13}, "Ghost_B": {"asil": "A", "swcom": 13}}),
-                       encoding="utf-8")
-        monkeypatch.setattr(suts_mod, "_OVERRIDE_JSON_CANDIDATES", (ovr,))
+        ovr = {"Ghost_A": {"asil": "A", "swcom": 13}, "Ghost_B": {"asil": "A", "swcom": 13}}
         fd = {"SwUFn_1399": {"name": "Real_99", "asil": "A"}, "SwUFn_1398": {"name": "Real_98", "asil": "A"}}
-        st = supplement_override_only(fd)
+        st = supplement_override_only(fd, ovr)
         assert st["added"] == 2
         assert fd["SwUFn_1399"]["name"] == "Real_99" and fd["SwUFn_1398"]["name"] == "Real_98", "실 함수가 덮였다"
         assert len(fd) == 4, "보충은 더하기만 한다(소스 2 + 자리표시 2)"
@@ -107,37 +101,67 @@ class TestSupplement:
         assert "generate_suts_quality_report(units, all_sequences, _source_function_count(function_details))" in src, \
             "생성기 호출부가 자리표시를 뺀 분모를 쓰지 않는다"
 
-    def test_missing_snapshot_file_is_reported_not_silent(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(suts_mod, "_OVERRIDE_JSON_CANDIDATES", (tmp_path / "none.json",))
+    def test_missing_snapshot_file_is_reported_not_silent(self):
+        """이 프로젝트의 override 맵이 없으면(None) 보충 없음 — `found=False` 로 말한다."""
         fd = {"SwUFn_0101": {"name": "f"}}
-        st = supplement_override_only(fd)
+        st = supplement_override_only(fd, None)
         assert st["found"] is False and st["added"] == 0 and set(fd) == {"SwUFn_0101"}
 
-    def test_broken_snapshot_raises_for_the_caller_to_log(self, tmp_path, monkeypatch):
-        """예전엔 `except Exception: pass` 가 보충 전체를 조용히 지웠다(리뷰 W3) — 이제 호출부가 사유를 남긴다."""
-        bad = tmp_path / "bad.json"
-        bad.write_text("{not json", encoding="utf-8")
-        monkeypatch.setattr(suts_mod, "_OVERRIDE_JSON_CANDIDATES", (bad,))
-        with pytest.raises(ValueError):
-            supplement_override_only({"SwUFn_0101": {"name": "f"}})
+    def test_broken_snapshot_is_judged_invalid_not_swallowed(self, tmp_path, monkeypatch):
+        """예전엔 `except Exception: pass` 가 보충 전체를 조용히 지웠다(리뷰 W3). (R97) 읽기는 `report_gen.project_maps` 가 하고
+        깨진 맵은 `invalid` + 사유로 판정된다 — 생성기는 None 을 넘기고 그 판정은 품질 리포트 `project_maps` 가 말한다."""
+        import report_gen.project_maps as pmod
+
+        d = tmp_path / "maps" / "p"
+        d.mkdir(parents=True)
+        (d / "uds_function_swcom_override.json").write_text("{not json", encoding="utf-8")
+        (d / "project.json").write_text(json.dumps({"schema": 1, "project": "P", "source_roots": [str(tmp_path / "src")],
+                                                    "maps": {"override": {"file": "uds_function_swcom_override.json"}}}),
+                                        encoding="utf-8")
+        monkeypatch.setattr(pmod, "PROJECT_MAPS_DIR", tmp_path / "maps")
+        use = pmod.resolve_project_maps(str(tmp_path / "src")).override
+        assert use.status == "invalid" and "JSON" in use.reason
+        assert supplement_override_only({"SwUFn_0101": {"name": "f"}}, use.data if use.applied else None)["found"] is False
 
     def test_repo_snapshot_is_the_production_input(self):
-        """저장소의 실제 스냅샷으로 한 번 — 함수 0개 소스면 목록 크기만큼 보충된다(현 251)."""
+        """저장소의 실제 스냅샷(R97: HDPDM01 프로젝트 맵)으로 한 번 — 함수 0개 소스면 목록 크기만큼 보충된다(현 251)."""
+        from report_gen.project_maps import resolve_project_maps
+
+        use = resolve_project_maps("D:/Project/Ados/PDS64_RD,D:\\Project\\Ados\\PDS64_FBL").override
+        assert use.applied and use.project == "HDPDM01"
         fd: dict = {}
-        st = supplement_override_only(fd)
+        st = supplement_override_only(fd, use.data)
         assert st["found"] and st["added"] == st["list_size"] == len(fd) >= 200
 
 
 class TestMeasureParity:
     """준비 게이트 측정(`docgen_test_materials.measure`)이 생성기와 같은 unit 목록·같은 SwUDS 표로 잰다."""
 
-    def _run(self, monkeypatch, uds_path="", uds_map=None):
+    @staticmethod
+    def _hd_override() -> dict:
+        from report_gen.project_maps import resolve_project_maps
+
+        # base_dir 를 못박는다 — `_run` 이 맵 폴더를 tmp 로 바꾼 뒤에 다시 불려도 저장소의 HDPDM01 맵을 읽게
+        return resolve_project_maps("D:/Project/Ados/PDS64_RD,D:\\Project\\Ados\\PDS64_FBL",
+                                    base_dir=REPO / "docs" / "project_maps").override.data
+
+    def _run(self, monkeypatch, uds_path="", uds_map=None, tmp_path=None):
+        import report_gen.project_maps as pmod
         import report_generator as _rg
         from backend.services import docgen_test_materials as tm
         from backend.services import resolver_helpers as rh
         from generators import uds_unit_io as uio
 
-        monkeypatch.setattr(_rg, "generate_uds_source_sections", lambda root: {
+        # (R97) 측정 루트 `C:/src` 를 HDPDM01 override 를 가진 프로젝트로 등록한다 — 예전엔 저장소 전역 파일이 루트와 무관하게
+        #   걸렸다. 측정은 생성기와 같은 판정(`resolve_project_maps`)으로 그 맵을 고른다.
+        maps = tmp_path / "maps" / "p"
+        maps.mkdir(parents=True, exist_ok=True)
+        (maps / "uds_function_swcom_override.json").write_text(json.dumps(self._hd_override()), encoding="utf-8")
+        (maps / "project.json").write_text(json.dumps({"schema": 1, "project": "P", "source_roots": ["C:/src"],
+                                                       "maps": {"override": {"file": "uds_function_swcom_override.json"}}}),
+                                           encoding="utf-8")
+        monkeypatch.setattr(pmod, "PROJECT_MAPS_DIR", tmp_path / "maps")
+        monkeypatch.setattr(_rg, "generate_uds_source_sections", lambda root, **_k: {
             "function_details": {"SwUFn_0101": {"id": "SwUFn_0101", "name": "Fn_Under_Test",
                                                 "prototype": "void Fn_Under_Test(void)", "asil": "A",
                                                 "asil_source": "override", "inputs": [], "outputs": [],
@@ -157,8 +181,9 @@ class TestMeasureParity:
         finally:
             tm.clear_cache()
 
-    def test_gate_sees_the_snapshot_only_units(self, monkeypatch):
-        res = self._run(monkeypatch)
+    def test_gate_sees_the_snapshot_only_units(self, monkeypatch, tmp_path):
+        res = self._run(monkeypatch, tmp_path=tmp_path)
+        assert res["project_maps"]["override"]["status"] == "applied", "측정이 어느 맵으로 쟀는지 남긴다(R97)"
         a = res["suts_asil"]
         assert a["override_only_units"] >= 200, a
         assert a["override"] >= 1, "SwUDS 표 없이 재면 override 가 준 등급은 `override`(약함)로 잡힌다"
@@ -171,12 +196,12 @@ class TestMeasureParity:
             "소스 함수 1개만 센다 — 스냅샷 전용 251개가 섞이면 이 사유가 252 로 부푼다"
         assert res["functions"] == 1, "함수 수 자체는 소스 파싱 결과다(보충은 SUTS 축에만)"
 
-    def test_gate_uses_the_uds_table_like_the_generator(self, monkeypatch):
-        ovr = json.loads((REPO / "docs" / "uds_function_swcom_override.json").read_text(encoding="utf-8"))
+    def test_gate_uses_the_uds_table_like_the_generator(self, monkeypatch, tmp_path):
+        ovr = self._hd_override()
         n_null = sum(1 for v in ovr.values() if not (v or {}).get("asil"))
-        without = self._run(monkeypatch)["suts_asil"]
+        without = self._run(monkeypatch, tmp_path=tmp_path)["suts_asil"]
         m = {"by_name": {"Fn_Under_Test": {"inputs": [], "outputs": [], "asil": "A"}}}
-        res = self._run(monkeypatch, uds_path="U:/x/SwUDS.docx", uds_map=m)
+        res = self._run(monkeypatch, uds_path="U:/x/SwUDS.docx", uds_map=m, tmp_path=tmp_path)
         a = res["suts_asil"]
         assert a["uds_map"] is True
         assert self.uds_kwargs.get("source_functions") == ["Fn_Under_Test"]

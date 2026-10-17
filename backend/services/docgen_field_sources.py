@@ -85,8 +85,9 @@ SOURCE_REQUIRED_INPUT: Dict[str, Optional[str]] = {
     "ai": INPUT_AI,
     "call_graph": INPUT_CALL_GRAPH,
     # 입력 불필요 — 생성기 내부 산출. 근거가 아니다.
-    # `override` 는 저장소 파일(`docs/uds_function_swcom_override.json`)이라 사용자 입력이 아니다 — 게이트가
-    #   "확보" 로 세면 입력이 없는 프로젝트가 KJPDS02 스냅샷의 ASIL 로 '준비 완료' 가 된다(R68 N72).
+    # `override` 는 저장소 파일(R97: `docs/project_maps/<프로젝트>/uds_function_swcom_override.json`)이라 사용자 입력이 아니다 —
+    #   게이트가 "확보" 로 세면 입력이 없는 프로젝트가 저장소 스냅샷의 ASIL 로 '준비 완료' 가 된다(R68 N72). 그 스냅샷은
+    #   HDPDM01 정본 SwUDS 역추출이다(예전 주석의 "KJPDS02 스냅샷" 은 틀린 귀속 — R97 이 바로잡고 그 프로젝트에만 걸리게 했다).
     "override": None,
     "module_inherit": None,
     "rule": None,

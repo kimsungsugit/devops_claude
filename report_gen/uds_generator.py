@@ -26,7 +26,6 @@ KEY_MOD_STATICS = "static_vars"     # module-level: static var definitions table
 # Legacy key kept for backward compat when reading old sidecar JSON files
 KEY_FN_GLOBALS_LEGACY = "globals"
 # ---------------------------------------------------------------------------
-import json  # noqa: E402
 import logging  # noqa: E402
 import os  # noqa: E402
 from datetime import datetime  # noqa: E402
@@ -64,6 +63,7 @@ from report_gen.function_analyzer import (  # noqa: E402
     _parse_signature_params,
     _split_param,
 )
+from report_gen.project_maps import ProjectMaps, resolve_project_maps  # noqa: E402
 from report_gen.provenance import has_evidence_value, unrecorded_source  # noqa: E402
 from report_gen.requirements import (  # noqa: E402
     _collect_section_lines,
@@ -71,9 +71,10 @@ from report_gen.requirements import (  # noqa: E402
     _extract_requirements_from_comments,
     _extract_state_tokens,
     _extract_table_section,
-    _load_component_map,
     _normalize_table_row,
     _split_doc_function_blocks,
+    component_map_from_rows,
+    component_path_key_matches,
     component_verify_of,
 )
 from report_gen.source_parser import (  # noqa: E402
@@ -200,9 +201,11 @@ def _asil_rank(v: Any) -> int:
 
 # (R68 N72) 소스 단계의 ASIL·Related 출처 라벨. 값 사슬은 2026-04-09(`0b7e1979`) 이래 comment > override > SDS > TBD 인데
 #   라벨은 comment > SDS > `inference` 만 알았다 — override 가 준 값(실측 KJPDS02 228건 · PDS64 255건)과 값이 없는 TBD
-#   (KJPDS02 918건)가 전부 "추론" 으로 찍혔다. 라벨은 **값을 준 단계**가 단다. `override` 는 저장소의 정본 역추출 스냅샷
-#   (`docs/uds_function_swcom_override.json`, 함수 이름 키 — 프로젝트 확인 없음)이라 약한 출처(0.60, `inference` 와 같은
-#   점수)로 등록한다: 값과 덮어쓰기 규칙은 그대로고 라벨만 사실이 된다. 프로젝트 귀속은 P7 결정 축(계획서).
+#   (KJPDS02 918건)가 전부 "추론" 으로 찍혔다. 라벨은 **값을 준 단계**가 단다. `override` 는 **HDPDM01** 정본 SwUDS 에서 역추출한
+#   스냅샷(함수 이름 키)이라 약한 출처(0.60, `inference` 와 같은 점수)로 등록한다: 값과 덮어쓰기 규칙은 그대로고 라벨만 사실이 된다.
+# (R97) 그 스냅샷을 오래 "KJPDS02 스냅샷" 이라 적었는데 **HDPDM01 자료**다(2026-10-17 실측: HD SwUDS v1.07 대비 이름 251/251 ·
+#   ASIL 250/250 · Related 245/251). 위 KJPDS02 228건은 남의 맵이 이름으로 걸린 것이었다. 이제 `docs/project_maps/hdpdm01/` 에
+#   있고 소스 루트 · SCM id 로 그 프로젝트일 때만 걸린다(`report_gen.project_maps`) — 문서 판(版)까지는 대조하지 않는다.
 # (R70 N84) 두 루프(AST · 텍스트 폴백)가 **같은 사슬**을 쓴다. R68 까지 폴백 루프의 Related 사슬에만 override 가 없어
 #   같은 함수가 어느 루프로 가느냐(tree-sitter 가 읽었는가)에 따라 Related 가 달라질 수 있었다 — 라이브 두 루트
 #   (KJPDS02 229 · PDS64 256, override 이름 전부 AST 루프)에선 값 변화 0 이지만 규칙이 둘이면 한쪽만 고쳐진다.
@@ -595,8 +598,14 @@ def generate_uds_source_sections(
     preprocess: bool = False,
     max_files: Optional[int] = None,
     max_items: Optional[int] = None,
+    scm_id: Optional[str] = None,
+    project_maps: Optional[ProjectMaps] = None,
 ) -> Dict[str, Any]:   # 값은 str·list·dict 혼합(function_details 등) — 과거 Dict[str, str]는 오기
     """`max_files`/`max_items` 는 **호출자 상한**. `None` 이면 `config` 기본값을 쓴다.
+
+    (R97) `component_map` 은 명시 인자(업로드 목록) > 이 프로젝트의 맵(`report_gen.project_maps`) > 없음. 함수 override 는
+      프로젝트 맵뿐이다. 프로젝트는 `scm_id`(등록 항목을 아는 호출자) 또는 소스 루트로 정한다 — 어느 맵을 썼는지(또는 왜 안 썼는지)
+      는 payload `project_maps` 에 남는다. 예전엔 저장소 `docs/` 의 HDPDM01 맵 두 개가 **모든 프로젝트에** 이름으로 걸렸다.
 
     ⚠ `preprocess` 기본값은 **False** 다(R60 N64 — 2026-09-17 까지 True). "정밀" 이라던 전처리 경로는 실측하니
       함수의 6%(KJPDS02)·0%(PDS64)에만 닿았고 닿은 곳에선 소스 주석 설명 52건을 추론 문장으로 바꾸고 전역 718개를
@@ -756,22 +765,23 @@ def generate_uds_source_sections(
     _header_proto_map: Dict[str, List[Dict[str, str]]] = {}
     _proto_scan: Dict[str, int] = {}          # source → 함수 수 (`header` / `definition:<이유>`)
     _proto_kept: Dict[str, List[Dict[str, str]]] = {}    # 정의를 지킨 이유 → [{name, file}](공시용, 이유당 50개)
+    # (R97) 프로젝트 맵 — 이 소스 루트(또는 `scm_id`)의 프로젝트가 등록한 맵만 쓴다. 판정 · 사유는 `project_maps` 단일 출처.
+    #   예전 두 블록은 저장소 `docs/` 의 HDPDM01 파일을 어느 프로젝트에나 읽었고, override 쪽은 실패를 `except: pass` 로 삼켰다.
+    # (R97 리뷰 I1) 호출자(캐시 · 측정)가 이미 고른 판정을 넘기면 그것을 쓴다 — 여기서 다시 고르면 그 사이 맵이 바뀐 경우
+    #   결과는 새 맵, 캐시 키는 옛 지문(또는 반대)으로 저장된다.
+    _pmaps = project_maps if project_maps is not None else resolve_project_maps(source_root, scm_id=scm_id)
+    _pmaps_desc = _pmaps.describe()
     if component_map is None:
-        component_map = _load_component_map()
+        component_map = component_map_from_rows(_pmaps.component_map.data) if _pmaps.component_map.applied else {}
+    else:
+        # 업로드한 목록이 이긴다 — 프로젝트 맵 판정은 남기되(무엇을 대신했는지) 쓴 것은 인자라고 적는다
+        _pmaps_desc["component_map"] = {**_pmaps_desc["component_map"], "used": "argument",
+                                        "argument_entries": len(component_map)}
     _sds_map = sds_partition_map or {}
 
-    # 함수 단위 SwCom/Related ID override (레퍼런스 UDS에서 역추출)
-    _func_override: Dict[str, Dict[str, Any]] = {}
-    for _override_path in [
-        Path(__file__).resolve().parent / "docs" / "uds_function_swcom_override.json",
-        Path(__file__).resolve().parent.parent / "docs" / "uds_function_swcom_override.json",
-    ]:
-        try:
-            if _override_path.exists():
-                _func_override = json.loads(_override_path.read_text(encoding="utf-8"))
-                break
-        except Exception:
-            pass
+    # 함수 단위 SwCom/Related ID override — 이 프로젝트가 등록한 것만(HDPDM01: 정본 SwUDS 역추출, 함수 이름 키)
+    _func_override: Dict[str, Dict[str, Any]] = (
+        {str(k): v for k, v in _pmaps.override.data.items() if isinstance(v, dict)} if _pmaps.override.applied else {})
 
     # typedef 정규화 맵 (임베디드 공통 타입)
     _typedef_map = {
@@ -1883,7 +1893,8 @@ def generate_uds_source_sections(
                 mapped = None
                 fp_norm = file_path.replace("\\", "/")
                 for cm_key in component_map:
-                    if "/" in cm_key and fp_norm.endswith(cm_key):
+                    # (R97 리뷰2 I-c) 경로 키는 OS 경로 규칙으로(Windows 대소문자 무시) — `resolve_component_entry` 와 같은 판정
+                    if component_path_key_matches(fp_norm, cm_key):
                         mapped = component_map[cm_key]
                         break
                 if not mapped or not isinstance(mapped, dict):
@@ -2175,7 +2186,7 @@ def generate_uds_source_sections(
                     if not mapped or not isinstance(mapped, dict) or not mapped.get("component"):
                         fp_norm = file_path.replace("\\", "/")
                         for cm_key in component_map:
-                            if "/" in cm_key and fp_norm.endswith(cm_key):
+                            if component_path_key_matches(fp_norm, cm_key):   # (R97 리뷰2 I-c)
                                 mapped = component_map[cm_key]
                                 break
                     if isinstance(mapped, dict) and mapped.get("component"):
@@ -3047,6 +3058,8 @@ def generate_uds_source_sections(
         _globals_loss["build_split"]["functions"] = _per_build
 
     return {
+        # (R97) 어느 프로젝트의 맵을 썼나(또는 왜 안 썼나) — 종류마다 `MapUse.describe()`. 시험 생성기 · 공시가 읽는다
+        "project_maps": _pmaps_desc,
         "typedef_aliases": typedef_aliases,
         "enum_domains": enum_domains,
         "typedef_scan": _td_stats,

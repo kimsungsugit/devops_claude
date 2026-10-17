@@ -123,7 +123,7 @@ from backend.services.paths import confine, is_unc_path, is_under_any, safe_reso
 from backend.user_context import wrap_with_user
 from report_gen.atomic_io import atomic_write_text
 from report_gen.provenance import has_evidence_value, is_weak_source
-from report_gen.source_roots import first_source_root
+from report_gen.source_roots import first_source_root, split_source_roots
 from report_gen.utils import build_function_details_by_name
 from report_generator import (
     _build_req_map_from_doc_paths,
@@ -2021,12 +2021,14 @@ async def local_sts_generate(
 
     # Get function_details from source root
     function_details: Dict[str, Any] = {}
+    _sts_pmaps: Optional[Dict[str, Any]] = None   # (R97) 소스 단계의 project_maps — 파싱 실패면 생성기가 루트로 다시 판정
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
     _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if source_root_path and source_root_path.exists() and source_root_path.is_dir():
         try:
             sections = _get_source_sections_cached(_all_source_roots_str(source_root) or str(source_root_path))
+            _sts_pmaps = sections.get("project_maps")   # (R97) 어느 프로젝트의 맵으로 만든 함수 집합인가
             function_details = sections.get("function_details", {})
             function_details, req_doc_paths, sds_doc_paths = _enrich_function_details_map(
                 function_details,
@@ -2104,6 +2106,7 @@ async def local_sts_generate(
             input_skips=sts_in_skips + opt_skips,
             ai_config=_sts_ai_cfg,
             source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
+            project_maps=_sts_pmaps,
         )
     except Exception as e:
         traceback.print_exc()
@@ -2231,12 +2234,14 @@ async def local_sts_generate_stream(
                                if sts_in_skips else ""))
 
     function_details: Dict[str, Any] = {}
+    _sts_pmaps: Optional[Dict[str, Any]] = None   # (R97) 소스 단계의 project_maps — 파싱 실패면 생성기가 루트로 다시 판정
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
     _first_root = first_source_root(source_root)
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if source_root_path and source_root_path.exists() and source_root_path.is_dir():
         try:
             sections = _get_source_sections_cached(_all_source_roots_str(source_root) or str(source_root_path))
+            _sts_pmaps = sections.get("project_maps")   # (R97) 어느 프로젝트의 맵으로 만든 함수 집합인가
             function_details = sections.get("function_details", {})
             function_details, req_doc_paths, sds_doc_paths = _enrich_function_details_map(
                 function_details,
@@ -2312,6 +2317,7 @@ async def local_sts_generate_stream(
                 ai_config=_sts_ai_cfg2,
                 on_progress=_on_progress,
                 source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
+                project_maps=_sts_pmaps,
             )
             download_url = f"/api/local/sts/download/{out_filename}"
             payload = _build_excel_artifact_payload(
@@ -2512,9 +2518,11 @@ async def local_sts_generate_async(
                 job_id=job_id,
             )
             function_details: Dict[str, Any] = {}
+            _sts_pmaps: Optional[Dict[str, Any]] = None   # (R97) 소스 단계의 project_maps — 파싱 실패면 생성기가 루트로 다시 판정
             if source_root_path and source_root_path.exists() and source_root_path.is_dir():
                 try:
                     sections = _get_source_sections_cached(_all_source_roots_str(source_root) or str(source_root_path))
+                    _sts_pmaps = sections.get("project_maps")   # (R97) 어느 프로젝트의 맵으로 만든 함수 집합인가
                     function_details = sections.get("function_details", {})
                     # req_doc_paths / sds_doc_paths 는 **바깥 스코프**(이 함수를 감싸는
                     # 엔드포인트)의 변수다. 여기서 대입 타깃에 넣으면 _worker 지역변수로
@@ -2557,6 +2565,7 @@ async def local_sts_generate_async(
                 ai_config=_load_sts_ai_config(),
                 on_progress=_sts_on_progress,
                 source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
+                project_maps=_sts_pmaps,
             )
 
             download_url = f"/api/local/sts/download/{out_filename}"
@@ -4083,84 +4092,366 @@ def local_format_c(req: FormatCodeRequest) -> Dict[str, Any]:
 
 
 # ─── Project Setup (component_map / override 자동 생성) ────────────────────
+#
+# (R97) 맵은 **프로젝트 폴더**(`docs/project_maps/<키>/`)에 매니페스트와 함께 쓴다 — 예전엔 CWD 상대 `"docs/…"` 한 벌에 써서
+#   그 파일이 어느 프로젝트에나 걸렸다(HDPDM01 맵이 KJPDS02_PV 에 걸린 경로). 키는 레지스트리 항목 id(준 `scm_id`, 아니면
+#   `source_root` 로 판정), 항목이 없으면 `roots-<sha1>`. 같은 프로젝트에 같은 맵이 있으면 `overwrite=true` 없이는 409 —
+#   사람이 정한 맵(HDPDM01 verify=X 49행)을 자동 생성물이 조용히 덮지 않게(덮으면 `.prev` 로 남긴다). `output_dir` 은 예전처럼
+#   그 폴더로 **내보내기만** 한다(생성에 쓰이는 맵이 아니다) — 단 프로젝트 맵 폴더 안은 거부한다(리뷰 W1).
+# (R97 리뷰 W6) 쓰는 세 엔드포인트는 admin 전용이다 — 프로젝트 맵이 이제 ASIL · Related 의 근거(override)이자 시험 범위(verify)다.
+#   레지스트리 쓰기(`/api/scm/*`)와 같은 등급. 상태 조회는 누구나.
 
-@router.post("/api/local/project-setup/generate-component-map")
+
+def _project_setup_target(source_root: str, scm_id: str = "") -> Dict[str, Any]:
+    """맵을 쓸 프로젝트 — `{"key","scm_id","project","source_roots","registry"}`."""
+    from backend.services.scm_registry import get_registry_entry, resolve_scm_entry
+    from report_gen.project_maps import roots_key
+
+    sid = str(scm_id or "").strip()
+    entry = get_registry_entry(sid) if sid else resolve_scm_entry(source_root)
+    if sid and entry is None:
+        raise HTTPException(status_code=404, detail=f"SCM 레지스트리에 없는 id: {sid}")
+    if entry is not None:
+        return {"key": str(entry.id), "scm_id": str(entry.id), "project": str(entry.name or entry.id),
+                "source_roots": split_source_roots(entry.source_root) or split_source_roots(source_root),
+                "registry": True}
+    return {"key": roots_key(source_root), "scm_id": "", "project": "", "source_roots": split_source_roots(source_root),
+            "registry": False}
+
+
+def _sha256_of(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _materialize_setup_doc(path_text: str, label: str) -> Path:
+    """설정 입력 문서를 로컬 파일로(cloudium 이면 워커 경유). 못 열면 400 — 사유를 그대로."""
+    from backend.services.resolver_helpers import materialize_via_resolver
+
+    local, why = materialize_via_resolver(path_text)
+    if not local:
+        raise HTTPException(status_code=400, detail=f"{label} 를 열지 못했다: {why or '사유 미상'}")
+    return Path(local)
+
+
+def _setup_export_dir(output_dir: str) -> Optional[Path]:
+    """`output_dir` 내보내기 폴더 — 봉인(`confine`) 뒤 **프로젝트 맵 폴더 안이면 403**(리뷰 W1).
+
+    봉인은 저장소 루트 아래를 다 허용하므로 `output_dir=<repo>/docs/project_maps/hdpdm01` 이 통과해, 409 · `.prev` · 매니페스트 ·
+    잠금 · 캐시 비움 없이 HD 의 override 를 덮고 "생성에 쓰이지 않는다" 는 거짓 문구를 냈다. 판정은 resolve 한 경로를 normcase 로
+    비교한다(Windows 대소문자 · 구분자 무시). 맵 폴더는 호출 시점의 `report_gen.project_maps.PROJECT_MAPS_DIR`.
+    """
+    if not output_dir:
+        return None
+    import report_gen.project_maps as _pm_mod
+
+    d = confine(output_dir, what="output_dir")
+    try:
+        tgt = os.path.normcase(str(Path(d).resolve()))
+        base = os.path.normcase(str(Path(_pm_mod.PROJECT_MAPS_DIR).resolve()))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=403, detail="output_dir 를 판정하지 못했다") from exc
+    if tgt == base or tgt.startswith(base.rstrip("\\/") + os.sep):
+        raise HTTPException(status_code=403, detail=(
+            "output_dir 가 프로젝트 맵 폴더(docs/project_maps) 안이다 — 그 폴더는 생성 엔드포인트의 등록 경로(409 · .prev · "
+            "매니페스트 · 캐시 비움)로만 쓴다. 내보내기는 다른 폴더를 줄 것"))
+    # (R97 리뷰2 I-g) 저장소 `docs/` 그 자체도 거부 — 내보내기 파일 이름이 옛 전역 맵(`docs/component_map.json` ·
+    #   `docs/uds_function_swcom_override.json`)이라, 거기 쓰면 어느 코드도 읽지 않는 옛 파일이 되살아나 사람을 속인다
+    legacy = os.path.normcase(str(Path(_pm_mod.PROJECT_MAPS_DIR).resolve().parent))
+    if tgt == legacy:
+        raise HTTPException(status_code=403, detail=(
+            "output_dir 가 저장소 docs/ 폴더다 — 거기 내보내면 옛 전역 맵 파일 이름(docs/component_map.json · "
+            "docs/uds_function_swcom_override.json)이 되살아난다(생성은 그 파일을 읽지 않는다). 다른 폴더를 줄 것"))
+    return Path(d)
+
+
+def _write_export(export_dir: Path, name: str, payload: Any) -> Path:
+    export_dir.mkdir(parents=True, exist_ok=True)       # (리뷰 I3) 옛 코드처럼 없는 폴더를 만든다(판정 뒤)
+    out = export_dir / name
+    out.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    return out
+
+
+def _roots_moved_hint(target: Dict[str, Any], source_root: str) -> str:
+    """(리뷰 W7) 같은 프로젝트(레지스트리 id)의 매니페스트가 있는데 그 루트가 지금 루트를 못 담으면 — 맵을 다시 만들 일이 아니라
+    루트를 다시 등록할 일이다. 409 · 상태가 이 문장을 싣는다. 매니페스트가 없거나 덮여 있으면 빈 문자열."""
+    from report_gen.project_maps import read_manifest, roots_cover
+
+    if not target.get("registry"):
+        return ""
+    try:
+        man = read_manifest(target["key"])
+    except ValueError:
+        return ""
+    if not man or roots_cover(man.get("source_roots"), source_root):
+        return ""
+    return (f" 이 프로젝트 매니페스트의 루트({', '.join(str(x) for x in man.get('source_roots') or [])})가 지금 루트를 담지 않는다 — "
+            "소스 루트가 바뀐 것이면 맵을 다시 만들지 말고 관리자가 루트를 다시 등록할 것(`/api/local/project-setup/update-roots`, "
+            "관리자 전용). 다시 만들면 손으로 정한 verify=X 가 자동 생성물(전부 O)로 바뀐다.")
+
+
+def _setup_error(status: int, reason_code: str, message: str, **flags: Any) -> HTTPException:
+    """(R97 리뷰2 I-i) 409 · 422 — 화면이 **문구가 아니라 표지로** 갈래를 고르게 detail 을 `{message, reason_code, …}` dict 로.
+    예전 화면은 409 문구에 '루트를 다시 등록' 이 있는지로 확인 창을 바꿨다 — 문구를 고치면 조용히 갈래가 사라진다.
+
+    ⚠ (리뷰3 W1) 실제 응답 본문은 이 dict 가 아니다 — 전역 핸들러(`backend/error_handler.py` `http_exception_handler`)가
+    `{ok:false, error:{code, message, detail:{reason_code, roots_moved, key}}}` 봉투로 바꾼다. 화면은 `api.js` `toApiError` 로
+    읽는다. 키 이름 계약: `tests/unit/test_project_maps.py::TestSetupErrorEnvelope`."""
+    return HTTPException(status_code=status, detail={"message": message, "reason_code": reason_code, **flags})
+
+
+def _doc_open_errors() -> tuple:
+    """설정 입력 문서를 열 때 날 수 있는 예외 — .docx 가 아닌 파일(PDF)은 python-docx 가 `PackageNotFoundError` 를 낸다
+    (R97 리뷰2 I-d: 레퍼런스 UDS 로 PDF 를 주면 500 이었다)."""
+    import zipfile
+
+    errs: tuple = (zipfile.BadZipFile, KeyError, ValueError, OSError)
+    try:
+        from docx.opc.exceptions import PackageNotFoundError
+    except ImportError:
+        return errs
+    return errs + (PackageNotFoundError,)
+
+
+def _clear_project_map_caches() -> int:
+    """맵을 쓰거나 루트를 바꾼 뒤 — 지문이 달라 옛 캐시는 어차피 안 맞지만 옛 맵의 큰 payload 를 TTL 동안 붙잡지 않게 비운다."""
+    from backend.helpers.uds import clear_source_sections_cache
+    from backend.services import docgen_test_materials as _tm_cache
+
+    cleared = clear_source_sections_cache()
+    _tm_cache.clear_cache()
+    return cleared
+
+
+def _write_setup_map(kind: str, data: Any, *, source_root: str, scm_id: str, origin: str,
+                     overwrite: bool, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    from report_gen.project_maps import read_manifest, write_project_map
+
+    target = _project_setup_target(source_root, scm_id)
+    try:
+        man = read_manifest(target["key"])
+    except ValueError as exc:
+        raise _setup_error(409, "manifest_unreadable",
+                           f"프로젝트 {target['key']} 의 매니페스트를 읽지 못했다({exc}) — docs/project_maps 에서 고친 뒤 다시") from exc
+    # (리뷰 W7) 덮어쓰기는 레지스트리 항목과 같은 프로젝트(매니페스트 scm_id 일치)일 때 매니페스트 루트도 레지스트리 루트로 바꾼다 —
+    #   안 바꾸면 덮어쓴 맵도 루트 판정으로는 여전히 안 걸린다.
+    same_project = bool(target["registry"] and man is not None
+                        and str(man.get("scm_id") or "").strip().lower() == str(target["scm_id"]).lower())
+    try:
+        written = write_project_map(kind, data, key=target["key"], project=target["project"], scm_id=target["scm_id"],
+                                    source_roots=target["source_roots"], origin=origin, overwrite=overwrite,
+                                    replace_roots=bool(overwrite and same_project), details=details)
+    except FileExistsError as exc:
+        hint = _roots_moved_hint(target, source_root)
+        raise _setup_error(409, "map_exists",
+                           f"프로젝트 {target['key']} 에 {kind} 맵이 이미 있다 — overwrite=true 로 다시 요청하면 옛 파일을 .prev 로 "
+                           "남기고 덮는다." + hint, roots_moved=bool(hint), key=target["key"]) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"맵을 쓰지 못했다: {exc}") from exc
+    cleared = _clear_project_map_caches()
+    _logger.info("[project-setup] %s 맵 기록 %s (프로젝트 %s, 캐시 %d 항목 비움)", kind, written["path"], target["key"], cleared)
+    return {**written, "project": target["project"], "scm_id": target["scm_id"], "registry": target["registry"],
+            "caches_cleared": cleared}
+
+
+def _source_walker():
+    """cloudium 이면 소스 트리도 워커 경유로 훑는다(소스 단계 `_src_walk` 와 같은 규약) — 로컬 os.walk 는 U: 를 못 본다."""
+    try:
+        from backend.services.file_resolver import get_resolver
+        _res = get_resolver()
+    except ImportError as exc:
+        _logger.warning("[project-setup] 파일 접근기를 못 불러 로컬로 훑는다: %s", exc)
+        return None
+    if getattr(_res, "mode", "local") == "local":
+        return None
+
+    def _walk(root: Path, _r=_res):
+        return (Path(p) for p in _r.list_dir(str(root), pattern="*", recursive=True))
+    return _walk
+
+
+@router.post("/api/local/project-setup/generate-component-map", dependencies=[Depends(require_admin)])
 def local_generate_component_map(
     sds_path: str = Form(""),
     source_root: str = Form(""),
     output_dir: str = Form(""),
+    scm_id: str = Form(""),
+    overwrite: bool = Form(False),
 ) -> Dict[str, Any]:
-    """SDS 문서에서 component_map.json을 자동 생성한다."""
+    """SDS 문서에서 이 프로젝트의 component_map 을 만든다 — 소프트웨어 구조 표 우선, 없거나 못 읽으면 파티션 이름 퍼지 매칭."""
     if not sds_path:
         raise HTTPException(status_code=400, detail="sds_path 필요")
     if not source_root:
         raise HTTPException(status_code=400, detail="source_root 필요")
-    from report_gen.project_setup import generate_component_map_from_sds
+    from report_gen.project_setup import component_map_from_structure_table, generate_component_map_from_sds
+
     # ⚠ `sds_path`/`source_root` 는 봉인하지 않는다 — 요구문서·소스는 저장소 밖에 사는 것이
-    #   이 앱의 설계다. 하지만 **쓰기 위치**는 다르다: `output_dir` 은 클라이언트 문자열이고
-    #   프론트는 아예 보내지 않는다(기본 `docs/`). 임의 위치에 쓸 근거가 없다.
-    out_path = (str(confine(output_dir, what="output_dir") / "component_map.json")
-                if output_dir else "docs/component_map.json")
-    result = generate_component_map_from_sds(sds_path, source_root, output_path=out_path)
-    return {"ok": True, **result}
+    #   이 앱의 설계다. 하지만 **쓰기 위치**는 다르다: `output_dir` 은 클라이언트 문자열이라 봉인한다.
+    export_dir = _setup_export_dir(output_dir)
+    local_sds = _materialize_setup_doc(sds_path, "SDS")
+    built = component_map_from_structure_table(str(local_sds), source_root, walk=_source_walker())
+    details: Dict[str, Any] = {}
+    if built["found"]:
+        method, rows, stats = "structure_table", built["rows"], built["stats"]
+        details = {"method": method, **{k: stats.get(k) for k in (
+            "table_files_not_in_source", "table_files_not_in_source_hints", "conflicting_files", "twins_path_keyed",
+            "twins_left_unmapped", "twins_unresolved", "source_files_not_listed")}}
+    else:
+        # 구조 표가 없거나(또는 문서를 못 읽었거나 — 리뷰 W9) 옛 파티션 이름 퍼지 매칭으로. 근거가 약하다는 사실을 method 로 남긴다
+        method = "partition_heuristic"
+        try:
+            legacy = generate_component_map_from_sds(str(local_sds), source_root, output_path=None)
+        except _doc_open_errors() as exc:
+            legacy = {"entries": [], "stats": {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}}
+        rows = [{k: v for k, v in e.items() if not k.startswith("_")}
+                for e in (legacy.get("entries") or []) if not e.get("_unmapped")]
+        stats = {**(legacy.get("stats") or {}), "method": method,
+                 "structure_table_reason": (built.get("stats") or {}).get("reason", ""),
+                 "structure_table_error": built.get("error", "")}
+        details = {"method": method, "structure_table_reason": stats["structure_table_reason"]}
+    if not rows:
+        raise _setup_error(
+            422, "unreadable_document" if built.get("error") else "no_rows",
+            f"만든 행이 없다 — 쓰지 않았다. 구조 표: {(built.get('stats') or {}).get('reason') or '-'}; "
+            f"옛 매칭({method}): {stats.get('error') or '행 0'}. SDS 가 .docx 인지 · 소스 루트가 맞는지 확인할 것")
+    digest = _sha256_of(local_sds)
+    origin = (f"SDS 소프트웨어 구조 표: {Path(sds_path).name} (sha256 {digest}) — 표 파일 {stats.get('table_files')} 중 소스에 있는 "
+              f"{stats.get('table_files_in_source')}, 소스 {stats.get('source_files')} 중 표에 없는 "
+              f"{stats.get('source_files_not_listed')}(행 없음 · verify=X 없음)"
+              if method == "structure_table" else
+              f"SDS 파티션 이름 퍼지 매칭(구조 표 없음 — {stats.get('structure_table_reason') or '-'}): "
+              f"{Path(sds_path).name} (sha256 {digest})")
+    if export_dir is not None:
+        out = _write_export(export_dir, "component_map.json", rows)
+        return {"ok": True, "method": method, "stats": stats, "entries": rows, "output_path": str(out),
+                "registered": False, "note": "output_dir 로 내보내기만 했다 — 생성에 쓰이는 프로젝트 맵이 아니다"}
+    written = _write_setup_map("component_map", rows, source_root=source_root, scm_id=scm_id, origin=origin,
+                               overwrite=overwrite, details=details)
+    return {"ok": True, "method": method, "stats": stats, "entries": rows, "output_path": written["path"],
+            "registered": True, "project_map": written, "roots_covered": written["roots_covered"]}
 
 
-@router.post("/api/local/project-setup/generate-override")
+@router.post("/api/local/project-setup/generate-override", dependencies=[Depends(require_admin)])
 def local_generate_override(
     uds_path: str = Form(""),
+    source_root: str = Form(""),
     output_dir: str = Form(""),
+    scm_id: str = Form(""),
+    overwrite: bool = Form(False),
 ) -> Dict[str, Any]:
-    """레퍼런스 UDS 문서에서 함수 단위 override 맵을 생성한다."""
+    """레퍼런스 UDS 문서에서 이 프로젝트의 함수 단위 override 맵을 만든다."""
     if not uds_path:
         raise HTTPException(status_code=400, detail="uds_path (레퍼런스 UDS) 필요")
+    # (R97) 어느 프로젝트의 맵인지 정할 근거 — 없으면 예전처럼 저장소 한 벌에 쓰는 것과 같다(모든 프로젝트에 걸린다)
+    if not source_root:
+        raise HTTPException(status_code=400, detail="source_root 필요 — 맵이 어느 프로젝트의 것인지 정한다")
     from report_gen.project_setup import generate_override_from_reference_uds
+
     # ⚠ 위 generate-component-map 과 같은 판정 — 읽기(`uds_path`)는 열고 쓰기만 봉인한다.
-    out_path = (str(confine(output_dir, what="output_dir") / "uds_function_swcom_override.json")
-                if output_dir else "docs/uds_function_swcom_override.json")
-    result = generate_override_from_reference_uds(uds_path, output_path=out_path)
-    return {"ok": True, **result}
+    export_dir = _setup_export_dir(output_dir)
+    local_uds = _materialize_setup_doc(uds_path, "레퍼런스 UDS")
+    try:
+        result = generate_override_from_reference_uds(str(local_uds), output_path=None)
+    except _doc_open_errors() as exc:
+        raise _setup_error(422, "unreadable_document",
+                           f"레퍼런스 UDS 를 읽지 못했다({type(exc).__name__}) — .docx 인지 확인할 것") from exc
+    override = result.get("override") or {}
+    if not override:
+        raise _setup_error(422, "no_rows",
+                           f"함수 정보 표를 하나도 읽지 못했다 — 쓰지 않았다 ({(result.get('stats') or {}).get('error') or '표 0개'})")
+    origin = f"정본 SwUDS 역추출: {Path(uds_path).name} (sha256 {_sha256_of(local_uds)})"
+    if export_dir is not None:
+        out = _write_export(export_dir, "uds_function_swcom_override.json", override)
+        return {"ok": True, **result, "output_path": str(out), "registered": False,
+                "note": "output_dir 로 내보내기만 했다 — 생성에 쓰이는 프로젝트 맵이 아니다"}
+    written = _write_setup_map("override", override, source_root=source_root, scm_id=scm_id, origin=origin,
+                               overwrite=overwrite)
+    return {"ok": True, **result, "output_path": written["path"], "registered": True, "project_map": written,
+            "roots_covered": written["roots_covered"]}
+
+
+@router.post("/api/local/project-setup/update-roots", dependencies=[Depends(require_admin)])
+def local_update_project_roots(
+    source_root: str = Form(""),
+    scm_id: str = Form(""),
+) -> Dict[str, Any]:
+    """(R97 리뷰 W7) 맵은 그대로 두고 매니페스트 루트만 레지스트리 루트로 다시 등록한다 — 레지스트리 루트가 바뀌어 맵이 안 걸릴 때.
+
+    레지스트리 항목이 있는 프로젝트만(키 = 항목 id, 매니페스트 `scm_id` 일치). `roots-<sha1>` 프로젝트는 루트가 곧 이름이라 대상이 아니다.
+    """
+    if not source_root and not scm_id:
+        raise HTTPException(status_code=400, detail="source_root 또는 scm_id 필요")
+    from report_gen.project_maps import resolve_project_maps, update_project_roots
+
+    target = _project_setup_target(source_root, scm_id)
+    if not target["registry"]:
+        raise HTTPException(status_code=400, detail=(
+            "레지스트리 항목이 없는 루트다 — 루트 키 프로젝트(roots-…)는 루트가 곧 이름이라 다시 등록할 수 없다. SCM 을 등록하거나 "
+            "scm_id 를 줄 것"))
+    try:
+        res = update_project_roots(target["key"], target["source_roots"], scm_id=target["scm_id"])
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"프로젝트 {target['key']} 의 매니페스트가 없다 — 맵을 먼저 만들 것") from exc
+    except ValueError as exc:
+        raise _setup_error(409, "scm_id_mismatch", f"루트를 다시 등록하지 못했다: {exc}") from exc
+    cleared = _clear_project_map_caches()
+    pm = resolve_project_maps(",".join(target["source_roots"]))
+    return {"ok": True, **res, "caches_cleared": cleared, "now": pm.describe()}
+
+
+def _setup_status_of(use: Any) -> Dict[str, Any]:
+    """옛 상태 키(`exists`·`entries`/`functions`…)를 유지한 맵 상태 — 화면이 그대로 읽는다."""
+    from report_gen.project_maps import map_counts
+
+    d = use.describe()
+    counts = map_counts(use.kind, use.data) if use.applied else {}
+    if use.kind == "component_map":
+        base = {"exists": use.applied, "entries": counts.get("entries", 0), "verify_o": counts.get("verify_o", 0),
+                "verify_x": counts.get("verify_x", 0)}
+    else:
+        base = {"exists": use.applied, "functions": counts.get("functions", 0), "with_asil": counts.get("with_asil", 0),
+                "swcom_count": counts.get("swcom_count", 0)}
+    return {**base, "status": d["status"], "project": d["project"], "reason": d["reason"],
+            "path": f"docs/project_maps/{d['file']}" if d["file"] else "", "others": d["others"],
+            "problems": d["problems"], "details": d["details"]}
 
 
 @router.get("/api/local/project-setup/status")
-def local_project_setup_status() -> Dict[str, Any]:
-    """현재 프로젝트의 setup 파일 상태를 확인한다."""
-    import json as _json
-    docs_dir = repo_root / "docs"
-    cm_path = docs_dir / "component_map.json"
-    ovr_path = docs_dir / "uds_function_swcom_override.json"
+def local_project_setup_status(source_root: str = "", scm_id: str = "") -> Dict[str, Any]:
+    """프로젝트 맵 상태 — `source_root`(또는 `scm_id`)를 주면 그 생성에 걸릴 맵, 안 주면 판정 없이 등록 목록만.
 
-    cm_status = {"exists": False, "entries": 0}
-    if cm_path.exists():
+    (R97) 옛 키(`component_map`·`override` 의 `exists`/개수)는 유지한다 — 예전엔 저장소 한 벌을 말했고, 이제는 **이 프로젝트에
+    걸릴** 맵을 말한다(루트를 안 주면 `exists=False` · `status=no_roots`). `projects` 는 등록된 프로젝트와 맵별 개수.
+    (리뷰 W7) `roots_moved` — 이 루트의 레지스트리 항목에 매니페스트가 있는데 그 루트가 지금 루트를 못 담는다(맵을 다시 만들 일이
+    아니라 루트를 다시 등록할 일). 그때만 채운다.
+    """
+    from report_gen.project_maps import list_projects, resolve_project_maps
+
+    pm = resolve_project_maps(source_root, scm_id=scm_id or None)
+    listed = list_projects(source_root=source_root)
+    roots_moved: Optional[Dict[str, Any]] = None
+    if source_root:
         try:
-            data = _json.loads(cm_path.read_text(encoding="utf-8"))
-            cm_status = {
-                "exists": True,
-                "entries": len(data),
-                "verify_o": sum(1 for r in data if r.get("verify", "").upper() == "O"),
-                "verify_x": sum(1 for r in data if r.get("verify", "").upper() == "X"),
-                "path": str(cm_path),
-            }
-        except Exception:
-            cm_status = {"exists": True, "entries": 0, "error": "parse failed"}
-
-    ovr_status = {"exists": False, "functions": 0}
-    if ovr_path.exists():
-        try:
-            data = _json.loads(ovr_path.read_text(encoding="utf-8"))
-            ovr_status = {
-                "exists": True,
-                "functions": len(data),
-                "with_asil": sum(1 for v in data.values() if v.get("asil")),
-                "swcom_count": len({v.get("swcom") for v in data.values()}),
-                "path": str(ovr_path),
-            }
-        except Exception:
-            ovr_status = {"exists": True, "functions": 0, "error": "parse failed"}
-
+            target = _project_setup_target(source_root, scm_id)
+        except HTTPException:
+            target = None
+        proj = next((p for p in listed["projects"] if target and p["key"] == target["key"]), None)
+        if target and target["registry"] and proj is not None and proj.get("roots_covered") is False:
+            roots_moved = {"key": target["key"], "manifest_roots": proj["source_roots"],
+                           "registry_roots": target["source_roots"],
+                           "hint": _roots_moved_hint(target, source_root).strip()}
     return {
         "ok": True,
-        "component_map": cm_status,
-        "override": ovr_status,
+        "component_map": _setup_status_of(pm.component_map),
+        "override": _setup_status_of(pm.override),
+        "projects": listed["projects"],
+        "problems": listed["problems"],
+        "roots_moved": roots_moved,
     }
 
 

@@ -435,7 +435,8 @@ def test_suts_and_sits_carry_the_stage_failures_into_their_quality_reports(tmp_p
     # W-D: the wiring lines themselves — a real generation whose callee file cannot be read
     from generators import sits as gsits
     from generators import suts as gsuts
-    monkeypatch.setattr(gsuts, "_OVERRIDE_JSON_CANDIDATES", ())
+    # (R97) 프로젝트 맵 없음 — 예전엔 저장소 전역 override 를 끄던 자리
+    monkeypatch.setattr("report_gen.project_maps.PROJECT_MAPS_DIR", tmp_path / "no_project_maps")
     (tmp_path / "a.c").write_bytes(b"void B(void);\nvoid A(void)\n{\n    B();\n}\n")
     b = tmp_path / "b.c"
     b.write_bytes(b"unsigned char g_b;\nvoid B(void)\n{\n    g_b = 1U;\n}\n")
@@ -521,7 +522,8 @@ def test_headers_the_scan_missed_are_listed_beyond_the_detail_cap():
 def test_a_header_the_scan_missed_is_named_in_the_generated_suts_disclosure(tmp_path, monkeypatch):
     # review round 4 W1: the header list must survive SUTS' own summary — B's `@asil D` doc lives in the header
     from generators import suts as gsuts
-    monkeypatch.setattr(gsuts, "_OVERRIDE_JSON_CANDIDATES", ())
+    # (R97) 프로젝트 맵 없음 — 예전엔 저장소 전역 override 를 끄던 자리
+    monkeypatch.setattr("report_gen.project_maps.PROJECT_MAPS_DIR", tmp_path / "no_project_maps")
     hdr = tmp_path / "types.h"
     hdr.write_bytes(_src("/**", " * @brief does B", " * @asil D", " */", "void B(void);").encode())
     (tmp_path / "b.c").write_bytes(b'#include "types.h"\nunsigned char g_b;\nvoid B(void)\n{\n    g_b = 1U;\n}\n')

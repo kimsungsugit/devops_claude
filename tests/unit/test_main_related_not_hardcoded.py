@@ -4,8 +4,9 @@
 
 "SwST_01, SwCom_01, SwSTR_01, SwSTR_02, SwSTR_04, SwSTR_06, SwSTR_09" 가 `report_gen/docx_builder.py` 3곳 ·
 `report_gen/function_analyzer.py` 2곳에 박혀 있었고 그중 3곳은 **정본 값이 있어도 덮었다**(Initial commit 이래).
-이 문자열은 KJPDS02 정본 v3.03 의 main 블록(SwUFn_0101) Related 이자 `docs/uds_function_swcom_override.json` 의
-main 항목과 같은 값 — 한 프로젝트의 값이 모든 프로젝트의 main 에 실렸다. R51 이후 KJPDS02 에선 main 이 정본 중복
+이 문자열은 KJPDS02 정본 v3.03 의 main 블록(SwUFn_0101) Related 이자 HDPDM01 override 맵(R97 이전 저장소 전역
+`docs/uds_function_swcom_override.json` — HDPDM01 정본 SwUDS 역추출, 지금은 `docs/project_maps/hdpdm01/`)의 main 항목과 같은
+값이다(두 프로젝트의 main 이 같은 Related 를 갖는다) — 한 프로젝트의 값이 모든 프로젝트의 main 에 실렸다. R51 이후 KJPDS02 에선 main 이 정본 중복
 이름(SwCom_35 사본과 Related 가 갈림)이라 정본 축이 막히는데, 그때 이 리터럴이 `rule` 로 들어가 갈린 판정을 조용히
 결정했다. 값은 파이프라인(주석 → override → SwDS → 정본)이 정하고, 없으면 다른 함수와 같이 TBD 다.
 """

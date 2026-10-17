@@ -1731,14 +1731,15 @@ def test_measuring_then_asking_the_gate_finds_the_cache(tmp_path: Path, monkeypa
 
     seen: dict = {}
 
-    def _fake_measure(root, *, sds_path="", srs_path="", uds_path=""):
+    def _fake_measure(root, *, sds_path="", srs_path="", uds_path="", scm_id=""):
+        # (R97) scm_id 는 프로젝트 맵 선택 — 키는 그 맵의 지문이라 측정 · 조회가 같은 id 를 넘기면 같은 키다
         seen.update(sds=sds_path, srs=srs_path, uds=uds_path)
         res = {"ok": True, "sits": {"flows_total": 7, "cap": 120},
                "uds_category_caps": {"measured": True, "cap": 120,
                                      "any_truncated": False, "truncated": {}},
                "uds_file_scan": {"measured": True, "cap": 1200, "truncated": False}}
         with tm._CACHE_LOCK:
-            tm._CACHE[tm._key(root, sds_path, srs_path, uds_path)] = (time.time(), res)
+            tm._CACHE[tm._key(root, sds_path, srs_path, uds_path, scm_id=scm_id)] = (time.time(), res)
         return res
 
     monkeypatch.setattr(dp._tm, "measure", _fake_measure)

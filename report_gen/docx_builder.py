@@ -4292,8 +4292,9 @@ def generate_uds_docx(
                 ref_rel = ref_related_by_name.get(heading_fn_name)
                 # (R52 N39) `main` 특례를 지웠다 — 다른 함수와 같은 규칙. 예전엔 정본에 main 이 없으면 프로젝트 ID 리터럴
                 #   ("SwST_01, SwCom_01, SwSTR_…")을 `rule` 로 실었다: 그 값은 KJPDS02 정본 main 의 Related 이자
-                #   `docs/uds_function_swcom_override.json` 의 main 항목과 같은 값이라 코드에 둘 이유가 없고, 다른
-                #   프로젝트에선 지어내기다(같은 리터럴이 이 파일 3곳 + `function_analyzer.py` 2곳에 있었다).
+                #   HDPDM01 override 맵(R97: `docs/project_maps/hdpdm01/uds_function_swcom_override.json`)의 main 항목과 같은
+                #   값이라 코드에 둘 이유가 없고, 다른 프로젝트에선 지어내기다(같은 리터럴이 이 파일 3곳 + `function_analyzer.py`
+                #   2곳에 있었다). 두 프로젝트의 main 이 같은 Related 를 갖는다 — 그래서 맵의 귀속을 오래 KJPDS02 로 오인했다.
                 cur_related = str(info.get("related") or "").strip()
                 if cur_related in {"", "TBD", "SwCom_01"} and ref_rel:
                     info["related"] = ref_rel

@@ -67,21 +67,19 @@ def _fd(name, file):
 
 class TestSutsScopeReport:
     def test_unit_carries_verify_scope(self, monkeypatch):
-        monkeypatch.setattr("generators.suts._load_component_map", lambda: _MAP)
-        u = collect_unit_functions(_fd("lin_lld_get_state", "D:/y/Other/lin.c"), sds_map={})[0]
+        # (R97) 맵은 호출자가 이 프로젝트의 것으로 골라 준다 — 예전엔 여기서 저장소 전역 맵을 읽었다
+        u = collect_unit_functions(_fd("lin_lld_get_state", "D:/y/Other/lin.c"), sds_map={}, component_map=_MAP)[0]
         assert u["verify_scope"] == "X"
 
     def test_in_scope_unit_is_not_flagged(self, monkeypatch):
         """음성 대조군 — 시험 대상 파일이 X 로 찍히면 경고가 늑대를 부른다."""
-        monkeypatch.setattr("generators.suts._load_component_map", lambda: _MAP)
-        u = collect_unit_functions(_fd("g_Door_Init", "D:/y/Door_PDS.c"), sds_map={})[0]
+        u = collect_unit_functions(_fd("g_Door_Init", "D:/y/Door_PDS.c"), sds_map={}, component_map=_MAP)[0]
         assert u["verify_scope"] == "O"
 
     def test_exempt_unit_is_reported_not_dropped(self, monkeypatch, caplog):
         """⚠ **거르지 않는다.** 정본도 X unit 24개를 담는다 — 빼는 건 사람 결정이다."""
-        monkeypatch.setattr("generators.suts._load_component_map", lambda: _MAP)
         with caplog.at_level(logging.INFO, logger="generators.suts"):
-            units = collect_unit_functions(_fd("lin_lld_get_state", "D:/y/Other/lin.c"), sds_map={})
+            units = collect_unit_functions(_fd("lin_lld_get_state", "D:/y/Other/lin.c"), sds_map={}, component_map=_MAP)
         assert len(units) == 1, "면제 unit 을 조용히 지웠다"
         # ⚠ `record.message` 는 지연 포매팅이라 `%` 인자가 아직 안 박혀 있다.
         #   `getMessage()` 로 완성된 문자열을 봐야 한다.
@@ -91,19 +89,28 @@ class TestSutsScopeReport:
 
     def test_no_map_says_so_instead_of_claiming_clean(self, monkeypatch, caplog):
         """⚠ 맵이 없으면 '면제 0건'이 아니라 **판정 안 함**이라고 말해야 한다."""
-        monkeypatch.setattr("generators.suts._load_component_map", lambda: {})
         with caplog.at_level(logging.INFO, logger="generators.suts"):
-            collect_unit_functions(_fd("whatever", "D:/y/Other/lin.c"), sds_map={})
+            collect_unit_functions(_fd("whatever", "D:/y/Other/lin.c"), sds_map={}, component_map={})
         msgs = " ".join(r.getMessage() for r in caplog.records)
         assert "component_map 없음" in msgs, msgs
 
-    def test_map_load_failure_does_not_break_generation(self, monkeypatch):
-        """맵 로드가 깨져도 산출물은 나가야 한다 — 보고는 부가 정보다."""
-        def _boom():
-            raise RuntimeError("boom")
-        monkeypatch.setattr("generators.suts._load_component_map", _boom)
-        units = collect_unit_functions(_fd("g_Door_Init", "D:/y/Door_PDS.c"), sds_map={})
+    def test_no_map_given_does_not_break_generation(self):
+        """맵을 못 골라도(프로젝트 맵이 남의 것 · 깨짐 → 호출자가 None) 산출물은 나가야 한다 — 보고는 부가 정보다.
+
+        (R97) 예전엔 여기서 맵을 **읽다가** 깨지는 경우를 봤다. 이제 읽기는 `report_gen.project_maps` 가 하고 깨진 맵은
+        `invalid` 로 판정돼 호출자가 None 을 준다 — 그 경로가 이것이다(깨진 맵 판정은 `test_project_maps.py`)."""
+        units = collect_unit_functions(_fd("g_Door_Init", "D:/y/Door_PDS.c"), sds_map={}, component_map=None)
         assert len(units) == 1 and units[0]["verify_scope"] == ""
+
+    def test_collect_does_not_load_any_map_itself(self, monkeypatch):
+        """(R97) 인자 없이 부르면 시험 범위 판정을 안 한다 — 저장소 맵을 몰래 읽던 옛 경로(HDPDM01 맵이 KJPDS02_PV 에 걸림)의 가드."""
+        import report_gen.project_maps as pmod
+
+        def _boom(*a, **k):
+            raise AssertionError("collect_unit_functions 가 프로젝트 맵을 스스로 골랐다")
+        monkeypatch.setattr(pmod, "resolve_project_maps", _boom)
+        u = collect_unit_functions(_fd("lin_lld_get_state", "D:/y/Other/lin.c"), sds_map={})[0]
+        assert u["verify_scope"] == ""
 
 
 @pytest.mark.parametrize("verify,expected", [("X", "X"), ("x", "X"), (" O ", "O"), ("", "")])

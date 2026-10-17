@@ -427,6 +427,29 @@ def _record_uds_run(
 # 수집기(`IssueCollector`)는 `_uds_generate_from_paths` 가 열고, 진행 폴링·완료 결과·품질 run meta 에 실린다.
 
 
+def _note_project_maps(issues: IssueCollector, source_sections: Dict[str, Any]) -> None:
+    """(R97) 이 프로젝트의 component_map/override 를 쓰지 못한 사유를 항목으로 — 예전엔 HDPDM01 맵이 이름으로 조용히 걸렸고,
+    이제는 안 걸리는 사실이 조용하면 "SwCom 라벨 · 시험 범위가 왜 비었나" 를 아무도 모른다.
+
+    사람이 볼 일인지는 `report_gen.project_maps.needs_attention` 단일 판정(경고 판정 · 읽지 못한 매니페스트) — 공시와 같은 기준(리뷰 I8).
+    """
+    from report_gen.project_maps import needs_attention
+
+    pm = source_sections.get("project_maps") if isinstance(source_sections, dict) else None
+    if not isinstance(pm, dict):
+        return
+    for kind, d in sorted(pm.items()):
+        if not isinstance(d, dict) or d.get("used") == "argument":
+            continue
+        if needs_attention(d):
+            probs = [str(x) for x in (d.get("problems") or [])]
+            issues.add("project_map_not_applied", "warning", "actual",
+                       f"{kind}: {d.get('reason') or d.get('status')}"
+                       + (f" (읽지 못한 매니페스트: {'; '.join(probs[:3])})" if probs and d.get("status") == "applied" else ""),
+                       stage="source", facts={"kind": kind, "status": d.get("status"), "others": d.get("others") or [],
+                                              "problems": probs[:5]})
+
+
 def _note_source_caps(issues: IssueCollector, source_sections: Dict[str, Any]) -> None:
     """소스 분석이 **잘라낸 것**을 항목으로 — 캡은 조용히 자르므로 여기서 말하지 않으면 "원래 없는 것" 으로 읽힌다."""
     if not isinstance(source_sections, dict):
@@ -1507,10 +1530,24 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = False,
 #   담은 문맥. R90 개발 중 v56 으로 캐시된 문맥에는 그 목록이 없을 수 있다(그러면 공용체를 배치하지 않는다) — 다시 읽는다.
 # (callee contract G5) v58: project_context 스키마 28 — 함수별 종료 사실(`termination`)과 closure 의 판정. 27 로 캐시된 문맥에는
 #   없어 write closure 로 돈 callee 의 반환을 모두 '가정' 으로 공시한다 — 다시 읽는다.
-_SOURCE_SECTIONS_SCHEMA_VERSION = "v58"
+# (R97) v59: payload `project_maps`(어느 프로젝트의 component_map · override 를 썼나). 맵은 이제 그 프로젝트에만 걸린다 —
+#   v58 로 캐시된 KJPDS02_PV 결과는 HDPDM01 맵(verify=X 35 파일 · override 223 함수)을 받은 것이다. 캐시 키 · 서명에도 맵 지문이 든다.
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v59"
 #: (R68 리뷰 W3) 읽기 실패가 든 결과는 디스크에 두지 않고 메모리에만 이만큼 — 한 묶음(STS · SUTS · SITS 연속 생성)은 파싱 한 번을
 #   나눠 쓰고, 사용자의 다음 생성은 다시 읽는다. 0 이면 담지 않는다.
 _FAILED_SECTIONS_TTL = 90.0
+
+
+def clear_source_sections_cache() -> int:
+    """(R97) 메모리의 소스 단계 캐시를 비운다 — 프로젝트 맵을 새로 쓴 직후(설정 엔드포인트). 반환은 비운 항목 수.
+
+    키 · 서명에 맵 지문이 들어 있어 맵이 바뀌면 옛 항목은 어차피 안 맞는다 — 비우는 것은 옛 맵의 큰 payload 를 30 분 TTL
+    동안 붙잡아 두지 않기 위해서다. 디스크 캐시는 서명 대조로 거부되므로 지우지 않는다.
+    """
+    with _source_sections_cache_lock:
+        n = len(_source_sections_cache)
+        _source_sections_cache.clear()
+    return n
 
 
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
@@ -1557,7 +1594,9 @@ def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[
 def _get_source_sections_cached(source_root: str, max_files: Optional[int] = None,
                                 *,
                                 preprocess: bool = False,
-                                max_items: Optional[int] = None) -> Dict[str, Any]:
+                                max_items: Optional[int] = None,
+                                scm_id: Optional[str] = None,
+                                project_maps: Any = None) -> Dict[str, Any]:
     """소스 인덱스 — TTL + (경로,mtime,size) 시그니처 캐시.
 
     ⚠ `max_files` 는 오래 **시그니처 계산에만** 쓰였고 파싱에는 넘어가지 않았다. 즉
@@ -1565,6 +1604,11 @@ def _get_source_sections_cached(source_root: str, max_files: Optional[int] = Non
       않는 **거짓 통제**였다. 이제 파싱까지 넘기고, 그래서 **캐시 키에도 들어가야** 한다.
     ⚠ 기본값을 숫자로 적지 않는다(예전엔 `1200`). `config` 가 환경변수로 덮이면
       `DEVOPS_UDS_MAX_FILES=77` 인데도 시그니처는 1200개로 계산되어 어긋났다.
+    ⚠ (R97) `scm_id` 는 프로젝트 맵(`report_gen.project_maps`)을 고르는 데만 쓴다 — 등록 항목을 아는 호출자가 준다. 결과를
+      바꾸는 것은 id 가 아니라 **고른 맵**이라 캐시 키 · 서명에는 맵 지문(`status:project:sha1`)이 든다: 같은 루트라도 맵을
+      고치면 캐시가 깨지고, id 로 고르든 루트로 고르든 같은 맵이면 같은 캐시를 쓴다.
+    ⚠ (R97 리뷰 I1) 판정은 **한 번만** 한다 — 키 · 서명 · 파싱이 같은 `ProjectMaps` 를 쓴다. 키에서 한 번, 생성기 안에서 또 한 번
+      고르면 그 사이 맵이 바뀐 경우 새 맵으로 판 결과가 옛 지문 키에 저장된다. 호출자(SUTS)가 이미 골랐으면 `project_maps` 로 넘긴다.
     """
     try:
         import config as _cfg_caps
@@ -1597,13 +1641,21 @@ def _get_source_sections_cached(source_root: str, max_files: Optional[int] = Non
     # `/api/code/call-graph?max_files=200` 의 결과가 문서생성(1200)과 한 칸을 공유한다.
     # (R56 리뷰 W2) 스키마 버전을 **키에** 넣는다 — cloudium/원격 루트는 `_source_root_signature` 가 None 이라 `_sig_ok` 가 무조건
     #   True 였고, 그러면 버전 bump 가 인메모리 TTL 캐시(30분)를 못 깼다(v16 payload 가 계속 돌아온다).
-    key = f"{source_root}\x00pp={int(bool(preprocess))}\x00mf={max_files}\x00mi={max_items}\x00schema={_SOURCE_SECTIONS_SCHEMA_VERSION}"
+    # (R97) 프로젝트 맵 지문 — 키와 서명 둘 다에 든다(cloudium 은 서명이 None 이라 키가 맵 교체를 잡는다).
+    from report_gen.project_maps import resolve_project_maps
+    _pm = project_maps if project_maps is not None else resolve_project_maps(source_root, scm_id=scm_id)
+    _pm_fp = _pm.fingerprint
+    #   ⚠ 한 줄 f-string 으로 둔다 — `test_uds_call_rows_reference_convention` 가 이 줄에서 스키마 버전을 찾는다
+    key = f"{source_root}\x00pp={int(bool(preprocess))}\x00mf={max_files}\x00mi={max_items}\x00schema={_SOURCE_SECTIONS_SCHEMA_VERSION}\x00pm={_pm_fp}"  # noqa: E501
     now = time()
     # 소스 시그니처(경로,mtime,size,스키마버전)를 먼저 계산 — 인메모리 TTL 캐시도 시그니처로 검증한다.
     # 과거엔 TTL 캐시가 mtime을 안 봐서, 소스를 편집하고 30분 내 재실행하면 **편집 전 함수 집합으로
     # 분석**했다(디스크 캐시는 mtime을 보는데 인메모리가 stale을 먼저 반환). cloudium은 _sig=None →
     # 시그니처 검증 skip(로컬 stat 무의미), 기존 TTL 동작 유지.
     _sig = _source_root_signature(source_root, max_files)
+    if _sig:
+        # 디스크 캐시 파일은 맵과 무관한 경로라(`_source_sections_disk_cache_path`) 서명이 맵을 담아야 옛 맵의 결과를 안 읽는다
+        _sig = f"{_sig}|pm={_pm_fp}"
     with _source_sections_cache_lock:
         item = _source_sections_cache.get(key)
         # Lightweight TTL cache to avoid repeated heavy parsing.
@@ -1634,7 +1686,7 @@ def _get_source_sections_cached(source_root: str, max_files: Optional[int] = Non
     _log.info("[source_sections] Parsing started for %s", key)
     t0 = time()
     sections = generate_uds_source_sections(  # 콤마 구분 그대로 전달
-        source_root, preprocess=preprocess, max_files=max_files, max_items=max_items)
+        source_root, preprocess=preprocess, max_files=max_files, max_items=max_items, scm_id=scm_id, project_maps=_pm)
     elapsed = time() - t0
     _log.info("[source_sections] Parsing finished in %.1fs for %s", elapsed, key)
     _failures = (sections.get("source_read_failures") or {}) if isinstance(sections, dict) else {}
@@ -2892,6 +2944,10 @@ def _uds_generate_from_paths(
                     f"요구 문서 {len(req_doc_paths)}건 중 SwDS 로 인식된 것 {_sds_candidates}건, 파티션 맵 0건 — 설계 문서 없이 소스·정본만으로 채운다",
                     stage="requirements", facts={"docs": len(req_doc_paths), "sds_candidates": _sds_candidates})
     if _src_roots_str:
+        # (R97 리뷰 W2) 프로젝트 맵은 **루트로** 고른다 — `reference_source.scm_id` 를 넘기지 않는다. 그 id 는 참조 SwUDS 를 고르려고
+        #   루트 조각 **하나만** 항목 루트와 맞아도 나온다(`describe_reference_suds_source`). 그 id 로 맵을 고르면
+        #   `PDS64_RD,<미등록 루트>` 에서 UDS 는 HD 맵을 쓰고 SUTS · SITS · STS 는 `not_this_project` 라 같은 입력에서 SwUFn · 모듈이
+        #   갈렸다(추적성이 끊긴다). 이 경로의 루트는 레지스트리 루트 그대로이므로 루트 판정이 같은 답을 낸다.
         source_sections = generate_uds_source_sections(
             _src_roots_str,
             component_map=component_map if component_map else None,
@@ -2900,6 +2956,7 @@ def _uds_generate_from_paths(
             max_items=max_items_per_category,
         )
         _note_source_caps(_issues, source_sections)
+        _note_project_maps(_issues, source_sections)
     else:
         _issues.add("source_root_none", "error", "actual",
                     "존재하는 소스 루트가 없어 소스 분석을 건너뛴다 — 함수 0개 문서가 된다", stage="source",

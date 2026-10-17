@@ -53,8 +53,8 @@ from report_gen.function_analyzer import split_param_annotations
 from report_gen.requirements import (
     _asil_max_of,
     _extract_sds_partition_map,
-    _load_component_map,
     _merge_sds_partition_map,
+    component_map_from_rows,
     component_verify_of,
     is_sds_placeholder_key,
     normalize_sds_key,
@@ -805,6 +805,7 @@ def collect_unit_functions(
     uds_io_map: Optional[Dict[str, Any]] = None,
     struct_members: Optional[Dict[str, Dict[str, str]]] = None,
     uds_doc_name: Optional[str] = None,
+    component_map: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Collect and structure unit functions from report_generator output.
 
@@ -818,15 +819,14 @@ def collect_unit_functions(
         uds_doc_name: (R90) 지정한 SwUDS 의 **원래 파일 이름** — 설계 대조 근거 칸이 이 이름을 적는다. 파일 접근기(Cloudium)
             경유면 `uds_io_map["source"]` 는 임시 사본 이름이라(실행마다 다르다) 웹 생성 ≠ 스크립트 생성이 된다(리뷰 C1).
             주면 "SwUDS 를 지정했다" 는 뜻도 된다 — 맵이 비었으면 '지정했지만 출력 표를 못 읽음' 으로 판정한다.
+        component_map: (R97) 이 프로젝트의 component_map 조회 맵(`requirements.component_map_from_rows`) — unit 의 시험 범위
+            (`verify_scope`) 판정 근거. 호출자가 프로젝트 맵(`report_gen.project_maps`)에서 골라 준다. None 이면 빈 맵이고 아래 요약이
+            "component_map 없음 → 시험 범위 판정 안 함" 을 말한다. 예전엔 여기서 인자 없이 저장소 `docs/component_map.json`
+            (HDPDM01 자료)을 읽어 KJPDS02_PV 의 FBL `lin.c` 함수 24 개가 HD 의 verify=X 를 받았다.
     """
     gim = globals_info_map or {}
-    # 시험 범위 판정용. 실패해도 산출물은 그대로 나가야 하므로 빈 맵으로 떨어진다
-    # (판정 불가와 '면제 아님'을 섞지 않도록 아래 요약이 맵 부재를 명시한다).
-    try:
-        _cmap = _load_component_map()
-    except Exception as _cm_exc:  # noqa: BLE001 — 보고용 부가 정보다
-        _logger.warning("component_map 로드 실패 — 시험 범위 보고 생략: %s", _cm_exc)
-        _cmap = {}
+    # 시험 범위 판정용 — 판정 불가와 '면제 아님'을 섞지 않도록 아래 요약이 맵 부재를 명시한다.
+    _cmap = component_map or {}
     # 구조체 **배열** 전역(`SlipDetectPhase_t g_SlipDetectPhases[4]`)의 첨자는 root 에
     # 붙는다. unit 마다 안 바뀌므로 루프 **밖에서** 한 번만 만든다.
     _root_sizes: Dict[str, Tuple[int, ...]] = {}
@@ -1196,9 +1196,10 @@ def collect_unit_functions(
         #   이 저장소엔 ASIL 순위표가 이미 여러 벌 있고(하나는 정렬용 역순이다) 여기
         #   또 만들면 다음에 한쪽만 고쳐진다.
         _src_asil = str(info.get("asil") or "").strip()
-        # (R70 N83) 그 값이 소스 `@asil` 인지 저장소 override 스냅샷(`docs/uds_function_swcom_override.json`,
-        #   프로젝트 확인 없음)인지는 소스 단계 라벨(`asil_source`, R68)이 안다. 예전엔 둘 다 "source" 였다 —
-        #   KJPDS02 에서 override 가 준 228 unit 의 등급이 소스 근거로 표시됐고, 준비 게이트의 근거 축도 그렇게 읽었다.
+        # (R70 N83) 그 값이 소스 `@asil` 인지 override 스냅샷인지는 소스 단계 라벨(`asil_source`, R68)이 안다. 예전엔 둘 다
+        #   "source" 였다 — KJPDS02 에서 override 가 준 228 unit 의 등급이 소스 근거로 표시됐고, 준비 게이트의 근거 축도 그렇게 읽었다.
+        # (R97) 그 스냅샷은 **HDPDM01** 정본 SwUDS 역추출이다(KJPDS02 228 unit 은 남의 맵이 이름으로 걸린 것) — 이제
+        #   `docs/project_maps/hdpdm01/` 에 있고 소스 루트 · SCM id 로 그 프로젝트일 때만 걸린다(문서 판까지는 대조 안 함).
         _src_kind = "override" if str(info.get("asil_source") or "") == "override" else "source"
         _uds_asil = str((_uds_rec or {}).get("asil") or "").strip()
         # ⚠ 충돌은 **양쪽 다 실제 등급일 때만**이다. `TBD`·`N/A` 는 "근거 없음"이지
@@ -1212,8 +1213,9 @@ def collect_unit_functions(
         asil = _asil_max_of([_src_asil, _uds_asil])
         _asil_evidence = (f"uds+{_src_kind}" if _src_grade and _uds_grade
                           else "uds" if _uds_grade else _src_kind if _src_grade else "")
-        # (R66 리뷰 2차 W-B) 저장소 override 스냅샷(프로젝트 확인 없음)의 등급이 **최종 등급을 정한** unit — SwUDS 가 없거나 더
-        #   낮을 때. 근거 라벨 `uds+override` 만으로는 스냅샷이 등급을 올렸는지 구별되지 않는다(공시가 이 수를 말한다)
+        # (R66 리뷰 2차 W-B) override 스냅샷의 등급이 **최종 등급을 정한** unit — SwUDS 가 없거나 더 낮을 때. 근거 라벨
+        #   `uds+override` 만으로는 스냅샷이 등급을 올렸는지 구별되지 않는다(공시가 이 수를 말한다). (R97) 스냅샷은 HDPDM01 정본
+        #   SwUDS 역추출이고 소스 루트 · SCM id 로 그 프로젝트일 때만 걸린다 — 정본의 판(版)은 대조하지 않는다.
         _asil_by_override = bool(_src_kind == "override" and _src_grade and asil == _src_grade and _src_grade != _uds_grade)
         if not asil:
             # SDS 파티션 폴백 — 값은 예전과 같다. 다만 그 값이 **모듈명 부분문자열
@@ -8027,7 +8029,8 @@ def generate_suts_quality_report(
     io_coverage_pct = round(with_io / max(total_tc, 1) * 100, 1)
 
     # (R70 N83) 안전 등급의 근거 분포(`collect_unit_functions` 의 `asil_evidence`)와 소스에 없는 override 전용 unit.
-    #   `uds`/`uds+*` 는 SwUDS 표가 정한 것, `source` 는 소스 `@asil`, `override` 는 저장소 스냅샷(프로젝트 확인 없음),
+    #   `uds`/`uds+*` 는 SwUDS 표가 정한 것, `source` 는 소스 `@asil`, `override` 는 프로젝트 override 맵(R97: 루트 · SCM id 로
+    #   그 프로젝트일 때만 — 정본 판 미대조),
     #   `sds-*` 는 SwDS 파티션 매칭, `none` 은 근거 없음(TBD). 예전엔 이 리포트가 등급의 근거를 하나도 싣지 않았다.
     asil_evidence: Dict[str, int] = {}
     for u in units:
@@ -8337,7 +8340,8 @@ def validate_sts_xlsm(xlsm_path: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _override_only_entry(name: str, ovr_info: Dict[str, Any], fid: str) -> Dict[str, Any]:
-    """override 스냅샷(`docs/uds_function_swcom_override.json`)에만 있고 소스에 없는 함수의 자리표시 엔트리.
+    """이 프로젝트의 override 맵(R97 `docs/project_maps/<프로젝트>/uds_function_swcom_override.json`)에만 있고 소스에 없는 함수의
+    자리표시 엔트리.
 
     (R70 N83) 이 엔트리의 근거는 저장소 스냅샷뿐이다 — 소스도 주석도 없다. 값을 준 단계가 라벨을 단다(R68 규약):
     값이 있으면 `override`, 없으면 TBD 에 `default`. 예전엔 라벨을 아예 안 적어 `collect_unit_functions` 의 근거
@@ -8370,67 +8374,62 @@ def _override_only_entry(name: str, ovr_info: Dict[str, Any], fid: str) -> Dict[
     }
 
 
-_OVERRIDE_JSON_CANDIDATES = (
-    Path(__file__).resolve().parent.parent / "docs" / "uds_function_swcom_override.json",
-    Path(__file__).resolve().parent / "docs" / "uds_function_swcom_override.json",
-)
+def supplement_override_only(function_details: Dict[str, Dict[str, Any]],
+                             override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """override 맵에만 있고 소스에 없는 함수를 자리표시 엔트리로 **보충**한다(필터 아님). 제자리 변경.
 
-
-def supplement_override_only(function_details: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """override 스냅샷에만 있고 소스에 없는 함수를 자리표시 엔트리로 **보충**한다(필터 아님). 제자리 변경.
-
-    반환: `{"found": 목록 파일 유무, "list_size", "source": 보충 전 함수 수, "in_list": 목록 일치 수, "added": 보충 수,
+    반환: `{"found": 맵을 받았나, "list_size", "source": 보충 전 함수 수, "in_list": 목록 일치 수, "added": 보충 수,
     "added_names": [...]}`.
 
     (R70 리뷰 W1) 생성기(`generate_suts`)와 준비 게이트 측정(`docgen_test_materials.measure`)이 **같은 함수**를 불러야
     게이트가 산출물과 같은 unit 목록을 잰다 — 이 블록이 `generate_suts` 안에 인라인이던 동안 측정 경로는 보충을 안 타서
-    스냅샷 전용 unit 이 게이트에선 구조적으로 0 이었다. 실패(파일 손상 등)는 예외로 올린다 — 호출부가 사유를 남긴다.
+    스냅샷 전용 unit 이 게이트에선 구조적으로 0 이었다.
+
+    (R97) `override` 는 호출자가 **이 프로젝트의** 맵으로 골라 준다(`report_gen.project_maps.resolve_project_maps(...).override`,
+    `applied` 일 때의 `data`, 아니면 None). 예전엔 여기서 저장소 `docs/uds_function_swcom_override.json`(HDPDM01 자료)을 직접
+    읽어 어느 프로젝트에나 보충했다 — KJPDS02_PV 에 HD 함수 자리표시가 붙던 경로다. None 이면 보충 없음(`found=False`).
     """
     stats: Dict[str, Any] = {"found": False, "list_size": 0, "source": len(function_details),
                              "in_list": 0, "added": 0, "added_names": []}
-    import json as _json
-
-    for ovr_path in _OVERRIDE_JSON_CANDIDATES:
-        if not ovr_path.exists():
+    if not isinstance(override, dict):
+        return stats
+    ovr_data = override
+    stats["found"] = True
+    stats["list_size"] = len(ovr_data)
+    if not ovr_data:
+        return stats
+    names = set(ovr_data.keys())
+    names_lower = {n.lower() for n in names}
+    # ⚠ 여기서 걸러내지 않는다(호출부 주석 참조). 목록 밖 함수도 그대로 둔다.
+    stats["in_list"] = sum(
+        1 for info in function_details.values()
+        if isinstance(info, dict) and (
+            str(info.get("name") or "") in names or str(info.get("name") or "").lower() in names_lower)
+    )
+    existing = {str(info.get("name") or "").lower() for info in function_details.values() if isinstance(info, dict)}
+    added = 0
+    # (R70 N89) 자리표시 id 는 **비어 있는** 번호여야 한다. 예전 식 `SwUFn_{swcom}{99-n}` 은 함수가 99개 이상인
+    #   모듈(KJPDS02 SwCom_13 126개 · SwCom_35)의 실 함수 id 와 겹쳐 그 함수를 **덮어썼다** — 라이브 5개
+    #   (`s_Ap_PreviousCtrl_ResetFlags` 등)가 SUTS 에서 조용히 사라졌다(1,146+27 이 1,168 이던 이유).
+    next_slot: Dict[int, int] = {}
+    for ovr_name, ovr_info in ovr_data.items():
+        if ovr_name.lower() in existing:
             continue
-        ovr_data = _json.loads(ovr_path.read_text(encoding="utf-8"))
-        stats["found"] = True
-        stats["list_size"] = len(ovr_data)
-        if not ovr_data:
-            break
-        names = set(ovr_data.keys())
-        names_lower = {n.lower() for n in names}
-        # ⚠ 여기서 걸러내지 않는다(호출부 주석 참조). 목록 밖 함수도 그대로 둔다.
-        stats["in_list"] = sum(
-            1 for info in function_details.values()
-            if isinstance(info, dict) and (
-                str(info.get("name") or "") in names or str(info.get("name") or "").lower() in names_lower)
-        )
-        existing = {str(info.get("name") or "").lower() for info in function_details.values() if isinstance(info, dict)}
-        added = 0
-        # (R70 N89) 자리표시 id 는 **비어 있는** 번호여야 한다. 예전 식 `SwUFn_{swcom}{99-n}` 은 함수가 99개 이상인
-        #   모듈(KJPDS02 SwCom_13 126개 · SwCom_35)의 실 함수 id 와 겹쳐 그 함수를 **덮어썼다** — 라이브 5개
-        #   (`s_Ap_PreviousCtrl_ResetFlags` 등)가 SUTS 에서 조용히 사라졌다(1,146+27 이 1,168 이던 이유).
-        next_slot: Dict[int, int] = {}
-        for ovr_name, ovr_info in ovr_data.items():
-            if ovr_name.lower() in existing:
-                continue
-            info = ovr_info if isinstance(ovr_info, dict) else {}
-            sc = int(info.get("swcom") or 0)
-            slot = next_slot.get(sc, 99)
+        info = ovr_info if isinstance(ovr_info, dict) else {}
+        sc = int(info.get("swcom") or 0)
+        slot = next_slot.get(sc, 99)
+        fid = f"SwUFn_{sc:02d}{slot:02d}"
+        while fid in function_details and slot > 0:
+            slot -= 1
             fid = f"SwUFn_{sc:02d}{slot:02d}"
-            while fid in function_details and slot > 0:
-                slot -= 1
-                fid = f"SwUFn_{sc:02d}{slot:02d}"
-            if fid in function_details:
-                # 두 자리 번호가 다 찼다 — 본 생성기의 3자리 규약과 같은 꼴로 비켜 선다.
-                fid = f"SwUFn_{sc:02d}{900 + added:03d}"
-            next_slot[sc] = slot - 1
-            function_details[fid] = _override_only_entry(ovr_name, info, fid)
-            added += 1
-            stats["added_names"].append(ovr_name)
-        stats["added"] = added
-        break
+        if fid in function_details:
+            # 두 자리 번호가 다 찼다 — 본 생성기의 3자리 규약과 같은 꼴로 비켜 선다.
+            fid = f"SwUFn_{sc:02d}{900 + added:03d}"
+        next_slot[sc] = slot - 1
+        function_details[fid] = _override_only_entry(ovr_name, info, fid)
+        added += 1
+        stats["added_names"].append(ovr_name)
+    stats["added"] = added
     return stats
 
 
@@ -8486,10 +8485,13 @@ def generate_suts(
     scope: str = "suds",
     tc_profile: str = "",
     input_skips: Optional[List[str]] = None,
+    scm_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Top-level SUTS generation pipeline.
 
     Args (추가):
+        scm_id: (R97) 등록 항목 id 를 아는 호출자(영향 분석 재생성 등)가 준다 — 프로젝트 맵(component_map · override)을 고르는
+            데만 쓴다. 없으면 소스 루트로 고른다(`report_gen.project_maps`). 무엇을 썼는지는 `quality_report["project_maps"]`.
         input_skips: (R66) 호출자(라우트)가 지정된 입력 문서를 로컬화하지 못한 사유 ``"<라벨>: <사유>"``(라벨 SRS · SDS ·
             UDS · HSIS). 그 문서는 경로가 None 으로 오지만 '주지 않음' 이 아니라 '지정했지만 열지 못함' 으로 공시한다.
         tc_profile: `""`/`"extended"`(기본, R87) = 확장 — 시퀀스 상한 없이 + 확장 전략(`extended_unit_sequences`; 정본이 잡는
@@ -8531,16 +8533,22 @@ def generate_suts(
     }
 
     _progress(5, "소스 코드 파싱 시작")
+    # (R97) 이 프로젝트의 맵 — 소스 단계(파일 범위 · SwCom 라벨 · override 값)와 아래 보충 · 시험 범위 판정이 **같은 판정**을 쓴다.
+    #   소스 단계 캐시는 맵 지문을 키에 담으므로, 그 사이 맵 파일이 바뀌면 두 판정이 갈릴 수 있다 — 그 경우 아래 지문 대조가 말한다.
+    from report_gen.project_maps import resolve_project_maps
+    _pmaps = resolve_project_maps(source_root, scm_id=scm_id)
     globals_info_map: Dict[str, Dict[str, str]] = {}
+    report_data: Dict[str, Any] = {}
     try:
         try:
             from backend.helpers import _get_source_sections_cached
 
-            report_data = _get_source_sections_cached(source_root)
+            # (R97 리뷰 I1) 위에서 고른 판정을 넘긴다 — 캐시 키 · 파싱 · 아래 보충 · 시험 범위가 한 판정이다
+            report_data = _get_source_sections_cached(source_root, scm_id=scm_id, project_maps=_pmaps)
         except Exception:
             from report_generator import generate_uds_source_sections
 
-            report_data = generate_uds_source_sections(source_root)
+            report_data = generate_uds_source_sections(source_root, scm_id=scm_id, project_maps=_pmaps)
         function_details = report_data.get("function_details", {})
         globals_info_map = report_data.get("globals_info_map", {}) or {}
         if not function_details:
@@ -8574,8 +8582,9 @@ def generate_suts(
     #   그래서 필터를 걷어내고 **탈락 대신 보충만** 한다(목록에 있는데 소스에 없는
     #   함수는 종전대로 빈 엔트리로 추가한다 — 그건 정보를 더하지 빼지 않는다).
     #   (R70) 보충 자체는 `supplement_override_only` — 준비 게이트 측정도 같은 함수를 부른다(리뷰 W1).
+    # (R97) 보충 목록은 **이 프로젝트의** override 맵뿐이다 — 예전엔 저장소의 HDPDM01 목록이 어느 프로젝트에나 보충됐다.
     try:
-        _ovr = supplement_override_only(function_details)
+        _ovr = supplement_override_only(function_details, _pmaps.override.data if _pmaps.override.applied else None)
         if _ovr["found"] and _ovr["list_size"]:
             # 침묵 금지 — 목록과 소스가 얼마나 어긋나는지 그대로 보고한다.
             _progress(
@@ -8620,7 +8629,10 @@ def generate_suts(
                                    struct_members=report_data.get("struct_member_arrays") or {},
                                    # (R90, 리뷰 C1) 설계 대조 근거 칸은 지정한 문서의 원래 이름 — 임시 사본 이름이 아니다
                                    uds_doc_name=(str(_input_docs["UDS"].get("name") or "SwUDS")
-                                                 if _input_docs["UDS"].get("given") else None))
+                                                 if _input_docs["UDS"].get("given") else None),
+                                   # (R97) 시험 범위(verify) 판정 — 이 프로젝트의 component_map 만
+                                   component_map=(component_map_from_rows(_pmaps.component_map.data)
+                                                  if _pmaps.component_map.applied else None))
     attach_unit_sources(units, report_data.get("source_files"), report_data.get("project_context"))
     # (R81) 포인터 이름만 적힌 매개변수 → 가리키는 대상 표기(정본 표기) — 범위(대상 배치)가 붙은 뒤, 행을 만들기 전
     try:
@@ -8954,6 +8966,9 @@ def generate_suts(
     # (R66, 감사 #1 · #62) 입력 문서마다 지정했나 · 열었나 · 못 연 사유 · 그 때문에 건너뛴 블록(SDS 는 파티션 수까지).
     #   주지 않은 문서도 적는다(given False — 블록마다 부르므로 네 문서가 늘 있다) — 공시가 '주면 무엇이 채워지는가' 를 말한다.
     quality["input_documents"] = _input_docs
+    # (R97) 어느 프로젝트의 component_map · override 를 썼나(또는 왜 안 썼나) — 소스 단계가 쓴 것과 갈리면 그 사실도
+    from report_gen.project_maps import describe_for_report
+    quality["project_maps"] = describe_for_report(_pmaps, report_data.get("project_maps"))
     quality["extended_sequences"], _beyond = profile_increment(all_sequences, _extended)
     # (R17) #if verdicts on build-configuration evidence — units, reasons, names taken as undefined
     from generators.c_project_context import summarize_build_assumptions

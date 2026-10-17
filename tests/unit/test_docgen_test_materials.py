@@ -157,7 +157,7 @@ def test_measure_passes_uds_path_to_the_sits_axis(monkeypatch, tmp_path) -> None
 
     monkeypatch.setattr(
         _rg, "generate_uds_source_sections",
-        lambda root: {"function_details": {"F": _fn("f", "a.c", [])},
+        lambda root, **_k: {"function_details": {"F": _fn("f", "a.c", [])},   # (R97) scm_id 키워드
                       "globals_info_map": {}})
     tm.clear_cache()
     try:
@@ -779,7 +779,7 @@ def test_measure_passes_uds_path_through(monkeypatch) -> None:
     monkeypatch.setattr(tm, "_measure_suts_asil", lambda *a, **k: {})
     import report_generator as _rg
     monkeypatch.setattr(_rg, "generate_uds_source_sections",
-                        lambda root: {"function_details": {"f": {"name": "f"}}})
+                        lambda root, **_k: {"function_details": {"f": {"name": "f"}}})   # (R97) scm_id
     tm.clear_cache()
     tm.measure("C:/src", sds_path="s.docx", srs_path="r.docx", uds_path="u.docx")
     assert seen["uds"] == "u.docx"

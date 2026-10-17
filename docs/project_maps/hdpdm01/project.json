@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "scm_id": "hdpdm01",
+  "project": "HDPDM01",
+  "source_roots": [
+    "D:/Project/Ados/PDS64_RD",
+    "D:\\Project\\Ados\\PDS64_FBL"
+  ],
+  "maps": {
+    "component_map": {
+      "file": "component_map.json",
+      "origin": "HDPDM01 SDS v1.04 software structure + manual verify=X (git b4f154c4..49558d3a)"
+    },
+    "override": {
+      "file": "uds_function_swcom_override.json",
+      "origin": "reverse-extracted from HDPDM01 SwUDS (2026-04-09, d6dad473/0b7e1979); 2026-10-17 check vs HD SwUDS v1.07: names 251/251, ASIL 250/250, Related 245/251"
+    }
+  }
+}

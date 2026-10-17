@@ -4311,6 +4311,9 @@ def generate_sits(
     # (R66) 호출자(라우트)가 SRS · SDS · UDS · HSIS · STP 를 로컬화하지 못한 사유 ``"<라벨>: <사유>"`` — 그 문서는 '주지 않음' 이
     #   아니라 '지정했지만 열지 못함' 으로 공시한다.
     input_skips: Optional[List[str]] = None,
+    # (R97) 등록 항목 id 를 아는 호출자(영향 분석 재생성)가 준다 — 소스 단계의 프로젝트 맵(component_map · override) 선택에만 쓴다.
+    #   없으면 소스 루트로 고른다. 무엇을 썼는지는 `quality_report["project_maps"]`.
+    scm_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Top-level SITS generation pipeline.
 
@@ -4401,10 +4404,10 @@ def generate_sits(
     try:
         try:
             from backend.helpers import _get_source_sections_cached
-            report_data = _get_source_sections_cached(source_root)  # 콤마 구분 그대로 전달
+            report_data = _get_source_sections_cached(source_root, scm_id=scm_id)  # 콤마 구분 그대로 전달
         except Exception:
             from report_generator import generate_uds_source_sections
-            report_data = generate_uds_source_sections(source_root)  # 콤마 구분 그대로 전달
+            report_data = generate_uds_source_sections(source_root, scm_id=scm_id)  # 콤마 구분 그대로 전달
         function_details = report_data.get("function_details", {})
         _oracle_source = report_data
         # 배열 **선언 크기**의 출처. 이걸 안 꺼내면 흐름 수집이 `(size: N)` 꼬리가
@@ -4668,6 +4671,10 @@ def generate_sits(
     quality_report["source_read_failures"] = summarize_source_read_failures(
         (_oracle_source or {}).get("source_read_failures"),
         [v for v in (function_details or {}).values() if isinstance(v, dict)])
+    # (R97) 소스 단계가 어느 프로젝트의 component_map · override 를 썼나 — SITS 의 함수 집합(verify=X 파일 제외) · 모듈 라벨 ·
+    #   Related 가 거기서 온다. 경량 파서로 떨어졌으면 맵을 쓰지 않았으므로 기록하지 않는다(키 부재 = 공시 없음).
+    if isinstance((_oracle_source or {}).get("project_maps"), dict):
+        quality_report["project_maps"] = _oracle_source["project_maps"]
     # (R66, 감사 #83 · #1) 입력 문서마다 지정했나 · 열었나 · 사유(SDS 는 파티션 수) — 공시 `sits_input_documents`
     quality_report["input_documents"] = dict(
         input_documents_record({"SRS": srs_docx_path, "UDS": uds_path, "HSIS": hsis_path, "STP": stp_path}, input_skips),

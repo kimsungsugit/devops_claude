@@ -310,7 +310,8 @@ class TestNameKeyedMapsKeepTheFirstDefinition:
     def test_module_map_is_first_wins_like_by_name(self, twin_sections):
         """(리뷰 W4) `module_map` 도 이름 키 — 쌍둥이의 뒤 정의가 앞 정의의 모듈을 덮지 않는다."""
         mm = twin_sections["module_map"]
-        # `main` 은 이름 override(docs/uds_function_swcom_override.json)로 라벨이 고정되므로 override 없는 쌍둥이로 본다
+        # `main` 은 이름 override 로 라벨이 고정될 수 있으므로 override 없는 쌍둥이로 본다 — (R97) 이제 override 는 등록한
+        #   프로젝트 루트에만 걸려 이 tmp 트리엔 안 걸리지만, 검사는 그 축과 무관하게 둔다
         assert mm["Twin_Helper"] == mm["s_System_InitSequence"]        # APP 형제와 같은 모듈
         assert mm["Twin_Helper"] != mm["MainInit"]                      # FBL 형제와 다르다
 

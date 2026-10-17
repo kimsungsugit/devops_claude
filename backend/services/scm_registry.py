@@ -288,16 +288,15 @@ def find_registry_by_url(repo_url: str) -> ScmRegistryEntry | None:
 
 
 def _normalize_path_key(text: str) -> str:
-    """경로 비교용 정규화 — 대소문자·구분자·후행 슬래시 차이를 흡수."""
-    s = str(text or "").strip().strip('"').strip("'")
-    if not s:
-        return ""
-    try:
-        return os.path.normcase(os.path.normpath(s))
-    except (TypeError, ValueError):
-        # normpath 는 embedded null 같은 병적 입력에만 던진다. 값을 버리지 않고
-        # 손수 정규화한 결과를 돌려주므로 판정이 사라지지 않는다(침묵 아님).
-        return s.replace("\\", "/").rstrip("/").lower()
+    """경로 비교용 정규화 — 대소문자·구분자·후행 슬래시 차이를 흡수.
+
+    (R97) 본문은 `report_gen.source_roots.normalize_root_key` 로 옮겼다(바이트 단위 같은 동작). 프로젝트 맵
+    (`report_gen.project_maps`)이 "이 루트가 어느 프로젝트의 것인가" 를 이 조회와 **같은 정규화**로 판정해야 해서다.
+    import 는 함수 안에서 든다 — 이 모듈을 직접 무는 단발 스크립트가 `report_gen` 패키지 init 을 깨우지 않게(R47 리뷰 W5).
+    """
+    from report_gen.source_roots import normalize_root_key
+
+    return normalize_root_key(text)
 
 
 def same_path(a: str, b: str) -> bool:

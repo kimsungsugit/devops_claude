@@ -2311,6 +2311,8 @@ def _run_suts_generation(entry: Any, target_functions: List[str] | None = None) 
         hsis_path=hsis_path,
         target_function_names=list(target_functions or []),
         input_skips=_skips,
+        # (R97) 등록 항목을 아는 경로 — 프로젝트 맵(component_map · override)을 id 로 고른다(루트 판정과 같은 답이어야 정상)
+        scm_id=str(entry.id or "") or None,
     )
     return {
         "output_path": str(out_path),
@@ -2370,6 +2372,7 @@ def _run_sits_generation(entry: Any) -> Dict[str, Any]:
         #   뒤집기까지 했다 — `_sits_test_method` 주석).
         max_subcases=_SITS_DEFAULT_SUBCASES,
         input_skips=_skips,
+        scm_id=str(entry.id or "") or None,   # (R97) 위 SUTS 와 같다
     )
     return {
         "output_path": str(out_path),
@@ -2839,6 +2842,8 @@ def run_impact_update(
         if entry and entry.source_root:
             if callable(on_progress):
                 on_progress("impact_analysis", "영향 범위를 계산 중입니다.", {"changed_functions": len(changed_types)})
+            # (R97) 프로젝트 맵은 루트로 고른다 — 이 루트가 곧 레지스트리 항목의 루트라 id 로 고른 것과 같은 맵이다(SUTS · SITS
+            #   재생성은 id 를 넘긴다). `_load_source_sections` 의 한 인자 계약은 테스트 대역 20여 곳이 문다.
             sections = _load_source_sections(entry.source_root)
             by_name_raw = sections.get("function_details_by_name", {}) or {}
             by_name = {str(k).strip().lower(): v for k, v in by_name_raw.items() if isinstance(v, dict)}

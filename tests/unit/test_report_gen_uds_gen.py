@@ -464,8 +464,9 @@ class TestFunctionAnalyzerHelpers:
     def test_finalize_main(self):
         """(R52 N39) `main` 특례 없음 — 값이 없으면 다른 함수와 같이 TBD.
 
-        옛 기대값 "SwST_01…" 은 KJPDS02 정본 main 의 Related 를 코드 리터럴로 박은 것(`docs/uds_function_swcom_override.json`
-        의 main 항목과 같은 값)이라 프로젝트 무관 지어내기였다. 값이 있으면 그대로 둔다(아래).
+        옛 기대값 "SwST_01…" 은 KJPDS02 정본 main 의 Related 를 코드 리터럴로 박은 것(HDPDM01 override 맵 — R97 이전
+        `docs/uds_function_swcom_override.json` — 의 main 항목과도 같은 값)이라 프로젝트 무관 지어내기였다. 값이 있으면 그대로
+        둔다(아래).
         """
         from report_gen.function_analyzer import _finalize_function_fields
 
