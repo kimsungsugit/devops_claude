@@ -360,6 +360,20 @@ class TestOverCapDowngrade:
         set_on_item = set(re.findall(r'item\["(\w+)"\]\s*=', src)) - {"project_scope", "reason"}
         assert set_on_item and set_on_item <= set(R.DERIVATION_FIELDS), sorted(set_on_item - set(R.DERIVATION_FIELDS))
 
+    def test_every_per_field_oracle_counter_is_subtracted_on_downgrade(self):
+        """(R95 통합) 통합 oracle 이 ``if ev.get("필드"): stats["카운터"] = stats.get(...) + 1`` 로 세는 짝은 내릴 때 빼는 목록
+        (`_DERIVATION_COUNTERS`)에 모두 있어야 한다 — 새 근거 필드에 카운터를 달고 여기 빠뜨리면 내린 칸이 공시 수에 남는다."""
+        src = (Path(__file__).resolve().parents[2] / "generators" / "integration_oracle.py").read_text(encoding="utf-8")
+        # (R95 review I8) both forms — ``stats[c] = stats.get(c, 0) + 1`` and ``stats[c] += 1``
+        pairs = set(re.findall(r'if ev\.get\("(\w+)"\):\s*(?:#[^\n]*\n\s*)*stats\["(\w+)"\]\s*(?:=\s*\\?\s*stats\.get\(|\+=)',
+                               src))
+        # the possible-UB counter is subtracted on its own (`downgrade_hidden_input_rows` ``n_ub`` — a key the oracle
+        #   always sets, unlike the per-field counters that exist only once a cell has the field)
+        separate = {("possible_ub_on_forked_path", "derived_with_possible_ub_on_forked_path")}
+        assert separate <= pairs and len(pairs - separate) >= 5, pairs
+        assert pairs - separate <= set(R._DERIVATION_COUNTERS), sorted(pairs - separate - set(R._DERIVATION_COUNTERS))
+        assert {f for f, _s in R._DERIVATION_COUNTERS} <= set(R.DERIVATION_FIELDS)
+
     def test_evidence_sheet_inputs_are_document_columns(self, tmp_path):
         """불변식(문서) — 'Test Evidence' 시트의 Inputs JSON 이름은 그 TC 의 입력 열이다. 명세 시트도 붙인 열과 값을 싣는다."""
         import openpyxl

@@ -17,7 +17,9 @@ VERIFY_PREFIX = "[검증 필요]"
 DERIVATION_FIELDS: tuple[str, ...] = (
     "basis", "assumptions", "stubs", "assumed_undefined", "callees_interpreted", "callees_effects_only",
     "observed_only_pointees", "exact_width_guards", "possible_ub_on_forked_path",
-    "polling_loops_assumed", "storage_objects", "storage_registers")
+    "polling_loops_assumed", "storage_objects", "storage_registers",
+    # (callee contract G5 / G6) the callees run as their write closure whose return was assumed / UB not analysed
+    "callee_termination_assumed", "callee_ub_unanalysed")
 
 
 def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]],
@@ -107,6 +109,13 @@ def apply_sequence_evidence(unit: dict[str, Any], sequences: list[dict[str, Any]
                     item["storage_objects"] = list(evaluated["storage_objects"])
                 if evaluated.get("storage_registers"):
                     item["storage_registers"] = list(evaluated["storage_registers"])
+                # (callee contract G5 / G6) callees run as their write closure: their return assumed / their undefined
+                #   behaviour not analysed — the value holds where they return / have none (one literal key each: the
+                #   derivation-field lists read these assignments)
+                if evaluated.get("callee_termination_assumed"):
+                    item["callee_termination_assumed"] = list(evaluated["callee_termination_assumed"])
+                if evaluated.get("callee_ub_unanalysed"):
+                    item["callee_ub_unanalysed"] = list(evaluated["callee_ub_unanalysed"])
                 if (evaluated.get("interprocedural") or {}).get("inlined"):
                     # (R16) the value rests on these callees' interpreted bodies (integration reading, not stubs)
                     item["callees_interpreted"] = sorted(evaluated["interprocedural"]["inlined"])
@@ -176,7 +185,10 @@ def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, in
               "derived_on_assumed_polling_exit": 0,
               # (R90 re-review W-N3) derived on a run that used the union / bit-field storage model — and that read a
               #   register as harness memory (row-level upper bounds, like the others)
-              "derived_on_storage_model": 0, "derived_on_register_memory": 0}
+              "derived_on_storage_model": 0, "derived_on_register_memory": 0,
+              # (callee contract G5 / G6) derived on a run that ran a callee as its write closure: its return assumed
+              #   (its text does not prove it) / its undefined behaviour not analysed
+              "derived_on_assumed_callee_termination": 0, "derived_with_callee_ub_unanalysed": 0}
     for seq in sequences:
         for var in set(seq.get("expected") or {}) | set(seq.get("expected_evidence") or {}):
             item = seq.get("expected_evidence", {}).get(var) or {}
@@ -203,4 +215,8 @@ def summarize_expected_evidence(sequences: list[dict[str, Any]]) -> dict[str, in
                 counts["derived_on_storage_model"] += 1
             if status == "derived" and item.get("storage_registers"):
                 counts["derived_on_register_memory"] += 1
+            if status == "derived" and item.get("callee_termination_assumed"):
+                counts["derived_on_assumed_callee_termination"] += 1
+            if status == "derived" and item.get("callee_ub_unanalysed"):
+                counts["derived_with_callee_ub_unanalysed"] += 1
     return counts

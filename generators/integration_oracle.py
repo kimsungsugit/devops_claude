@@ -19,21 +19,21 @@ from collections import Counter
 from typing import Any
 
 from generators.c_source_oracle import Unsupported, _parsed_function, scope_matches
+from generators.callee_contract import run_budget
 from generators.test_evidence import VERIFY_PREFIX, apply_sequence_evidence
 
 _logger = logging.getLogger(__name__)
 
 
 _BUDGET_PROBE = 2   # sub-cases run before a flow that exceeds the step budget in all of them is not run further
-_BUDGET_REASONS = frozenset({"execution_budget", "constant_condition_loop_unfinished"})
 
 
 def _refused_for_budget(sub: dict[str, Any]) -> bool:
-    """Every cell of the sub-case is unknown because the whole run exceeded the oracle's step budget."""
+    """Every cell of the sub-case is unknown because the whole run exceeded the oracle's step budget (in a loop with a
+    constant condition too — `callee_contract.run_budget` over `callee_contract.REFUSAL_CLASS`)."""
     evidence = sub.get("expected_evidence") or {}
     # (R90 re-review 3 W-R3-3) by the reason's head: ``execution_budget:polling_way_out_search`` says what spent it
-    return bool(evidence) and all(ev.get("status") != "derived"
-                                  and str(ev.get("reason") or "").split(":", 1)[0] in _BUDGET_REASONS
+    return bool(evidence) and all(ev.get("status") != "derived" and run_budget(str(ev.get("reason") or ""))
                                   for ev in evidence.values())
 
 
@@ -319,6 +319,13 @@ def attach_integration_evidence(itcs: list[dict[str, Any]], report_data: dict[st
                         stats["derived_on_storage_model"] = stats.get("derived_on_storage_model", 0) + 1
                     if ev.get("storage_registers"):
                         stats["derived_on_register_memory"] = stats.get("derived_on_register_memory", 0) + 1
+                    # (callee contract G5 / G6) on a callee run as its write closure: its return assumed (its text does
+                    #   not prove it) / its undefined behaviour not analysed
+                    if ev.get("callee_termination_assumed"):
+                        stats["derived_on_assumed_callee_termination"] = \
+                            stats.get("derived_on_assumed_callee_termination", 0) + 1
+                    if ev.get("callee_ub_unanalysed"):
+                        stats["derived_with_callee_ub_unanalysed"] = stats.get("derived_with_callee_ub_unanalysed", 0) + 1
                     stats["derived_unchanged_input" if ev.get("basis") == "unchanged_input" else "derived_assigned"] += 1
                     if ev.get("possible_ub_on_forked_path"):
                         stats["derived_with_possible_ub_on_forked_path"] += 1

@@ -2029,11 +2029,12 @@ def _body_constants(nodes, raw, constants_map, widths, arrays=None):
 #   depend on the input values — `_path_design`'s ``values_matter``. (review P4) The list is meant to hold every
 #   `c_source_oracle.observe_decisions` refusal whose occurrence depends on the input values; a refusal not listed
 #   counts as value-independent when it is the only state every run gave (``oracle_exception:*``, a new reason) — add
-#   a new value-dependent refusal here. ``constant_condition_loop_unfinished`` / ``non_terminating_loop`` come from
-#   `evaluate_outputs` only (a world), not from this path
+#   a new value-dependent refusal here. ``constant_condition_loop_unfinished`` comes from `evaluate_outputs` only (a
+#   world), not from this path. (R95 review I3) ``non_terminating_loop`` does now: an effects-only callee whose text never
+#   returns refuses the run that calls it (callee contract G5) — which runs call it is the values' (a path)
 _STATIC_STATES = frozenset({"effectful_condition", "decision_node_not_found"})
 _VALUE_DEPENDENT_REFUSALS = frozenset({"undefined_behavior", "path_budget", "execution_budget", "loop_iteration_budget",
-                                       "search_step_budget"})
+                                       "search_step_budget", "non_terminating_loop"})
 
 
 def _path_samples(domain, constants, capped=None):

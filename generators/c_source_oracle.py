@@ -32,15 +32,18 @@ from collections import OrderedDict
 from typing import Any
 
 from generators import c_project_context as cpc
+from generators import callee_contract as cc  # (cycle) it imports this module — its names are read in functions only
 from generators import pointer_flow
 
-SCHEMA_VERSION = 5   # 2 (R14): a record may rest on sequence stubs (``stubs``) — ``F() return`` inputs are taken
+SCHEMA_VERSION = 6   # 2 (R14): a record may rest on sequence stubs (``stubs``) — ``F() return`` inputs are taken
 #                      3 (R38): a sequence stub writes no global or static (VectorCAST replaces the body — `stubbed_call`)
 #                      4 (backlog 2-c): an output no final path read nor wrote gives `UNWRITTEN_OUTPUT_PREFIX`, not
 #                        `INITIAL_VALUE_PREFIX` (the function did not read it — the observation needs its initial value)
 #                      5 (R90): UB proven on a path a branch on an unknown value chose no longer refuses the record — it is
 #                        possible UB (``forked_path_undefined_behavior``, `_Interp.undefined`); ``sizeof`` of a character
 #                        type / array is evaluated
+#                      6 (R95, callee contract G5 · G6): an effects-only callee that never returns refuses the record
+#                        (``non_terminating_loop:<callee>``); ``callee_termination_assumed`` · ``callee_ub_unanalysed``
 # (backlog 2-c) the two reasons an unset initial value gives — one vocabulary for the oracle and its readers
 INITIAL_VALUE_PREFIX = "initial_value_not_in_inputs:"
 UNWRITTEN_OUTPUT_PREFIX = "unwritten_output_initial_not_in_inputs:"
@@ -82,7 +85,7 @@ _LOOP_BUDGET = 4096
 # (R90 re-review C-N1 a) register values a polling loop's way out is searched over, per staying path (the product over the
 #   polled members — `_Interp.polling_way_out`); over it the loop is not assumed to end
 _POLL_SEARCH_BUDGET = 4096
-_BUDGET_REASONS = frozenset({"loop_iteration_budget", "execution_budget", "path_budget"})
+# (refusal reasons by class — budgets among them — are `callee_contract.REFUSAL_CLASS`'s: one table)
 # (R90 re-review 3 W-R3-2) searches of a polling loop's way out as members read only under other flag values join
 _POLL_MEMBER_ROUNDS = 4
 _PROBE_FAILED = object()
@@ -90,7 +93,8 @@ _PROBE_FAILED = object()
 _HYPOTHETICAL_TABLES = ("stubs_used", "linked_reads", "stub_keys", "assumed_undefined", "storage_used",
                         "storage_volatile_reads", "volatile_polls", "volatile_poll_members", "polling_assumed",
                         "storage_narrow", "storage_unspecified", "static_keys", "pointees", "observed_only_pointees",
-                        "harness_buffers", "buffer_reach", "buffer_reach_unknown", "pointer_member_keys")
+                        "harness_buffers", "buffer_reach", "buffer_reach_unknown", "pointer_member_keys",
+                        "callee_termination_assumed", "callee_ub_unanalysed")
 _HYPOTHETICAL_WORLD_TABLES = ("inlined", "not_inlined", "effects_only", "static_keys", "array_names", "global_names",
                               "admitted")
 # world tables that only gain keys (``setdefault`` / a value an existing key already holds): put back by dropping the keys
@@ -663,6 +667,10 @@ class _Interp:
         #   `cpc._storage_layout` ``narrow``), and the objects it then read across bytes such a store left unspecified
         self.storage_narrow: dict[str, set] = {}
         self.storage_unspecified: set[str] = set()
+        # (callee contract G5 / G6) callees run as their write closure whose return the run assumed (their text does not
+        #   prove it) and whose undefined behaviour it did not judge — named on the record (`callee_contract`)
+        self.callee_termination_assumed: set[str] = set()
+        self.callee_ub_unanalysed: set[str] = set()
         self.macro_status = scope.get("macro_status") or {}
         self.macro_bodies = scope.get("macro_bodies") or {}
         self.macro_params = scope.get("function_like_macro_params") or {}
@@ -1278,8 +1286,9 @@ class _Interp:
                 # (R16 review C-R3-3) a loop whose controlling expression is constant is not one the implementation may
                 # assume to terminate (C11 6.8.5p6): out of budget with no path out yet, it may never end — never
                 # assumed to return. (W-R4-3) once some path left it (a polled register), the caller's fallback stands.
-                # (R90 re-review 3 W-R3-3) a budget reason may name what spent it (``execution_budget:polling_…``)
-                if self.world is not None and str(exc).split(":", 1)[0] in _BUDGET_REASONS \
+                # (R90 re-review 3 W-R3-3) a budget reason may name what spent it (``execution_budget:polling_…``) —
+                #   the run's steps, iterations or paths (`callee_contract.REFUSAL_CLASS`), not the polling search's cap
+                if self.world is not None and cc.iteration_budget(str(exc)) \
                         and len(done) == exits_before and _constant_condition(cond, self.raw, self):
                     raise Unsupported("constant_condition_loop_unfinished") from exc
                 raise
@@ -1528,7 +1537,7 @@ class _Interp:
                     if str(exc) == "execution_budget":
                         # (re-review 3 W-R3-3) the run's budget went on hypothetical polls: say so
                         raise Unsupported("execution_budget:polling_way_out_search") from exc
-                    if str(exc).split(":", 1)[0] in _BUDGET_REASONS:
+                    if cc.iteration_budget(str(exc)):
                         raise
                     undetermined = undetermined or str(exc)
                     if str(exc).startswith("undefined_behavior:"):
@@ -1929,11 +1938,13 @@ class _Interp:
                 if self.is_cast_call(c, raw):
                     continue  # ``(T)(x)`` is a cast
                 callee = "<indirect>"  # ``(*fp)()`` / ``(fp)()``: unknown code (round 3 C5)
+            summary = None   # (J1) what the call may change — `CalleeSummary.may_change`, asked once per call
             for x in idents:
                 if inside(x, c) or _key(x) == plain_target or _sequenced_apart(x, c, raw):
                     continue
-                if self.call_may_write(callee, self.resolve_alias(_text(x, raw)), state, escaping,
-                                       pointee=_key(x) != store_through):
+                summary = summary or cc.summary_or_unknown(self, callee)
+                if summary.may_change(self, self.resolve_alias(_text(x, raw)), state, escaping=escaping,
+                                      pointee=_key(x) != store_through):
                     raise Unsupported("call_unsequenced_with_access:" + callee)
         for x in idents:
             name = _text(x, raw)
@@ -1986,7 +1997,8 @@ class _Interp:
                         if inner:
                             sites.append((x, True, True, "macro"))
                 elif name and name in self.closure:
-                    sites.append((x, True, self.world.effectful(name, self.closure), "call"))
+                    # (J3) its closure — not the row's stub (G8, step 4)
+                    sites.append((x, True, cc.closure_summary(self, name).effectful(self), "call"))
                 else:
                     sites.append((x, False, True, "unknown"))   # no definition we model, or an indirect call
         for x in nodes:
@@ -2004,7 +2016,8 @@ class _Interp:
                         continue
                     if kind == "call" and base and plain:
                         f = node.child_by_field_name("function")
-                        if not self.call_may_write(_text(f, raw), self.resolve_alias(base), state):
+                        if not cc.summary_or_unknown(self, _text(f, raw)).may_change(self, self.resolve_alias(base),
+                                                                                   state):
                             continue
                     self.no_inline.add((id(raw), node.start_byte, node.end_byte))
         if len(sites) < 2:
@@ -2176,52 +2189,7 @@ class _Interp:
         return any(t != name and t in self.macro_status and self.macro_effectful(t, depth + 1)
                    for t in re.findall(r"\b[A-Za-z_]\w*\b", body))
 
-    def call_may_write(self, callee, obj, state, escaping=frozenset(), pointee=True):
-        """Could a call to ``callee`` change the object an identifier ``obj`` names here? ``pointee``: for a pointer
-        parameter whose pointee the sequence set up, the question is about that pointee (``p->a``) unless the
-        identifier only designates where a store lands (`check_sequencing`) — then about the pointer ``p`` itself."""
-        closure = self.closure.get(callee)
-        pointee_info = self.lookup(obj)
-        if pointee and pointee_info is not None and pointee_info.get("pointee"):
-            # (R40) ``p->a`` beside ``f(…)``: f may write the pointee through any pointer (p passed on, stored)
-            view = self.stub_view(callee)
-            if view is not None:
-                return view["pointer"]
-            if closure is None or closure.get("pointer_write") or closure.get("unknown_callees"):
-                return True
-            # (review R40 C1) a write to a name that is no modeled object is a write through it — ``g_q[0].cnt = 5U``
-            #   through a global pointer that may hold p (the same judgment as the call's own havoc)
-            return bool(self.opaque_writes(closure))
-        view = self.stub_view(callee)
-        if view is None and self.volatile_register_operand(obj):
-            # (R90 re-review 4 C-R4-4) the hardware may change a register while the callee runs — it may wait on one
-            #   (a poll), or reach one the closure cannot name: beside any call but a sequence stub's, a register read is
-            #   indeterminately sequenced with the call (C11 6.5.2.2p10)
-            return True
-        if view is not None:
-            # (R38) a sequence stub (`stubbed_call`) writes no global or static and runs nothing — at most what a
-            # pointer argument reaches
-            closure = {"writes": [], "unknown_callees": [], "reaches": [], "pointer_write": view["pointer"]}
-        info = self.lookup(obj)
-        escaped = False
-        if info is not None and not info.get("extern"):
-            key = info.get("key", "")
-            escaped = key in state.escaped or obj in escaping
-            if key in self.static_keys and (closure is None or closure.get("unknown_callees")
-                                            or self.function_name in (closure.get("reaches") or ())):
-                return True  # the callee may re-enter this function (round 2 A)
-            if not escaped:
-                return False  # a parameter or local no pointer can reach
-        elif obj not in self.globals and obj not in self.arrays and obj not in (self.scope.get("unresolved_globals") or {}):
-            return False  # a constant, an enumerator, a type name
-        if closure is None or closure.get("unknown_callees"):
-            return True
-        if obj in (closure.get("writes") or ()):
-            return True
-        pointer = closure.get("pointer_write") or self.opaque_writes(closure)
-        reachable = escaped or obj in self.arrays or obj in self.address_taken or obj in escaping or (
-            obj not in self.globals and obj not in self.arrays)
-        return bool(pointer and reachable)
+    # (J1) whether a call may change an object an operand names: `callee_contract.CalleeSummary.may_change`
 
     def volatile_register_operand(self, name):
         """(R90 re-review 4 C-R4-4) Does the operand ``name`` read a volatile union / bit-field object — the object
@@ -2234,12 +2202,6 @@ class _Interp:
                 return False
             name = m.group(1)
         return self.storage_volatile(name)
-
-    def opaque_writes(self, closure):
-        """A written name that is not a modeled scalar or array object (a pointer, a struct with pointer members) may
-        be written *through* — to an object the closure cannot name. Sorted: the first names the havoc."""
-        return sorted(w for w in closure.get("writes") or ()
-                      if w not in self.globals and w not in self.arrays and not self.plain_struct(w))
 
     def resolve_alias(self, name, depth=0):
         """``GX`` with ``#define GX g_x`` (or ``(g_x)``) names ``g_x`` — the object a sequencing check must compare."""
@@ -2645,20 +2607,14 @@ class _Interp:
 
     def havoc_volatile_storage(self, state, reason):
         """(R90 review C2) A write through a pointer that may alias a register: every volatile union / bit-field object
-        holds an unknown value from here (its stored bytes, and through `storage_base` the ones it did not write).
-        (re-review 5 I-R5-4) Every callee the run did not interpret is named on the mark
-        (``register_read_by_callee_not_interpreted:A+B``) — the first alone named one where several left the registers
-        unknown; another cause keeps the first one's name."""
+        holds an unknown value from here (its stored bytes, and through `storage_base` the ones it did not write). The
+        mark keeps the first cause's reason; (re-review 5 I-R5-4) a callee the run did not interpret adds its name to a
+        callee's mark (``register_read_by_callee_not_interpreted:A+B``) — the call's registers consumer
+        (`callee_contract.name_callee_on_register_mark`)."""
         for key in list(state.store):
             if ".@" in key and self.storage_volatile(_root_object(key)):
                 state.store[key] = _havocked(state.store[key], reason)
-        first = state.havoc_bases.get(_VOLATILE_STORAGE)
-        if first is None:
-            state.havoc_bases[_VOLATILE_STORAGE] = reason
-        elif first != reason and first.startswith(_CALLEE_REGISTERS) and reason.startswith(_CALLEE_REGISTERS):
-            names = first[len(_CALLEE_REGISTERS):].split("+")
-            if reason[len(_CALLEE_REGISTERS):] not in names:
-                state.havoc_bases[_VOLATILE_STORAGE] = first + "+" + reason[len(_CALLEE_REGISTERS):]
+        state.havoc_bases.setdefault(_VOLATILE_STORAGE, reason)
 
     def storage_input_bits(self, root, layout):
         """(R90) The object's bits as the row's inputs set them, per layout order: 0 / 1, a reason (a value the member
@@ -3377,12 +3333,13 @@ class _Interp:
         a stub writes no global or static (R38 — `stubbed_call`, the same model as a stubbed call outside a condition),
         so evaluating the condition on the state the decision starts from is what the sequential run sees. Not when the
         stub may put something through a pointer argument (the sequence sets one of its out-parameters, or F's closure
-        writes through a pointer or calls unknown code), nor when the called name is not the project function."""
+        writes through a pointer or calls unknown code), nor when the called name is not the project function.
+        (J2 · J6) `callee_contract.CalleeSummary.inert`."""
         f = node.child_by_field_name("function")
         if f is None or f.type != "identifier":
             return False
-        view = self.stub_view(_text(f, raw))
-        return view is not None and not view["pointer"]
+        summary = cc.summary_for(self, _text(f, raw))
+        return summary is not None and summary.inert(self)
 
     def stub_view(self, name):
         """(R38) The one judgment every site asks of a call to ``name``: None when the sequence does not stub it, else
@@ -3397,11 +3354,11 @@ class _Interp:
         if not keys or name == self.function_name or name in self.macro_status or name in self.fn_names \
                 or name in (self.params or {}) or self.lookup(name) is not None:
             return None
-        info = self.closure.get(name)
-        if info is None:
+        closure = cc.closure_summary(self, name)
+        if closure is None:
             return None
         out_params = any(k != prefix + "return" for k in keys)
-        hedge = bool(info.get("pointer_write") or info.get("unknown_callees"))
+        hedge = closure.stub_hedge()
         # (R64, backlog 4-a) the body does not run: a stub can put something only through a parameter that can hold a
         #   pointer (or a variadic argument) — without one it writes through nothing, whatever F's closure does; with
         #   one, the hedge stands and what it may reach is the arguments' (`stub_targets`)
@@ -3912,11 +3869,11 @@ class _Interp:
                 finally:
                     self.no_inline_depth -= 1
             return self.macro_call(state, name, arg_nodes, raw, depth)
-        info = self.closure.get(name)
+        summary = cc.closure_summary(self, name)
         # Declared nowhere we can read, after a missing include: it may be a macro from that header, which can write a
         # parameter or local in place (``RESET(x)``, R2c review round 1 C2) — or drop its arguments (``ASSERT(c)`` as
         # ``((void)0)``): a decision in them is maybe evaluated, never observed (round 2 N-C1).
-        maybe_macro = info is None and self.lookup(name) is None and name not in (self.params or {}) \
+        maybe_macro = summary is None and self.lookup(name) is None and name not in (self.params or {}) \
             and name not in (self.scope.get("prototypes") or ()) and bool(self.scope.get("missing_includes"))
         if maybe_macro or (name.startswith("__builtin_") and name not in _EVALUATING_BUILTINS):
             # (review round 3 W2) ``__builtin_constant_p(x)`` does not evaluate ``x``: a decision there is maybe run
@@ -3924,83 +3881,38 @@ class _Interp:
             values = None
         else:
             values = [self.argument(state, a, raw, depth) for a in arg_nodes]
-        if info is None or name in (self.params or {}) or self.lookup(name) is not None:
-            self.havoc_everything(state, "unknown_callee:" + name, locals_too=maybe_macro)
-            return _Val(Unknown("call_return_value:" + name), None)
+        # What the call does is a `callee_contract.CallOutcome` — one of four producers says it, `apply_call_outcome`
+        #   applies it (one consumer per aspect)
+        if summary is None or name in (self.params or {}) or self.lookup(name) is not None:
+            return cc.apply_call_outcome(self, state, cc.unknown_outcome(self, name, locals_too=maybe_macro))
         view = self.stub_view(name)
         if view is not None:
-            return self.stubbed_call(state, name, info, view, arg_nodes, raw)
-        if self.world is not None and values is not None and f"{name}() return" not in self.inputs \
-                and not self.no_inline_depth and (id(raw), n.start_byte, n.end_byte) not in self.no_inline:
-            # (R16) a callee with one definition in the project runs for real on this state; when it cannot (no
-            # definition, recursion, an unsupported statement, its share of the budget) the effects below stand.
-            returned = self.world.inline(self, state, name, values)
-            if returned is not None:
-                return returned
+            return self.stubbed_call(state, name, summary, view, arg_nodes, raw)
+        failure, why = None, ""
         if self.world is not None:
-            self.world.effects_only[name] = self.world.effects_only.get(name, 0) + 1
-            # (R16 review C2) a callee run as effects only may run any function it reaches — among them one this
-            # evaluation interpreted (its static locals are in the store) or one on the call stack
-            touched = set(info.get("reaches") or ()) | {name}
-            if info.get("unknown_callees") or touched & self.world.interpreted_names():
-                self.havoc_statics(state, f"callee_not_interpreted:{name}")
-        elif self.function_name and self.function_name in (info.get("reaches") or ()):
-            self.havoc_statics(state, f"recursion_through:{name}")  # the callee may re-enter this function
-        # (backlog 2-c review round 2) run as its effects only: it may read what its closure names, and through a pointer
-        state.initial_reads.add(_CALLEE_READS + name)
-        state.initial_reads.add(_ANY_POINTER_READ)
-        # (R90 re-review 3 C-R3-1) first: a write below names its own reason where it reaches the same register
-        self.havoc_registers_read_by(state, name, info)
-        writes = sorted(info.get("writes") or ())
-        opaque = self.opaque_writes(info)
-        if info.get("unknown_callees"):
-            first = sorted(info["unknown_callees"])[0]
-            self.havoc_everything(state, f"callee_effects_unknown:{name}:{first}")
-        else:
-            for w in writes:
-                self.havoc_base(state, w, f"written_by_callee:{name}:{w}")
-            if info.get("pointer_write") or opaque:
-                why = "pointer_write" if info.get("pointer_write") else "writes_through:" + opaque[0]
-                self.havoc_objects(state, self.callee_targets(name, info, arg_nodes, raw, state),
-                                   f"callee_pointer_write:{name}:{why}", direct=frozenset(writes),
-                                   through_pointer=bool(info.get("pointer_write")))
-            else:
-                # (review R64 I-4) a callee it calls that this run stubs may write through what it is passed, whatever
-                #   that callee's body does — named by the flow, or (round 2 W-2) when the flow did not run or could not
-                #   name the targets, any function it reaches this run stubs with pointer parameters
-                summary = info.get("pointer_targets") or {}
-                if summary.get("abs") is None:
-                    stubbed = sorted(g for g in info.get("reaches") or ()
-                                     if (v := self.stub_view(g)) is not None and v["pointer"])
-                    if stubbed:
-                        self.havoc_pointer_targets(state, f"callee_stub_write:{name}:{stubbed[0]}")
-                else:
-                    stub_writes = {t for t in summary["abs"] if t.startswith("?SW:")}
-                    if stub_writes:
-                        self.havoc_objects(state, stub_writes, f"callee_stub_write:{name}")
-        return self.stub_return(name, info)
-
-    def havoc_registers_read_by(self, state, name, info):
-        """(R90 re-review 3 C-R3-1, re-review 4 C-R4-1) A callee this run does not interpret (its write closure stands for
-        it — a unit run, or an inline that failed: a refused polling loop, a budget, recursion) may wait on a register
-        flag: under the model (a register is memory) such a callee never returns, under the polling assumption the flag
-        changed — neither leaves the register as the row set it. Every volatile union / bit-field object is unknown after
-        the call: the closure's ``reads`` do not see a register the callee reaches through a pointer (``WaitP(&FLW)``,
-        ``*g_pFlw``) or through a ``#define`` in its body. (Unknown code, an unmodeled macro: `havoc_everything` covers
-        every object.) A sequence stub (R38) is not this: the harness replaces the body, nothing polls, and a register
-        keeps what the row set."""
-        self.havoc_volatile_storage(state, _CALLEE_REGISTERS + name)
+            site = (id(raw), n.start_byte, n.end_byte)
+            why = ("arguments_not_evaluated" if values is None else "stub_return_input"
+                   if f"{name}() return" in self.inputs else "unordered_call_site"
+                   if self.no_inline_depth or site in self.no_inline else "")
+            if not why:
+                # (R16) a callee with one definition in the project runs for real on this state; when it cannot (no
+                # definition, recursion, an unsupported statement, its share of the budget) its write closure stands
+                done = self.world.inline(self, state, name, values)
+                cc.absorb_run(self, done.log)
+                if not isinstance(done, cc.Failure):
+                    return cc.apply_call_outcome(self, state, cc.interpreted_outcome(self, state, summary, done))
+                failure = done
+        return cc.apply_call_outcome(self, state, cc.effects_outcome(self, state, name, summary, arg_nodes, raw,
+                                                                     failure, why))
 
     def stubbed_call(self, state, name, info, view, arg_nodes=(), raw=b""):
         """(R38) The sequence stubs F (`stub_view`): R14 — the harness replaces F's body, as VectorCAST does and the
         clang check's stubs do. The body does not run, so nothing F would write to a global or a static happens and
         nothing it calls runs (no re-entry). A stub may still put a test-case value through a pointer argument (the
         reference sets ``F() p[0]`` — R23): (R64) then what those arguments may point to — and what that reaches — is
-        unknown (`stub_targets`); everything a pointer may reach when the arguments cannot be followed."""
-        self.stubs_used.add(name)   # the record rests on the stub even when its value is not usable
-        if view["pointer"]:
-            self.havoc_objects(state, self.stub_targets(name, arg_nodes, raw, state), f"stub_pointer_argument:{name}")
-        return self.stub_return(name, info)
+        unknown (`stub_targets`); everything a pointer may reach when the arguments cannot be followed. ``info``: F's
+        `callee_contract.CalleeSummary` (its declared return type) — `callee_contract.stub_outcome` says the rest."""
+        return cc.apply_call_outcome(self, state, cc.stub_outcome(self, state, name, info, view, arg_nodes, raw))
 
     # ── (R64) where a write through a pointer lands ─────────────────────────────────────────────────
     def pointer_flow(self):
@@ -4051,16 +3963,15 @@ class _Interp:
             return None
         return array[0]
 
-    def callee_targets(self, name, info, arg_nodes, raw, state=None):
+    def callee_targets(self, name, summary, arg_nodes, raw, state=None):
         """(R64) The objects a callee run as its write closure may write through a pointer: its summary's ``abs`` and
         what this call's arguments for the parameters it writes through directly point to — None when the analysis
         cannot say (refused, unknown code reached, an argument it cannot follow). (R82) An argument into a harness
-        buffer names that buffer (``@B:`` + its base key)."""
-        summary = info.get("pointer_targets")
-        if not summary or summary.get("abs") is None:
+        buffer names that buffer (``@B:`` + its base key). ``summary``: the callee's `callee_contract.CalleeSummary`."""
+        if summary.pointer_abs is None:
             return None
-        out = set(summary["abs"])
-        for i in summary.get("params") or ():
+        out = set(summary.pointer_abs)
+        for i in summary.pointer_params:
             if i >= len(arg_nodes):
                 return None
             buffer = self.harness_buffer_key(state, arg_nodes[i], raw)
@@ -4179,28 +4090,28 @@ class _Interp:
         if self.world is not None:
             self.world.pointer_havocs += 1
 
-    def stub_return(self, name, info):
+    def stub_return(self, name, return_type):
         """(R14) A sequence that sets ``F() return`` declares F a stub for this run (the unit-test convention the
-        reference follows): the call returns that value in F's declared return type (a value outside it is refused as
-        ``input_outside_declared_type``, never wrapped). What the stub does to state is `stubbed_call`'s (R38). Without
-        the input, or when F's return type is not a resolvable integer type, the value is unknown as before."""
+        reference follows): the call returns that value in F's declared return type ``return_type`` (a value outside it
+        is refused as ``input_outside_declared_type``, never wrapped). What the stub does to state is `stubbed_call`'s
+        (R38). Without the input, or when F's return type is not a resolvable integer type, the value is unknown as
+        before. ``(value, whether the row's value is it)`` — the record then rests on the stub (`Provenance`)."""
         key = f"{name}() return"
         if key not in self.inputs:
-            return _Val(Unknown("call_return_value:" + name), None)
+            return _Val(Unknown("call_return_value:" + name), None), False
         if name == self.function_name:
             # (review R14 W1) the function under test runs for real in its own test — a recursive call is not a stub
-            return _Val(Unknown("stub_of_function_under_test:" + name), None)
-        text = str((info or {}).get("return_type") or "")
+            return _Val(Unknown("stub_of_function_under_test:" + name), None), False
+        text = str(return_type or "")
         if not text or "*" in text:
-            return _Val(Unknown("stub_return_type_unresolved:" + name), None)
+            return _Val(Unknown("stub_return_type_unresolved:" + name), None), False
         t = self.type_of(text)
         if not isinstance(t, dict) or cpc.is_float(t):
-            return _Val(Unknown("stub_return_type_unresolved:" + name), None)
+            return _Val(Unknown("stub_return_type_unresolved:" + name), None), False
         value = self.check_input(key, t, self.inputs[key])
         if isinstance(value, Unknown):
-            return _Val(value, None)
-        self.stubs_used.add(name)
-        return _Val(value, t)
+            return _Val(value, None), False
+        return _Val(value, t), True
 
     def argument(self, state, a, raw, depth):
         """Evaluate an argument. Passing an address (``&x``, a decayed array, a cast of either) only marks the object
@@ -4289,12 +4200,9 @@ class _Interp:
 
 _INLINE_DEPTH = 12          # (R16) callee activations below the function under test
 _MISSING = object()
-# (R16 review W-R2-4, C-R2-3) a callee's refusal that is about the program, not the model: undefined behaviour (6.5p2
-# unsequenced side effects), a path that never returns — the integrated run has no return state to observe
-_REFUSING_IN_CALLEE = frozenset({"unsequenced_side_effects", "non_terminating_loop",
-                                 "constant_condition_loop_unfinished",
-                                 # (review W-R4-1) the hidden call is in no write closure: effects-only would drop it
-                                 "cast_parse_of_parenthesized_expression"})
+# (R16 review W-R2-4, C-R2-3) a callee's refusal that is about the program, not the model — undefined behaviour (6.5p2
+#   unsequenced side effects), a path that never returns: the integrated run has no return state to observe
+#   (`callee_contract.refuses_in_callee` over `callee_contract.REFUSAL_CLASS`)
 _TYPE_WORDS = frozenset({"void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool",
                          "struct", "union", "enum", "const", "volatile", "__typeof__", "__typeof", "typeof"})
 
@@ -4477,31 +4385,26 @@ class _World:
     def interpreted_names(self):
         return set(self.inlined) | {it.function_name for it in self.stack}
 
-    def effectful(self, name, closure):
-        """Could calling ``name`` change anything another call reads — a write, a pointer write, unknown code, or a
-        static local in it or anything it reaches? (Unknown → yes.)"""
-        info = closure.get(name)
-        if info is None or info.get("writes") or info.get("pointer_write") or info.get("unknown_callees"):
-            return True
-        has_statics = getattr(self.provider, "has_static_locals", None)
-        if has_statics is None:
-            return True
-        return any(has_statics(f) for f in {name} | set(info.get("reaches") or ()))
+    # (J3) whether a call at an unordered site may change what another reads: `callee_contract.CalleeSummary.effectful`
 
-    def fail(self, name, reason):
+    def fail(self, name, reason, log=None, reentered=False):
+        """Record why ``name`` is not interpreted (once per name: later calls fail alike) — its write closure stands."""
         self.failed.setdefault(name, reason)
         key = reason.split(":", 1)[0]
         self.not_inlined[key] = self.not_inlined.get(key, 0) + 1
-        return None
+        return cc.Failure(name=name, reason=reason, log=log, reentered=reentered)
 
     def inline(self, caller, state, name, args):
+        """Run ``name`` on a copy of ``state`` with its parameters bound to ``args``: a `callee_contract.Result` (its
+        final paths joined, its parameters and automatic locals ended), a `callee_contract.Refused` (it proved the
+        program has no defined result or never returns there) or a `callee_contract.Failure` (its write closure stands).
+        The caller — activation and state — is not changed here: `callee_contract.absorb_run` takes what the run spent and
+        read, `callee_contract.apply_call_outcome` the rest. The world keeps its own records (failures, the stack)."""
         if name in self.failed:
             return self.fail(name, self.failed[name])
         if any(it.function_name == name for it in self.stack):
-            # the callee re-enters a running activation: its static locals may change (the fallback havocs the rest)
-            for it in self.stack:
-                it.havoc_statics(state, "recursion_through:" + name)
-            return self.fail(name, "recursion")
+            # the callee re-enters a running activation: its static locals may change (`Writes.reentry`)
+            return self.fail(name, "recursion", reentered=True)
         if len(self.stack) > _INLINE_DEPTH:
             return self.fail(name, "inline_depth")
         try:
@@ -4527,45 +4430,32 @@ class _World:
             if any(s.mode in {"break", "continue"} for s in finals):
                 raise Unsupported("jump_outside_loop")
         except Unsupported as exc:
-            caller.steps = sub.steps
-            if str(exc).startswith("undefined_behavior:") or str(exc) in _REFUSING_IN_CALLEE:
-                raise  # proven on the run's only path (`_Interp.undefined`): the evaluation has no defined result
-            return self.fail(name, str(exc))
+            # (R90 re-review 3 C-R3-2) the registers the callee read are the caller's reads too — a loop body (or
+            #   condition) that reads its flag through a callee reads it (`loop_iterations`); aligned lists
+            log = cc.RunLog(steps=sub.steps, polls=tuple(sub.volatile_polls),
+                            poll_members=tuple(sub.volatile_poll_members))
+            if cc.refuses_in_callee(str(exc)):
+                # proven on the run's only path (`_Interp.undefined`): the evaluation has no defined result
+                return cc.Refused(name=name, reason=str(exc), log=log)
+            return self.fail(name, str(exc), log=log)
         finally:
             self.stack.pop()
             self.kept.extend(sub.kept_raws)   # their ids are in local keys (review I2)
-            # (R90 re-review 3 C-R3-2) the registers the callee read are the caller's reads too — a loop body (or
-            #   condition) that reads its flag through a callee reads it (`loop_iterations`); aligned lists
-            caller.volatile_polls.extend(sub.volatile_polls)
-            caller.volatile_poll_members.extend(sub.volatile_poll_members)
-        caller.steps = sub.steps
-        caller.stubs_used |= sub.stubs_used
-        caller.linked_reads |= sub.linked_reads
-        caller.storage_used |= sub.storage_used   # (R90)
-        caller.storage_volatile_reads |= sub.storage_volatile_reads
-        caller.polling_assumed.extend(sub.polling_assumed)   # (R90 review W1)
-        for root, spans in sub.storage_narrow.items():   # (R90 re-review I-1)
-            caller.storage_narrow.setdefault(root, set()).update(spans)
-        caller.storage_unspecified |= sub.storage_unspecified
+        log = cc.RunLog(steps=sub.steps, polls=tuple(sub.volatile_polls), poll_members=tuple(sub.volatile_poll_members))
         # (R17 review W2) the callee's unit text rests on its own #if verdicts too
-        caller.assumed_undefined |= sub.assumed_undefined | set(scope.get("assumed_undefined") or ())
-        caller.assumed_undefined |= set((getattr(self.provider, "binding_assumptions", None) or {}).get(
-            (name, str(caller.scope.get("path") or "")), ()))
-        self.static_keys |= sub.static_keys
+        assumed = sub.assumed_undefined | set(scope.get("assumed_undefined") or ()) | set(
+            (getattr(self.provider, "binding_assumptions", None) or {}).get((name, str(caller.scope.get("path") or "")),
+                                                                            ()))
+        statics = self.static_keys | sub.static_keys   # the world's once the outcome is applied (`Provenance`)
         merged, returned = self.join(sub, finals, name)
         for key in list(merged.store):  # the callee's parameters and automatic locals end with its activation
             base = key.split("[", 1)[0]
-            if key not in before and key.startswith("@") and base not in self.static_keys and base not in merged.escaped:
+            if key not in before and key.startswith("@") and base not in statics and base not in merged.escaped:
                 del merged.store[key]   # (review I1) statics of callees it called stay too
-        ret, selectors = state.ret, list(state.selectors)
-        for slot in _State.__slots__:
-            setattr(state, slot, getattr(merged, slot))
-        # (R90 review C1) the joined state is every callee path: the call chose no path of the caller's
-        state.mode, state.ret, state.selectors = "normal", ret, selectors
-        # (review C3, W-R2-2) no re-application here: the callee's own havoc already judges by every admitted unit's
-        # objects and every activation's static locals (`havoc_pointer_targets`, `all_statics`).
-        self.inlined[name] = self.inlined.get(name, 0) + 1
-        return returned
+        # (review C3, W-R2-2) no re-application on the caller: the callee's own havoc already judges by every admitted
+        # unit's objects and every activation's static locals (`havoc_pointer_targets`, `all_statics`).
+        return cc.Result(name=name, log=log, sub=sub, merged=merged, returned=returned,
+                         assumed_undefined=frozenset(assumed))
 
     @staticmethod
     def join(sub, finals, name):
@@ -4865,8 +4755,9 @@ def _read_on_some_path(interp, key, reads, escaped):
     root = _key_root(key)
     for r in reads:
         if r.startswith(_CALLEE_READS):
-            info = interp.closure.get(r[len(_CALLEE_READS):]) or {}
-            if not info.get("reads_complete") or root in (info.get("reads") or ()):
+            # (J9) what its closure names — None: anything (`callee_contract.CalleeSummary.reads`)
+            summary = cc.closure_summary(interp, r[len(_CALLEE_READS):])
+            if summary is None or summary.may_read(root):
                 return True
     return False
 
@@ -5192,6 +5083,15 @@ def evaluate_outputs(unit: dict[str, Any], sequences_inputs: list[dict[str, Any]
                     "const values taken from the one definition in another unit (the source hash covers this function's "
                     "file only): " + ", ".join(sorted(interp.linked_reads)[:12])
                     + (f" (+{len(interp.linked_reads) - 12})" if len(interp.linked_reads) > 12 else "")]
+            for attr, field, text in ((interp.callee_termination_assumed, "callee_termination_assumed",
+                                       CALLEE_TERMINATION_ASSUMPTION),
+                                      (interp.callee_ub_unanalysed, "callee_ub_unanalysed", CALLEE_UB_ASSUMPTION)):
+                if attr:
+                    # (callee contract G5 / G6) the callees run as their write closure this value rests on — named
+                    names = sorted(attr)
+                    record["assumptions"] = list(record["assumptions"]) + [
+                        text + ": " + ", ".join(names[:12]) + (f" (+{len(names) - 12})" if len(names) > 12 else "")]
+                    record[field] = names
             own = set((unit.get("project_scope") or {}).get("assumed_undefined") or ())
             if interp.assumed_undefined - own:
                 # (R17) #if verdicts this run rested on beyond the unit's file-level ones: function bodies, callee units
@@ -5260,6 +5160,18 @@ STORAGE_ASSUMPTION = (
     "that may reach a register (one whose address is taken, offset to its neighbours) leaves every register unknown, "
     "as does a callee the run does not interpret (it may wait on one; a sequence stub does not), and a register read "
     "beside any call but a sequence stub's in one expression is refused as unsequenced")
+# (callee contract G5 · G6, steps 4b / 4c) what a callee run as its write closure (effects only) leaves unproven — said on
+#   the record with the callees' names (``callee_termination_assumed`` · ``callee_ub_unanalysed``). (R95 review I4) the
+#   names are those of the calls run as their write closure from this record's run: an interpreted callee that fails
+#   falls back to its own write closure and its name stands for the effects-only callees its failed run had met (the
+#   record's ``interprocedural.effects_only`` lists the same fallback), so the two fields need not list the same names
+CALLEE_TERMINATION_ASSUMPTION = (
+    "termination of callees run as their write closure (effects only) is assumed, not proven — their text, or a "
+    "function or macro they reach, has a loop, a goto, recursion, a jump, unknown code or a name no file read defines "
+    "(it may be a macro) — one that never returns refuses the run; a value derived here holds for runs where they return")
+CALLEE_UB_ASSUMPTION = (
+    "undefined behaviour inside callees run as their write closure (effects only) is not analysed — their body does not "
+    "run here; a value derived here holds for runs without it")
 STORAGE_VOLATILE_ASSUMPTION = (
     "(R90) a volatile union / bit-field object (a register) is memory in the test harness: it reads what the run "
     "last wrote to it, else what the row sets — hardware does not change it during the run")

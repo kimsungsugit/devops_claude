@@ -29,7 +29,7 @@ from generators import pointer_flow
 from workflow.code_parser.c_parser import _make_parser
 
 # 2: preprocessor events look into parse-recovery containers; file-level `address_taken`; function `idents`.
-SCHEMA_VERSION = 27  # 3: per-file `prototypes`; closure `macros` (tree union)
+SCHEMA_VERSION = 28  # 3: per-file `prototypes`; closure `macros` (tree union)
 # 4 (R2b): global `dims`/`array_init` (arrays, const lookup tables) and function-like macro `params`.
 # 5 (R2b): `build` — toolchain include directories from the build configuration (``.cproject``).
 # 6 (R2b): `roots` — several source roots are separate builds; a shared header name resolves per root.
@@ -85,6 +85,8 @@ SCHEMA_VERSION = 27  # 3: per-file `prototypes`; closure `macros` (tree union)
 #    (re-review W-N2) and per file `storage_order_pragmas` — a record without it lays no storage object out.
 # 27 (R90 re-review 3 I-R3-3): 26 as R90 left it after its second review (`storage_order_pragmas` on every file record) —
 #    a 26 cached by an earlier R90 build may lack it. Paired with v57.
+# 28 (callee contract G5): per-function `termination` (`_termination_fact`) and the closure's verdict over it — a 27
+#    cached context lacks both and would call every write-closure callee's return "assumed". Paired with v58.
 _ARRAY_INIT_BUDGET = 20000
 #: (R67 review I-1) element values a const table may hold in the scope — a designator index or a declared length past it
 #   (``{ [2000000] = 1U }``) is no lookup table; its values stay unread
@@ -1768,7 +1770,102 @@ def _function_effects(fn, raw):
     return {"writes": sorted(writes - shadow), "address_taken": sorted(taken - shadow), "calls": sorted(calls),
             "pointer_write": pointer_write, "idents": sorted(idents - every_local - calls),
             "call_args": {k: sorted(v - shadow) for k, v in call_args.items() if v - shadow},
-            "return_type": return_type, "paren_calls": sorted(paren_calls)}
+            "return_type": return_type, "paren_calls": sorted(paren_calls),
+            "termination": _termination_fact(body, raw),
+            # (R95 review W3) a lone name as a statement (``DI;`` · ``SCI0SR1;`` · ``LEAVE;``) — the closure judges
+            #   whether it may be a macro no file the context read defines (`_closure_termination`)
+            "lone_names": sorted(_lone_names(body, raw) - every_local)}
+
+
+def _lone_names(body, raw) -> set[str]:
+    """Names that stand alone as a statement (``NAME;``) anywhere in ``body`` — an object-like macro, a register read for
+    its side effect, or a name a missing include may define."""
+    out: set[str] = set()
+    stack = [body] if body is not None else []
+    while stack:
+        n = stack.pop()
+        stack.extend(n.named_children)
+        if n.type == "expression_statement" and n.named_child_count == 1 and n.named_children[0].type == "identifier":
+            out.add(_text(n.named_children[0], raw))
+    return out
+
+
+# (callee contract G5) calls that leave a function other than by returning to its caller — or set up such a leave
+_JUMP_CALLS = frozenset({"longjmp", "_longjmp", "siglongjmp", "setjmp", "_setjmp", "sigsetjmp", "exit", "_Exit",
+                         "abort"})
+_LOOP_TYPES = frozenset({"for_statement", "while_statement", "do_statement"})
+
+
+def _literal_condition(node, raw) -> int | None:
+    """The value of a loop's controlling expression when it is absent (1) or an integer literal in parentheses, else
+    None — no macro or constant is read here (they are the unit's; `c_source_oracle._constant_condition` reads them)."""
+    if node is None:
+        return 1
+    while node is not None and node.type in ("parenthesized_expression", "condition_clause") and node.named_children:
+        node = node.named_children[-1] if node.type == "condition_clause" else node.named_children[0]
+    if node is None or node.type != "number_literal":
+        return None
+    try:
+        return int(re.sub(r"[uUlL]+$", "", _text(node, raw)), 0)
+    except ValueError:
+        return None
+
+
+def _termination_fact(body, raw) -> str:
+    """(callee contract G5) What a function's own text says about returning to its caller — read when the function's
+    effects are (`function_write_closure` adds what it reaches):
+
+    * ``never``: a statement of the body itself is a loop whose condition is absent or a nonzero literal with no
+      ``break`` of its own, and the body holds no ``return``, no ``goto`` and no call that jumps or ends the program —
+      every run that enters the function stays in that loop (`c_source_oracle._endless`'s rule, literal conditions only);
+    * ``straight``: no loop that may iterate (a literal ``0`` condition never repeats), no ``goto``, no such call —
+      every path ends, if what it calls and the macros it expands do;
+    * ``loops``: anything else.
+
+    What the text alone cannot settle — a name that may be a macro no file the context read defines (a call ``LEAVE_IF(k)``
+    or a lone ``LEAVE;``) — is the closure's to judge (`_closure_termination`), where the macro table is.
+
+    (R95 review W1) a ``goto`` is a way out — it may leave the loop or skip it (the interpreted path's `_endless` reads it
+    so); counting it only as a loop called ``for (;;) { if (k) { goto out; } } out: ;`` never-returning and refused rows
+    HEAD derived."""
+    if body is None:
+        return "loops"
+    loops = returns = jumps = False
+    stack = [body]
+    while stack:
+        n = stack.pop()
+        stack.extend(n.named_children)
+        if n.type in _LOOP_TYPES:
+            if _literal_condition(n.child_by_field_name("condition"), raw) != 0:
+                loops = True
+        elif n.type == "goto_statement":
+            loops = jumps = True
+        elif n.type == "labeled_statement":
+            loops = True
+        elif n.type == "return_statement":
+            returns = True
+        elif n.type == "call_expression":
+            f = n.child_by_field_name("function")
+            if f is not None and f.type == "identifier" and _text(f, raw) in _JUMP_CALLS:
+                jumps = True
+    if not loops and not jumps:
+        return "straight"
+    if returns or jumps:
+        return "loops"
+    for s in body.named_children:
+        if s.type not in _LOOP_TYPES or not _literal_condition(s.child_by_field_name("condition"), raw):
+            continue
+        inner = [(c, False) for c in (s.child_by_field_name("body"),) if c is not None]
+        way_out = False
+        while inner and not way_out:
+            x, nested = inner.pop()
+            if x.type == "break_statement" and not nested:
+                way_out = True
+            nested_here = nested or x.type in _LOOP_TYPES or x.type == "switch_statement"
+            inner.extend((c, nested_here) for c in x.named_children)
+        if not way_out:
+            return "never"
+    return "loops"
 
 
 def _paren_callee(n, raw) -> str:
@@ -4747,6 +4844,54 @@ def designator_gap(context: dict[str, Any] | None) -> str:
     return ""
 
 
+# (callee contract G5) in a macro's text: a loop that may repeat (``while (0)`` never does — ``do { … } while (0)``), a
+#   jump, a call that leaves the function otherwise — and what leaves an endless loop or the function
+_ZERO_WHILE = re.compile(r"\bwhile\s*\(\s*(?:\(\s*)*0[uUlL]*\s*(?:\)\s*)*\)")
+_MACRO_LOOP = re.compile(r"\b(?:for|while|goto|" + "|".join(sorted(_JUMP_CALLS)) + r")\b")
+_MACRO_WAY_OUT = re.compile(r"\b(?:return|goto|break|longjmp|_longjmp|siglongjmp|exit|_Exit|abort)\b")
+
+
+def _closure_termination(name, seen, direct, macro_fx, macro_text, closure, declared=frozenset()) -> str:
+    """(callee contract G5) Whether a call to ``name`` returns, from the text alone:
+
+    * ``never`` — every definition never returns (`_termination_fact`), no macro it reaches could leave the loop or the
+      function (`_MACRO_WAY_OUT`, or a macro whose text is hidden), and nothing its own body names may be a macro no file
+      the context read defines (a call or a lone ``NAME;`` that is no function, macro, object or declared prototype —
+      ``LEAVE_IF(k)`` under a missing include). A macro the context read is judged by its text; a function, a
+      prototype-only function or a call through a pointer cannot leave the caller's loop (a ``longjmp`` aside, as the
+      interpreted path's `_endless` — R95 review I1 · W3: ``DI; for (;;) {}`` · ``for (;;) { wdt_kick(); }`` never return);
+    * ``returns`` — it and every function it reaches is ``straight``, none reaches itself, no unknown code, no name that
+      may be such a macro, no macro that loops or jumps or hides its text;
+    * ``may_not`` — otherwise; ``""`` — a definition read before the fact (unknown).
+
+    ``declared``: the prototypes and objects of the context."""
+    facts = direct[name]["terminations"]
+    macros = [m for m in seen if m in macro_fx]
+    texts = [t for m in macros for t in macro_text.get(m, ())]
+    if None in facts:
+        return ""
+
+    def undefined(f):
+        d = direct[f]
+        return any(c != "<indirect>" and c not in direct and c not in macro_fx and c not in declared
+                   for c in d["calls"] | d["lone_names"])
+
+    if facts == {"never"}:
+        leaves = any(_MACRO_WAY_OUT.search(t) for t in texts) or undefined(name) \
+            or any(macro_fx[m]["opaque"] for m in macros)
+        return "may_not" if leaves else "never"
+    functions = [f for f in seen if f in direct]
+    if any(None in direct[f]["terminations"] for f in functions):
+        return ""
+    if any(direct[f]["terminations"] != {"straight"} for f in functions) or closure[name]["unknown_callees"] \
+            or any(undefined(f) for f in functions) \
+            or any(f in (closure.get(f) or {}).get("reaches", ()) for f in functions) \
+            or any(macro_fx[m]["opaque"] for m in macros) \
+            or any(_MACRO_LOOP.search(_ZERO_WHILE.sub(" ", t)) for t in texts):
+        return "may_not"
+    return "returns"
+
+
 def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
     """Per function name: globals it may write (directly or through callees), whether it calls unknown code,
     and the project-wide address-taken set. Same-named static functions in different files are merged
@@ -4782,9 +4927,12 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                 fx["conditional_ops"] = fx["conditional_ops"] or bool(re.search(r"&&|\|\||\?", body))
         for name, defs in rec["functions"].items():
             entry = direct.setdefault(name, {"writes": set(), "calls": set(), "idents": set(), "pointer_write": False,
-                                             "return_types": set(), "paren_calls": set()})
+                                             "return_types": set(), "paren_calls": set(), "terminations": set(),
+                                             "lone_names": set()})
             for d in defs:
                 entry["return_types"].add(d.get("return_type") or "")
+                entry["terminations"].add(d.get("termination"))   # None: a context read before the fact (G5)
+                entry["lone_names"].update(d.get("lone_names") or ())
                 entry["writes"].update(d["writes"])
                 entry["calls"].update(d["calls"])
                 entry["paren_calls"].update(d.get("paren_calls") or ())
@@ -4927,7 +5075,13 @@ def function_write_closure(context: dict[str, Any]) -> dict[str, Any]:
                          "reads": frozenset(reads), "reads_complete": reads_complete,
                          "reaches": (seen - {name}) | ({name} if recursive else set()),
                          # (R14) one declared type when every definition says the same; "" when they differ / unknown
-                         "return_type": next(iter(rtypes)) if len(rtypes) == 1 else ""}
+                         "return_type": next(iter(rtypes)) if len(rtypes) == 1 else "",
+                         "_seen": seen}
+    # (callee contract G5) whether a call returns, from the text of the function and of what it reaches — after every
+    #   closure is known (a function it reaches may be recursive through others)
+    for name, entry in closure.items():
+        entry["termination"] = _closure_termination(name, entry.pop("_seen"), direct, macro_fx, macro_text, closure,
+                                                    frozenset(prototypes | objects))
     # ``&g`` inside a macro body (``#define CFG_PTR (&g_cfg)``) takes g's address wherever the macro is used — the
     # function scan only sees ``CFG_PTR`` (R2b review C6).
     for rec in (context.get("files") or {}).values():

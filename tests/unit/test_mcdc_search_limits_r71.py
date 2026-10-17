@@ -165,6 +165,18 @@ def test_a_refusal_the_values_steer_still_has_a_value_limit():
     assert d["status"] != "designed" and set(_kinds(d)) & {"sampled_values", "path_samples_capped"}
 
 
+def test_a_never_returning_callee_the_values_steer_into_still_has_a_value_limit():
+    # (R95 review I3) every sample calls ``halt`` (a / 20 is never 3 for 0 · 1 · 255 · the constants ±1) — an effects-only
+    #   callee whose text never returns refuses those runs (callee contract G5), yet a = 60 would not call it: the
+    #   samples are why, so the value limit is written as for undefined behaviour
+    text = H + ("U8 g_o;\nvoid halt(void) { for (;;) {} }\n"
+                "void u(U8 a, U8 b) { U8 t = a; if ((U8)(a / 20U) != 3U) { halt(); } "
+                "if ((t > 30U) && (b == 1U)) { g_o = 1U; } }\n")
+    d = build_mcdc_design(_unit(text, "u", ["a", "b"]))["decisions"][-1]
+    assert set(d["path_search"]["observations"]) == {"unsupported:non_terminating_loop"}
+    assert d["path_search"]["values_sampled"] is True and set(_kinds(d)) & {"sampled_values", "path_samples_capped"}
+
+
 def test_no_value_limit_where_every_run_is_the_same_model_refusal():
     # (review W4) a ``goto`` the model does not run: every vector gives ``unsupported:goto_unmodeled`` — more or other
     #   values would not change that, so no value limit is written (the value lists were cut: 22 candidates each)

@@ -1228,6 +1228,28 @@ def _register_storage_note(counts: Dict[str, Any], clang_script: str) -> str:
     return out + (" (위 칸 수는 행 단위로 센 상한.)" if out else "")
 
 
+def _callee_contract_note(counts: Dict[str, Any]) -> str:
+    """(callee contract G5 · G6) 피호출 함수를 본문 대신 쓰기 closure(효과만)로 본 행의 도출 칸 — 그 함수가 돌아온다고 가정한
+    칸 · 그 함수 안의 미정의 동작을 분석하지 않은 칸. 함수 이름은 'Test Evidence' 시트의 가정 열에 있다."""
+    termination = _int(counts, "derived_on_assumed_callee_termination")
+    unanalysed = _int(counts, "derived_with_callee_ub_unanalysed")
+    out = ""
+    if termination:
+        out += (f" {termination}칸은 프로젝트에 정의가 있어 본문 대신 쓰기 closure 로 본 피호출 함수가 돌아온다고 가정한 행의 "
+                "값이다 — 그 함수 텍스트(또는 거기서 닿는 함수 · 매크로)의 루프 · goto · 재귀 · 점프 · 모르는 코드 · 읽은 파일 어디에도 "
+                "정의가 없어 매크로일 수 있는 이름 때문에 종료가 증명되지 않는다(끝나지 않음이 증명된 함수는 그 행을 거부한다).")
+    if unanalysed:
+        out += (f" {unanalysed}칸은 프로젝트에 정의가 있어 본문 대신 쓰기 closure 로 본 피호출 함수 안의 미정의 동작을 분석하지 "
+                "않은 행의 값이다 — 그 함수에 미정의 동작이 없는 실행에서 성립한다.")
+    # (R95 review W2 · I-r3-1) 이름을 붙이는 범위 — 정의가 없는 코드(프로토타입만 · 함수 포인터)는 여기 세지 않는다
+    if termination:
+        out += (" 정의가 없는 코드(프로토타입만 있는 함수 · 함수 포인터)의 종료는 이름 없이 모든 행의 일반 가정(피호출 함수의 도달 · "
+                "종료는 증명하지 않음)에 들며 위 수에 들지 않는다.")
+    if unanalysed:
+        out += " 정의가 없는 코드 안의 미정의 동작은 본문이 없어 분석 대상 밖이며 위 수에 들지 않는다."
+    return out + (" (위 칸 수는 행 단위로 센 상한.)" if out else "")
+
+
 # ── SUTS ───────────────────────────────────────────────────────────────────
 def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
@@ -1264,7 +1286,7 @@ def _suts_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
             + (f" {_int(ev, 'derived_on_observed_only_pointee')}칸은 행이 포인터 매개변수의 대상에 값을 주지 않고 관측만 하는 "
                "행의 값이다 — 시험 하네스가 그 대상을 할당해야 성립한다(행 단위로 센 상한, '포인터 매개변수 표기')."
                if _int(ev, "derived_on_observed_only_pointee") else "")
-            + _register_storage_note(ev, "scripts/source_oracle_clang_check.py")))
+            + _register_storage_note(ev, "scripts/source_oracle_clang_check.py") + _callee_contract_note(ev)))
 
     # (R10) 소스 소견 — 기대값을 내다가 증명한 미정의 동작. 결함 **후보**다(입력이 호출 측에서 가능한지는 사람 판단).
     sf = qr.get("source_findings")
@@ -2159,7 +2181,7 @@ def _sits_items(qr: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "독립 경로(clang 등)로 대조하지 않았다 — scripts/integration_oracle_clang_check.py 가 생성본을 따로 잰다. "
                 f"도출 칸 중 흐름이 쓴 값 {_show(_int(io, 'derived_assigned'))} · 입력을 그대로 둔 값 "
                 f"{_show(_int(io, 'derived_unchanged_input'))}."
-                + _register_storage_note(io, "scripts/integration_oracle_clang_check.py")
+                + _register_storage_note(io, "scripts/integration_oracle_clang_check.py") + _callee_contract_note(io)
                 + (" 도출 못 한 칸의 사유(상위): " + ", ".join(f"{k} {v}" for k, v in list(reasons.items())[:6])
                    + (f" 외 {int(io['unknown_reason_kinds']) - 6}종" if int(io.get("unknown_reason_kinds") or 0) > 6 else "")
                    + "." if reasons else "")

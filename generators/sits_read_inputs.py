@@ -45,7 +45,10 @@ RECORD_KEY = "hidden_io_columns"
 _DERIVATION_COUNTERS: Tuple[Tuple[str, str], ...] = (
     ("polling_loops_assumed", "derived_on_assumed_polling_exit"),
     ("storage_objects", "derived_on_storage_model"),
-    ("storage_registers", "derived_on_register_memory"))
+    ("storage_registers", "derived_on_register_memory"),
+    # (callee contract G5 / G6)
+    ("callee_termination_assumed", "derived_on_assumed_callee_termination"),
+    ("callee_ub_unanalysed", "derived_with_callee_ub_unanalysed"))
 
 
 def _caps(input_cap: Optional[int], expected_cap: Optional[int]) -> Tuple[int, int]:
